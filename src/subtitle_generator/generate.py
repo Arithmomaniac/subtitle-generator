@@ -6,22 +6,21 @@ import sqlite3
 import click
 
 
-def generate_subtitle(conn: sqlite3.Connection, seed: int | None = None) -> str:
+def generate_subtitle(conn: sqlite3.Connection, seed: int | None = None, mode: str = "strict") -> str:
     """Generate one random subtitle in the 'X, Y, and the Z of W' pattern."""
     if seed is not None:
         random.seed(seed)
 
-    # Pick two random list items
+    mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
+
     list_items = conn.execute(
-        "SELECT filler FROM slot_fillers WHERE slot_type = 'list_item' ORDER BY RANDOM() LIMIT 2"
+        f"SELECT filler FROM slot_fillers WHERE slot_type = 'list_item' {mode_filter} ORDER BY RANDOM() LIMIT 2"
     ).fetchall()
-    # Pick one action noun
     action = conn.execute(
-        "SELECT filler FROM slot_fillers WHERE slot_type = 'action_noun' ORDER BY RANDOM() LIMIT 1"
+        f"SELECT filler FROM slot_fillers WHERE slot_type = 'action_noun' {mode_filter} ORDER BY RANDOM() LIMIT 1"
     ).fetchone()
-    # Pick one of-object
     obj = conn.execute(
-        "SELECT filler FROM slot_fillers WHERE slot_type = 'of_object' ORDER BY RANDOM() LIMIT 1"
+        f"SELECT filler FROM slot_fillers WHERE slot_type = 'of_object' {mode_filter} ORDER BY RANDOM() LIMIT 1"
     ).fetchone()
 
     if len(list_items) < 2 or not action or not obj:
@@ -35,9 +34,10 @@ def generate_subtitle(conn: sqlite3.Connection, seed: int | None = None) -> str:
     return f"{item1}, {item2}, and the {action_noun} of {of_object}"
 
 
-def slot_stats(conn: sqlite3.Connection) -> dict:
-    """Get counts per slot type."""
+def slot_stats(conn: sqlite3.Connection, mode: str = "strict") -> dict:
+    """Get counts per slot type for a given mode."""
+    mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
     rows = conn.execute(
-        "SELECT slot_type, COUNT(*) FROM slot_fillers GROUP BY slot_type"
+        f"SELECT slot_type, COUNT(*) FROM slot_fillers WHERE 1=1 {mode_filter} GROUP BY slot_type"
     ).fetchall()
     return dict(rows)

@@ -147,11 +147,13 @@ def ensure_slot_tables(conn: sqlite3.Connection):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             slot_type TEXT NOT NULL,
             filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
             source_subtitle_id INTEGER,
             UNIQUE(slot_type, filler)
         )
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()
 
 
@@ -217,13 +219,13 @@ def build_slots(conn: sqlite3.Connection):
     click.echo(f"Clean matches (NLP-validated): {clean_matches:,}")
 
     filler_rows = (
-        [("list_item", x, None) for x in list_items_seen]
-        + [("action_noun", x, None) for x in action_nouns_seen]
-        + [("of_object", x, None) for x in of_objects_seen]
+        [("list_item", x, "strict", None) for x in list_items_seen]
+        + [("action_noun", x, "strict", None) for x in action_nouns_seen]
+        + [("of_object", x, "strict", None) for x in of_objects_seen]
     )
     conn.executemany(
-        "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, source_subtitle_id) "
-        "VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id) "
+        "VALUES (?, ?, ?, ?)",
         filler_rows,
     )
     conn.commit()
@@ -234,4 +236,115 @@ def build_slots(conn: sqlite3.Connection):
         ).fetchone()[0]
         click.echo(f"  {slot_type}: {count:,} unique fillers")
 
-    click.echo("Slot extraction complete!")
+    click.echo("Strict slot extraction complete!")
+
+
+# Boilerplate words to reject in loose mode
+_BOILERPLATE = {
+    "study", "introduction", "survey", "review", "report", "analysis",
+    "proceedings", "bibliography", "handbook", "manual", "guide",
+    "volume", "edition", "series", "supplement", "appendix", "index",
+    "catalog", "catalogue", "directory", "register", "yearbook",
+    "dissertation", "thesis", "monograph",
+}
+
+
+def _mine_the_x_of_y(conn: sqlite3.Connection, nlp) -> tuple[set, set]:
+    """Mine 'the X of Y' from ALL subtitles for action nouns and of-objects."""
+    the_x_of_y_re = re.compile(
+        r"the\s+(.{2,30}?)\s+of\s+(.{2,60}?)(?:\s*[,:;.]|$)", re.IGNORECASE,
+    )
+    rows = conn.execute("SELECT id, subtitle FROM subtitles").fetchall()
+
+    action_nouns = set()
+    of_objects = set()
+
+    for sid, subtitle in rows:
+        for m in the_x_of_y_re.finditer(subtitle):
+            action = m.group(1).strip()
+            obj = re.sub(r"[\s]*[/:;,.]\s*$", "", m.group(2)).strip()
+
+            if action.lower() in _BOILERPLATE:
+                continue
+            if _is_valid_action(action, nlp) and len(action.split()) <= 3:
+                action_nouns.add(action)
+            if _is_valid_object(obj, nlp):
+                of_objects.add(obj)
+
+    return action_nouns, of_objects
+
+
+def _mine_comma_lists(conn: sqlite3.Connection, nlp) -> set:
+    """Mine list items from 'X, Y, and Z' subtitles."""
+    rows = conn.execute(
+        "SELECT subtitle FROM subtitles WHERE subtitle LIKE '%, %, and %'"
+    ).fetchall()
+
+    list_re = re.compile(r"^(.+),\s+and\s+", re.IGNORECASE)
+    items = set()
+
+    for (subtitle,) in rows:
+        m = list_re.match(subtitle)
+        if not m:
+            continue
+        list_part = m.group(1)
+        for piece in list_part.split(","):
+            cleaned = re.sub(r"[\s]*[/:;,.]\s*$", "", piece).strip()
+            if cleaned and cleaned.lower() not in _BOILERPLATE:
+                if _is_valid_list_item(cleaned, nlp):
+                    items.add(cleaned)
+
+    return items
+
+
+def build_loose_slots(conn: sqlite3.Connection):
+    """Expand slots by mining the full 2.4M subtitle corpus."""
+    ensure_slot_tables(conn)
+
+    # Remove old loose fillers only
+    conn.execute("DELETE FROM slot_fillers WHERE mode = 'loose'")
+    conn.commit()
+
+    click.echo("Loading spaCy model...")
+    nlp = _load_nlp()
+
+    click.echo("Mining 'the X of Y' from all subtitles (action nouns + of-objects)...")
+    action_nouns, of_objects = _mine_the_x_of_y(conn, nlp)
+    click.echo(f"  Found {len(action_nouns):,} action nouns, {len(of_objects):,} of-objects")
+
+    click.echo("Mining comma-list subtitles (list items)...")
+    list_items = _mine_comma_lists(conn, nlp)
+    click.echo(f"  Found {len(list_items):,} list items")
+
+    # Exclude items already in strict set
+    existing = set(
+        r[0] for r in conn.execute("SELECT filler FROM slot_fillers WHERE mode = 'strict'")
+    )
+    action_nouns -= existing
+    of_objects -= existing
+    list_items -= existing
+
+    filler_rows = (
+        [("list_item", x, "loose", None) for x in list_items]
+        + [("action_noun", x, "loose", None) for x in action_nouns]
+        + [("of_object", x, "loose", None) for x in of_objects]
+    )
+    conn.executemany(
+        "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id) "
+        "VALUES (?, ?, ?, ?)",
+        filler_rows,
+    )
+    conn.commit()
+
+    for slot_type in ["list_item", "action_noun", "of_object"]:
+        strict = conn.execute(
+            "SELECT COUNT(*) FROM slot_fillers WHERE slot_type = ? AND mode = 'strict'",
+            (slot_type,),
+        ).fetchone()[0]
+        loose = conn.execute(
+            "SELECT COUNT(*) FROM slot_fillers WHERE slot_type = ? AND mode = 'loose'",
+            (slot_type,),
+        ).fetchone()[0]
+        click.echo(f"  {slot_type}: {strict:,} strict + {loose:,} loose = {strict + loose:,} total")
+
+    click.echo("Loose slot expansion complete!")
