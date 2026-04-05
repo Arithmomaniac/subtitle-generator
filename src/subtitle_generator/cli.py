@@ -9,6 +9,7 @@ from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
 from subtitle_generator.generate import generate_subtitle, slot_stats
 from subtitle_generator.slots import build_loose_slots, build_slots
+from subtitle_generator.tune import run_autoresearch
 
 
 @click.group()
@@ -165,6 +166,16 @@ def slots(slot_type: str | None, sample: int):
         click.echo(f"\n{st} ({total:,} total):")
         for (f,) in rows:
             click.echo(f"  {f}")
+    conn.close()
+
+
+@cli.command()
+@click.option("--iterations", "-i", default=10, help="Max tuning iterations.")
+@click.option("--batch-size", "-b", default=50, help="Subtitles per iteration.")
+def tune(iterations: int, batch_size: int):
+    """Run autoresearch loop to improve loose mode quality (LLM-graded)."""
+    conn = get_db()
+    run_autoresearch(conn, max_iterations=iterations, batch_size=batch_size)
     conn.close()
 
 
