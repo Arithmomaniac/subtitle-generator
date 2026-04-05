@@ -7,6 +7,8 @@ import click
 from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
+from subtitle_generator.generate import generate_subtitle, slot_stats
+from subtitle_generator.slots import build_slots
 
 
 @click.group()
@@ -106,6 +108,58 @@ def patterns(top: int, min_count: int):
         click.echo(f"{i:3d}. [{count:,}x] {template}")
         click.echo(f"     e.g. \"{example}\"")
         click.echo()
+    conn.close()
+
+
+@cli.command("build-slots")
+def build_slots_cmd():
+    """Extract slot fillers from matched subtitles (regex-based)."""
+    conn = get_db()
+    build_slots(conn)
+    conn.close()
+
+
+@cli.command()
+@click.option("--count", "-n", default=10, help="Number of subtitles to generate.")
+@click.option("--seed", default=None, type=int, help="Random seed for reproducibility.")
+def generate(count: int, seed: int | None):
+    """Generate bizarre subtitles — slot machine style!"""
+    conn = get_db()
+    stats = slot_stats(conn)
+    if not stats:
+        click.echo("No slots found. Run 'build-slots' first.")
+        return
+    click.echo(f"Slot machine loaded: {stats}\n")
+    for i in range(count):
+        s = seed + i if seed is not None else None
+        subtitle = generate_subtitle(conn, seed=s)
+        click.echo(f"  {i + 1:2d}. {subtitle}")
+    conn.close()
+
+
+@cli.command()
+@click.option("--slot-type", default=None, help="Filter by slot type.")
+@click.option("--sample", default=20, help="Number of fillers to show per type.")
+def slots(slot_type: str | None, sample: int):
+    """Show available slot fillers."""
+    conn = get_db()
+    if slot_type:
+        types = [slot_type]
+    else:
+        types = [r[0] for r in conn.execute(
+            "SELECT DISTINCT slot_type FROM slot_fillers"
+        ).fetchall()]
+    for st in types:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM slot_fillers WHERE slot_type = ?", (st,)
+        ).fetchone()[0]
+        rows = conn.execute(
+            "SELECT filler FROM slot_fillers WHERE slot_type = ? ORDER BY RANDOM() LIMIT ?",
+            (st, sample),
+        ).fetchall()
+        click.echo(f"\n{st} ({total:,} total):")
+        for (f,) in rows:
+            click.echo(f"  {f}")
     conn.close()
 
 
