@@ -1,0 +1,21 @@
+[project]
+name = "subtitle-generator"
+version = "0.1.0"
+description = "Generate bizarre book subtitles by mixing real parts from Library of Congress MARC records"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "click>=8.3.2",
+    "pymarc>=5.3.1",
+    "spacy>=3.8.14",
+]
+
+[project.scripts]
+subtitle-gen = "subtitle_generator.cli:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/subtitle_generator"]
