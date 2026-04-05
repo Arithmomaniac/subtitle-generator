@@ -4,6 +4,7 @@ from pathlib import Path
 
 import click
 
+from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
 
@@ -73,6 +74,38 @@ def extract(parts: str | None, all_langs: bool):
 
     click.echo(f"\nTotal: {total_records:,} records → {total_subtitles:,} subtitles")
     click.echo(f"Database: {DB_PATH}")
+    conn.close()
+
+
+@cli.command()
+@click.option("--limit", default=None, type=int, help="Max subtitles to analyze.")
+def analyze(limit: int | None):
+    """POS-tag subtitles and extract structural templates."""
+    conn = get_db()
+    analyze_subtitles(conn, limit=limit)
+    build_pattern_index(conn)
+    conn.close()
+
+
+@cli.command()
+@click.option("--top", default=50, help="Show top N patterns.")
+@click.option("--min-count", default=10, help="Minimum occurrence count.")
+def patterns(top: int, min_count: int):
+    """Show discovered subtitle patterns ranked by frequency."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT template, count, example_subtitle FROM patterns "
+        "WHERE count >= ? ORDER BY count DESC LIMIT ?",
+        (min_count, top),
+    ).fetchall()
+    if not rows:
+        click.echo("No patterns found. Run 'analyze' first.")
+        return
+    click.echo(f"Top {len(rows)} patterns (min count: {min_count}):\n")
+    for i, (template, count, example) in enumerate(rows, 1):
+        click.echo(f"{i:3d}. [{count:,}x] {template}")
+        click.echo(f"     e.g. \"{example}\"")
+        click.echo()
     conn.close()
 
 
