@@ -163,6 +163,43 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 
 
 @cli.command()
+@click.argument("subtitle", required=False, default=None)
+@click.option("--loose", is_flag=True, help="Use expanded slot fillers (only for random generation).")
+@click.option("--seed", default=None, type=int, help="Random seed (only for random generation).")
+@click.option("--sources", is_flag=True, help="Show source books for each slot filler (only for random generation).")
+def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool):
+    """Generate a full book jacket — title, back cover, reviews, and blurbs.
+
+    Pass a subtitle string to jacket a specific text, or omit to generate a random one.
+
+    \b
+    Examples:
+      subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
+      subtitle-gen jacket                    # random subtitle
+      subtitle-gen jacket --loose --sources  # random from loose pool + show sources
+    """
+    if subtitle:
+        click.echo(f"Generating jacket for: {subtitle}\n")
+        md = generate_jacket(subtitle)
+        click.echo(md)
+    else:
+        conn = get_db()
+        mode = "loose" if loose else "strict"
+        stats = slot_stats(conn, mode=mode)
+        if not stats:
+            click.echo("No slots found. Run 'build-slots' first.")
+            return
+        click.echo(f"Slot machine loaded ({mode} mode): {stats}\n")
+        sub = generate_subtitle(conn, seed=seed, mode=mode)
+        click.echo(f"Generating jacket for: {sub.text}\n")
+        md = generate_jacket(sub.text)
+        click.echo(md)
+        if sources:
+            click.echo(format_sources(conn, sub))
+        conn.close()
+
+
+@cli.command()
 @click.option("--slot-type", default=None, help="Filter by slot type.")
 @click.option("--sample", default=20, help="Number of fillers to show per type.")
 def slots(slot_type: str | None, sample: int):
