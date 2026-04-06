@@ -250,7 +250,9 @@ _BOILERPLATE = {
 
 
 def _mine_the_x_of_y(conn: sqlite3.Connection, nlp) -> tuple[set, set]:
-    """Mine 'the X of Y' from ALL subtitles for action nouns and of-objects."""
+    """Mine 'the X of Y' from ALL subtitles for action nouns and of-objects.
+    Uses cheap heuristics only — no per-item nlp() calls. Tune pass cleans up later.
+    """
     the_x_of_y_re = re.compile(
         r"the\s+(.{2,30}?)\s+of\s+(.{2,60}?)(?:\s*[,:;.]|$)", re.IGNORECASE,
     )
@@ -259,23 +261,37 @@ def _mine_the_x_of_y(conn: sqlite3.Connection, nlp) -> tuple[set, set]:
     action_nouns = set()
     of_objects = set()
 
-    for sid, subtitle in rows:
+    for i, (sid, subtitle) in enumerate(rows):
         for m in the_x_of_y_re.finditer(subtitle):
             action = m.group(1).strip()
             obj = re.sub(r"[\s]*[/:;,.]\s*$", "", m.group(2)).strip()
 
+            # Cheap action noun filter: suffix/whitelist + length + boilerplate
             if action.lower() in _BOILERPLATE:
                 continue
-            if _is_valid_action(action, nlp) and len(action.split()) <= 3:
+            action_words = action.split()
+            if len(action_words) > 3:
+                continue
+            head = action_words[-1].lower()
+            if head in ACTION_WHITELIST or any(head.endswith(s) for s in ACTION_SUFFIXES):
                 action_nouns.add(action)
-            if _is_valid_object(obj, nlp):
-                of_objects.add(obj)
+
+            # Cheap of-object filter: length + has alpha + no dates
+            obj_words = obj.split()
+            if 1 <= len(obj_words) <= 6 and len(obj) >= 2:
+                if not re.search(r"\d{4}", obj):
+                    of_objects.add(obj)
+
+        if (i + 1) % 500_000 == 0:
+            click.echo(f"  ...scanned {i + 1:,} / {len(rows):,}")
 
     return action_nouns, of_objects
 
 
 def _mine_comma_lists(conn: sqlite3.Connection, nlp) -> set:
-    """Mine list items from 'X, Y, and Z' subtitles."""
+    """Mine list items from 'X, Y, and Z' subtitles.
+    Uses cheap heuristics only — tune pass cleans up later.
+    """
     rows = conn.execute(
         "SELECT subtitle FROM subtitles WHERE subtitle LIKE '%, %, and %'"
     ).fetchall()
@@ -290,9 +306,19 @@ def _mine_comma_lists(conn: sqlite3.Connection, nlp) -> set:
         list_part = m.group(1)
         for piece in list_part.split(","):
             cleaned = re.sub(r"[\s]*[/:;,.]\s*$", "", piece).strip()
-            if cleaned and cleaned.lower() not in _BOILERPLATE:
-                if _is_valid_list_item(cleaned, nlp):
-                    items.add(cleaned)
+            if not cleaned or cleaned.lower() in _BOILERPLATE:
+                continue
+            words = cleaned.split()
+            # Cheap filter: 1-3 words, no leading prepositions, no dates
+            if not (1 <= len(words) <= 3):
+                continue
+            first = words[0].lower()
+            if first in ("of", "in", "on", "for", "with", "from", "to", "and",
+                          "or", "by", "at", "as", "including", "containing"):
+                continue
+            if re.search(r"\d{4}", cleaned):
+                continue
+            items.add(cleaned)
 
     return items
 

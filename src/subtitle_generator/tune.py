@@ -31,19 +31,19 @@ def _rule_prune(conn: sqlite3.Connection, nlp):
             (slot_type,),
         ).fetchall()
 
+        ids = [r[0] for r in rows]
+        fillers = [r[1] for r in rows]
         cut_ids = []
-        for fid, filler in rows:
-            if _should_cut_by_rules(filler, slot_type, nlp):
+
+        # Batch parse with nlp.pipe for speed
+        for fid, filler, doc in zip(ids, fillers, nlp.pipe(fillers, batch_size=500)):
+            if _should_cut_by_rules(filler, slot_type, doc):
                 cut_ids.append(fid)
 
-            if len(cut_ids) >= 1000:
-                _batch_delete(conn, cut_ids)
-                total_cut += len(cut_ids)
-                cut_ids = []
-
-        if cut_ids:
-            _batch_delete(conn, cut_ids)
-            total_cut += len(cut_ids)
+        # Batch delete
+        for i in range(0, len(cut_ids), 1000):
+            _batch_delete(conn, cut_ids[i:i + 1000])
+        total_cut += len(cut_ids)
 
         remaining = conn.execute(
             "SELECT COUNT(*) FROM slot_fillers WHERE slot_type = ? AND mode = 'loose'",
@@ -55,8 +55,8 @@ def _rule_prune(conn: sqlite3.Connection, nlp):
     return total_cut
 
 
-def _should_cut_by_rules(filler: str, slot_type: str, nlp) -> bool:
-    """Return True if this filler should be cut based on rules."""
+def _should_cut_by_rules(filler: str, slot_type: str, doc) -> bool:
+    """Return True if this filler should be cut based on rules. `doc` is pre-parsed."""
     import re
 
     # Universal: dates
@@ -75,20 +75,17 @@ def _should_cut_by_rules(filler: str, slot_type: str, nlp) -> bool:
                       "being", "having", "wherein", "whereby", "also",
                       "especially", "particularly", "namely"):
             return True
-        # "the X" where "the" isn't needed — check with spaCy
+        # "the X" where "the" isn't needed
         if first == "the" and len(words) >= 2:
-            doc = nlp(filler)
-            # Keep if NER tags it as an entity (GPE, ORG, EVENT, etc.)
+            # Keep if NER tags it as an entity
             if any(ent.label_ in ("GPE", "ORG", "EVENT", "FAC", "LOC",
                                    "WORK_OF_ART", "LAW") for ent in doc.ents):
                 return False
             # Keep if second word is capitalized (likely proper noun)
             if words[1][0].isupper():
                 return False
-            # Otherwise cut — "the heroes", "the works", etc.
             return True
         # Root is a verb → clause fragment
-        doc = nlp(filler)
         root_pos = [t.pos_ for t in doc if t.dep_ == "ROOT"]
         if root_pos and root_pos[0] == "VERB":
             return True
@@ -100,25 +97,22 @@ def _should_cut_by_rules(filler: str, slot_type: str, nlp) -> bool:
         words = filler.split()
         if len(words) > 2:
             return True
-        doc = nlp(filler)
         # Head word (last token) must be NOUN
         if doc and doc[-1].pos_ not in ("NOUN",):
             return True
-        # Check our suffix/whitelist (import from slots.py)
-        from subtitle_generator.slots import _is_valid_action
-        if not _is_valid_action(filler, nlp):
+        # Check suffix/whitelist
+        from subtitle_generator.slots import ACTION_SUFFIXES, ACTION_WHITELIST
+        head = words[-1].lower()
+        if head not in ACTION_WHITELIST and not any(head.endswith(s) for s in ACTION_SUFFIXES):
             return True
 
     elif slot_type == "of_object":
         words = filler.split()
         if len(words) > 6:
             return True
-        # Fragments: starts with possessive pronoun
         first = words[0].lower() if words else ""
         if first in ("their", "its", "his", "her", "our", "my", "your"):
             return True
-        # Must contain at least one noun/propn
-        doc = nlp(filler)
         if not any(t.pos_ in ("NOUN", "PROPN") for t in doc):
             return True
 
@@ -165,11 +159,19 @@ def _cosine_sim(v1: np.ndarray, v2: np.ndarray) -> float:
     return float(np.dot(v1, v2) / (norm1 * norm2))
 
 
-def _vector_prune(conn: sqlite3.Connection, nlp, percentile_cutoff: float = 15.0):
+def _vector_prune(conn: sqlite3.Connection, nlp,
+                  max_per_slot: dict | None = None):
     """Cut loose fillers whose vectors are far from the strict seed centroid.
     
-    Removes the bottom `percentile_cutoff`% by cosine similarity.
+    Keeps at most `max_per_slot[slot_type]` loose fillers, ranked by similarity.
     """
+    if max_per_slot is None:
+        max_per_slot = {
+            "list_item": 8_000,
+            "action_noun": 2_000,
+            "of_object": 8_000,
+        }
+
     click.echo("\nPass 2: Vector similarity pruning...")
 
     for slot_type in ["list_item", "action_noun", "of_object"]:
@@ -183,24 +185,26 @@ def _vector_prune(conn: sqlite3.Connection, nlp, percentile_cutoff: float = 15.0
             (slot_type,),
         ).fetchall()
 
-        # Score all fillers
+        # Batch vectorize with nlp.pipe() for speed
+        ids = [r[0] for r in rows]
+        fillers = [r[1] for r in rows]
         scored = []
-        for fid, filler in rows:
-            doc = nlp(filler)
+        for doc, fid in zip(nlp.pipe(fillers, batch_size=500), ids):
             if doc.has_vector and doc.vector_norm > 0:
                 sim = _cosine_sim(centroid, doc.vector)
             else:
                 sim = 0.0
-            scored.append((fid, filler, sim))
+            scored.append((fid, "", sim))
 
         if not scored:
             continue
 
-        # Find the cutoff threshold
-        sims = [s[2] for s in scored]
-        threshold = float(np.percentile(sims, percentile_cutoff))
+        # Sort by similarity descending, keep top N
+        scored.sort(key=lambda x: x[2], reverse=True)
+        max_keep = max_per_slot.get(slot_type, 5000)
+        to_cut = scored[max_keep:]  # everything beyond the top N
 
-        cut_ids = [fid for fid, _, sim in scored if sim < threshold]
+        cut_ids = [fid for fid, _, _ in to_cut]
 
         if cut_ids:
             # Delete in batches
@@ -211,8 +215,9 @@ def _vector_prune(conn: sqlite3.Connection, nlp, percentile_cutoff: float = 15.0
             "SELECT COUNT(*) FROM slot_fillers WHERE slot_type = ? AND mode = 'loose'",
             (slot_type,),
         ).fetchone()[0]
-        click.echo(f"  {slot_type}: cut {len(cut_ids):,} (sim < {threshold:.3f}), "
-                    f"{remaining:,} remaining")
+        threshold = scored[min(max_keep, len(scored)) - 1][2] if scored else 0
+        click.echo(f"  {slot_type}: cut {len(cut_ids):,} (kept top {max_keep:,}, "
+                    f"sim threshold ~{threshold:.3f}), {remaining:,} remaining")
 
 
 def run_autoresearch(conn: sqlite3.Connection, **_kwargs):
@@ -226,7 +231,7 @@ def run_autoresearch(conn: sqlite3.Connection, **_kwargs):
     _rule_prune(conn, nlp)
 
     # Pass 2: Vector similarity
-    _vector_prune(conn, nlp, percentile_cutoff=15.0)
+    _vector_prune(conn, nlp)
 
     # Final stats and sample
     click.echo("\n=== Results ===\n")
