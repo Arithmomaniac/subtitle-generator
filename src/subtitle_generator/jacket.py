@@ -43,32 +43,62 @@ Open with a hook question or provocative claim. End with an emotional/intellectu
 Tone: urgent, seductive, intellectually intriguing.
 
 ## Review 1
-Pick the most appropriate trade journal for this book from:
-- **Publishers Weekly** — high-market trade, "timely & commercial" topics
-- **BookLife (by Publishers Weekly)** — indie/niche catch-all
-- **Kirkus Reviews** — literary snob, wants narrative-driven nonfiction
-- **Library Journal** — librarian's choice, utility/reference focused
-- **Choice (ACRL)** — scholarly, academic authority
+Pick the most appropriate trade publication for this book from the roster below. Write
+the review in that publication's AUTHENTIC house style — match their real tone, vocabulary,
+sentence structure, and evaluative habits. Each publication has a distinct editorial voice:
+
+- **Publishers Weekly** — Neutral, polished, incisive. No first person. Crisp active
+  sentences, rarely exceeding 200 words. Balances praise with measured critique. Notes
+  commercial appeal and audience. Light wit permitted, never gushy. Closes with an
+  implied recommendation. Typical phrasing: "a vivid, propulsive account", "the prose
+  occasionally strains", "will appeal to readers of..."
+
+- **Kirkus Reviews** — Direct, authoritative, wry. Can be acerbic. The "literary snob"
+  that values narrative craft above all. Punchy closing verdict sentence. Professional
+  skepticism even when praising. 250-350 words. Typical: "atmospheric and ambitious,
+  but uneven", "a masterful blend of suspense and literary style", "earnest, but
+  ultimately exhausting."
+
+- **Library Journal** — Written FOR librarians making purchase decisions. Practical,
+  utilitarian tone. Ends with a one-line "VERDICT:" that is a direct acquisition
+  recommendation with audience/collection context. Typical: "Highly recommended for
+  public libraries", "A solid choice where demand exists", "Essential for university
+  libraries supporting programs in..."
+
+- **BookLife (by Publishers Weekly)** — Indie/niche specialist. Three paragraphs:
+  summary → critique → audience/comp titles. Ends with a one-sentence "Takeaway:" and
+  letter grades for production elements (Cover, Editing, etc. on A+ to C scale).
+  Warmer and more encouraging than main PW, but still professional.
+
+- **Choice (ACRL)** — Scholarly, concise (190-250 words), aimed at academic librarians.
+  Situates the book within its discipline. Ends with "Summing Up:" followed by a level
+  recommendation and audience (e.g., "Essential. Upper-division undergraduates through
+  faculty."). Diplomatic even when critical. Typical: "fills a significant gap in the
+  literature", "the author makes a significant contribution to..."
 
 Format:
-**[Journal Name]**
-*Verdict: [one-line verdict]*
-[Review paragraph, 100-150 words, in the voice/personality of that journal]
+**[Publication Name]**
+[Full review in their authentic house style, including their specific closing format
+(Verdict/Takeaway/Summing Up as appropriate)]
 
 ## Review 2
-Pick a DIFFERENT journal from the list above. Same format as Review 1.
+Pick a DIFFERENT publication from the roster above. Same approach — write in THEIR
+authentic house style with their specific format conventions.
 
 ## Blurb 1
 Use web_search to find a real person (author, academic, journalist, public intellectual)
-whose expertise aligns with this book's subject matter. They should be someone who would
-plausibly endorse this kind of book. Format:
+whose expertise aligns with this book's subject matter. Then search for examples of their
+actual writing or past blurbs to understand their distinctive voice — their vocabulary,
+sentence rhythm, rhetorical habits, and tone. The blurb should sound like THEM, not like
+generic marketing copy. Format:
 
 **[Full Name]** ([brief credential, e.g. "author of The Looming Tower"])
-> "[A single compelling endorsement sentence in their voice]"
+> "[A single compelling endorsement sentence written in their authentic voice and style]"
 
 ## Blurb 2
 Find a SECOND real person (or a real publication/newspaper that covers this topic).
-Same format. At least one of the two blurbs must be from a real individual person.
+Same approach — web_search for their writing style, then compose the blurb in their voice.
+At least one of the two blurbs must be from a real individual person.
 
 ---
 
