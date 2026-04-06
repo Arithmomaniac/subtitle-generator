@@ -119,7 +119,7 @@ def _validate_jacket(content: str) -> list[str]:
     return missing
 
 
-DEFAULT_MODEL = "gpt-5-mini"
+DEFAULT_MODEL = "gpt-5.4-mini"
 
 
 async def _generate_jacket_async(subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0) -> str:
