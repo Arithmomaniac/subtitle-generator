@@ -82,7 +82,7 @@ Format:
 (Verdict/Takeaway/Summing Up as appropriate)]
 
 ## Review 2
-Pick a DIFFERENT publication from the roster above. Same approach — write in THEIR
+Pick a second- or third-most appropriate publication from the roster above. Same approach — write in THEIR
 authentic house style with their specific format conventions.
 
 ## Blurb 1
@@ -119,12 +119,15 @@ def _validate_jacket(content: str) -> list[str]:
     return missing
 
 
-async def _generate_jacket_async(subtitle: str, timeout: float = 120.0) -> str:
+DEFAULT_MODEL = "gpt-5-mini"
+
+
+async def _generate_jacket_async(subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry."""
     async with CopilotClient() as client:
         async with await client.create_session(
             on_permission_request=PermissionHandler.approve_all,
-            model="gpt-5-mini",
+            model=model,
             infinite_sessions={"enabled": False},
         ) as session:
             prompt = JACKET_PROMPT.format(subtitle=subtitle)
@@ -156,6 +159,6 @@ async def _generate_jacket_async(subtitle: str, timeout: float = 120.0) -> str:
             return "(No valid response after retries)"
 
 
-def generate_jacket(subtitle: str, timeout: float = 120.0) -> str:
+def generate_jacket(subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
-    return asyncio.run(_generate_jacket_async(subtitle, timeout=timeout))
+    return asyncio.run(_generate_jacket_async(subtitle, model=model, timeout=timeout))
