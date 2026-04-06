@@ -1,9 +1,24 @@
 """Generate full book jackets using the Copilot SDK (LLM + web_search)."""
 
 import asyncio
+import re
 
+import click
 from copilot import CopilotClient
 from copilot.session import PermissionHandler
+
+REQUIRED_SECTIONS = [
+    "## Title",
+    "## Subtitle",
+    "## Internal Concept",
+    "## Back Cover",
+    "## Review 1",
+    "## Review 2",
+    "## Blurb 1",
+    "## Blurb 2",
+]
+
+MAX_RETRIES = 2
 
 JACKET_PROMPT = """\
 You are a publishing industry expert. I will give you a randomly generated book subtitle
@@ -63,8 +78,19 @@ The subtitle is:
 """
 
 
+def _validate_jacket(content: str) -> list[str]:
+    """Check that all required sections are present. Returns list of missing section names."""
+    missing = []
+    for section in REQUIRED_SECTIONS:
+        # Case-insensitive header check (model may vary casing)
+        pattern = re.compile(re.escape(section), re.IGNORECASE)
+        if not pattern.search(content):
+            missing.append(section)
+    return missing
+
+
 async def _generate_jacket_async(subtitle: str, timeout: float = 120.0) -> str:
-    """Call the Copilot SDK to generate a full book jacket."""
+    """Call the Copilot SDK to generate a full book jacket with validation and retry."""
     async with CopilotClient() as client:
         async with await client.create_session(
             on_permission_request=PermissionHandler.approve_all,
@@ -72,10 +98,32 @@ async def _generate_jacket_async(subtitle: str, timeout: float = 120.0) -> str:
             infinite_sessions={"enabled": False},
         ) as session:
             prompt = JACKET_PROMPT.format(subtitle=subtitle)
-            result = await session.send_and_wait(prompt, timeout=timeout)
-            if result and result.data and result.data.content:
-                return result.data.content
-            return "(No response from model)"
+
+            for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
+                result = await session.send_and_wait(prompt, timeout=timeout)
+                content = (result.data.content or "") if result and result.data else ""
+
+                if not content:
+                    click.echo(f"  ⚠ Attempt {attempt}: empty response, retrying...")
+                    continue
+
+                missing = _validate_jacket(content)
+                if not missing:
+                    return content
+
+                if attempt <= MAX_RETRIES:
+                    missing_names = ", ".join(missing)
+                    click.echo(f"  ⚠ Attempt {attempt}: missing sections: {missing_names} — retrying...")
+                    prompt = (
+                        f"Your previous response was missing these required sections: {missing_names}.\n"
+                        f"Please regenerate the COMPLETE book jacket with ALL sections. "
+                        f"The subtitle is:\n\n{subtitle}"
+                    )
+                else:
+                    click.echo(f"  ⚠ Returning best effort after {attempt} attempts (missing: {', '.join(missing)})")
+                    return content
+
+            return "(No valid response after retries)"
 
 
 def generate_jacket(subtitle: str, timeout: float = 120.0) -> str:
