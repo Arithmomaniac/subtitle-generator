@@ -7,7 +7,7 @@ import click
 from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
-from subtitle_generator.generate import generate_subtitle, slot_stats
+from subtitle_generator.generate import format_sources, generate_subtitle, slot_stats
 from subtitle_generator.jacket import generate_jacket
 from subtitle_generator.slots import build_loose_slots, build_slots
 from subtitle_generator.tune import run_autoresearch
@@ -129,7 +129,8 @@ def build_slots_cmd(loose: bool):
 @click.option("--seed", default=None, type=int, help="Random seed for reproducibility.")
 @click.option("--loose", is_flag=True, help="Use expanded slot fillers from full corpus.")
 @click.option("--jacket", is_flag=True, help="Generate full book jacket (title, back cover, reviews, blurbs).")
-def generate(count: int | None, seed: int | None, loose: bool, jacket: bool):
+@click.option("--sources", is_flag=True, help="Show which real books each slot filler came from.")
+def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool):
     """Generate bizarre subtitles — slot machine style!"""
     if count is None:
         count = 1 if jacket else 10
@@ -143,16 +144,21 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool):
     click.echo(f"Slot machine loaded ({mode} mode): {stats}\n")
     for i in range(count):
         s = seed + i if seed is not None else None
-        subtitle = generate_subtitle(conn, seed=s, mode=mode)
+        sub = generate_subtitle(conn, seed=s, mode=mode)
 
         if jacket:
-            click.echo(f"Generating jacket for: {subtitle}\n")
-            md = generate_jacket(subtitle)
+            click.echo(f"Generating jacket for: {sub.text}\n")
+            md = generate_jacket(sub.text)
             click.echo(md)
+            if sources:
+                click.echo(format_sources(conn, sub))
             if i < count - 1:
                 click.echo("\n" + "=" * 72 + "\n")
         else:
-            click.echo(f"  {i + 1:2d}. {subtitle}")
+            click.echo(f"  {i + 1:2d}. {sub.text}")
+            if sources:
+                click.echo(format_sources(conn, sub))
+                click.echo()
     conn.close()
 
 
