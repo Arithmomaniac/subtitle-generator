@@ -131,7 +131,8 @@ def build_slots_cmd(loose: bool):
 @click.option("--jacket", is_flag=True, help="Generate full book jacket (title, back cover, reviews, blurbs).")
 @click.option("--sources", is_flag=True, help="Show which real books each slot filler came from.")
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5-mini).")
-def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None):
+@click.option("--show-concept", is_flag=True, help="Include the internal concept section in jacket output.")
+def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None, show_concept: bool):
     """Generate bizarre subtitles — slot machine style!"""
     if count is None:
         count = 1 if jacket else 10
@@ -150,7 +151,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            md = generate_jacket(sub.text, **kwargs)
+            md = generate_jacket(sub.text, show_concept=show_concept, **kwargs)
             click.echo(md)
             if sources:
                 click.echo(format_sources(conn, sub))
@@ -170,7 +171,8 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 @click.option("--seed", default=None, type=int, help="Random seed (only for random generation).")
 @click.option("--sources", is_flag=True, help="Show source books for each slot filler (only for random generation).")
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5-mini).")
-def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, model: str | None):
+@click.option("--show-concept", is_flag=True, help="Include the internal concept section in output.")
+def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, model: str | None, show_concept: bool):
     """Generate a full book jacket — title, back cover, reviews, and blurbs.
 
     Pass a subtitle string to jacket a specific text, or omit to generate a random one.
@@ -185,7 +187,7 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
     kwargs = {"model": model} if model else {}
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
-        md = generate_jacket(subtitle, **kwargs)
+        md = generate_jacket(subtitle, show_concept=show_concept, **kwargs)
         click.echo(md)
     else:
         conn = get_db()
@@ -197,7 +199,7 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
         click.echo(f"Slot machine loaded ({mode} mode): {stats}\n")
         sub = generate_subtitle(conn, seed=seed, mode=mode)
         click.echo(f"Generating jacket for: {sub.text}\n")
-        md = generate_jacket(sub.text, **kwargs)
+        md = generate_jacket(sub.text, show_concept=show_concept, **kwargs)
         click.echo(md)
         if sources:
             click.echo(format_sources(conn, sub))

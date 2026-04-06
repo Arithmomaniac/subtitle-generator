@@ -159,6 +159,16 @@ async def _generate_jacket_async(subtitle: str, model: str = DEFAULT_MODEL, time
             return "(No valid response after retries)"
 
 
-def generate_jacket(subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0) -> str:
+def _strip_internal_concept(content: str) -> str:
+    """Remove the ## Internal Concept section from output."""
+    return re.sub(
+        r"## Internal Concept\s*\n.*?(?=\n## )", "", content, count=1, flags=re.DOTALL | re.IGNORECASE
+    )
+
+
+def generate_jacket(subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0, show_concept: bool = False) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
-    return asyncio.run(_generate_jacket_async(subtitle, model=model, timeout=timeout))
+    content = asyncio.run(_generate_jacket_async(subtitle, model=model, timeout=timeout))
+    if not show_concept:
+        content = _strip_internal_concept(content)
+    return content
