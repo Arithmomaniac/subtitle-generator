@@ -8,6 +8,7 @@ dependencies = [
     "click>=8.3.2",
     "en-core-web-md",
     "en-core-web-sm",
+    "github-copilot-sdk>=0.2.1",
     "pymarc>=5.3.1",
     "spacy>=3.8.14",
 ]

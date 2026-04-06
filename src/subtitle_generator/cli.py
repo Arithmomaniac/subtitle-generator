@@ -8,6 +8,7 @@ from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
 from subtitle_generator.generate import generate_subtitle, slot_stats
+from subtitle_generator.jacket import generate_jacket
 from subtitle_generator.slots import build_loose_slots, build_slots
 from subtitle_generator.tune import run_autoresearch
 
@@ -124,11 +125,15 @@ def build_slots_cmd(loose: bool):
 
 
 @cli.command()
-@click.option("--count", "-n", default=10, help="Number of subtitles to generate.")
+@click.option("--count", "-n", default=None, type=int, help="Number of subtitles to generate (default: 10, or 1 with --jacket).")
 @click.option("--seed", default=None, type=int, help="Random seed for reproducibility.")
 @click.option("--loose", is_flag=True, help="Use expanded slot fillers from full corpus.")
-def generate(count: int, seed: int | None, loose: bool):
+@click.option("--jacket", is_flag=True, help="Generate full book jacket (title, back cover, reviews, blurbs).")
+def generate(count: int | None, seed: int | None, loose: bool, jacket: bool):
     """Generate bizarre subtitles — slot machine style!"""
+    if count is None:
+        count = 1 if jacket else 10
+
     conn = get_db()
     mode = "loose" if loose else "strict"
     stats = slot_stats(conn, mode=mode)
@@ -139,7 +144,15 @@ def generate(count: int, seed: int | None, loose: bool):
     for i in range(count):
         s = seed + i if seed is not None else None
         subtitle = generate_subtitle(conn, seed=s, mode=mode)
-        click.echo(f"  {i + 1:2d}. {subtitle}")
+
+        if jacket:
+            click.echo(f"Generating jacket for: {subtitle}\n")
+            md = generate_jacket(subtitle)
+            click.echo(md)
+            if i < count - 1:
+                click.echo("\n" + "=" * 72 + "\n")
+        else:
+            click.echo(f"  {i + 1:2d}. {subtitle}")
     conn.close()
 
 
