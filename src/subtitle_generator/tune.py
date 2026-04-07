@@ -166,10 +166,11 @@ def _vector_prune(conn: sqlite3.Connection, nlp,
     Keeps at most `max_per_slot[slot_type]` loose fillers, ranked by similarity.
     """
     if max_per_slot is None:
+        # Scaled ~2.7x from original caps to match strict pool growth
         max_per_slot = {
-            "list_item": 8_000,
-            "action_noun": 2_000,
-            "of_object": 8_000,
+            "list_item": 22_000,
+            "action_noun": 5_000,
+            "of_object": 22_000,
         }
 
     click.echo("\nPass 2: Vector similarity pruning...")
