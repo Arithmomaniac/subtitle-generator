@@ -57,20 +57,23 @@ def generate_subtitle(
     )
 
 
-def find_source(conn: sqlite3.Connection, filler: str) -> str | None:
-    """Find a real book (title + subtitle) that contains this filler text."""
-    # Search for the filler as a substring in subtitles (case-insensitive)
+def find_source(conn: sqlite3.Connection, filler: str) -> tuple[str, str] | None:
+    """Find a real book (title + subtitle) that contains this filler text.
+
+    Returns (description, source_tag) where source_tag is 'LOC' or 'OL'.
+    """
     escaped = filler.replace("'", "''")
     row = conn.execute(
-        "SELECT title, subtitle FROM subtitles "
+        "SELECT title, subtitle, source_file FROM subtitles "
         f"WHERE subtitle LIKE '%{escaped}%' LIMIT 1"
     ).fetchone()
     if row:
         title = (row[0] or "").strip().rstrip(" /:")
         subtitle = (row[1] or "").strip().rstrip(" /:")
-        if title and subtitle:
-            return f"{title}: {subtitle}"
-        return title or subtitle
+        source_file = row[2] or ""
+        tag = "OL" if source_file == "openlibrary" else "LOC"
+        desc = f"{title}: {subtitle}" if title and subtitle else (title or subtitle)
+        return desc, tag
     return None
 
 
@@ -84,9 +87,10 @@ def format_sources(conn: sqlite3.Connection, sub: GeneratedSubtitle) -> str:
     ]
     lines = ["", "---", "**Sources:**"]
     for label, filler in fillers:
-        source = find_source(conn, filler)
-        if source:
-            lines.append(f"- *{label}* \"{filler}\" ← {source}")
+        result = find_source(conn, filler)
+        if result:
+            desc, tag = result
+            lines.append(f"- *{label}* \"{filler}\" ← [{tag}] {desc}")
         else:
             lines.append(f"- *{label}* \"{filler}\" ← (source not found)")
     return "\n".join(lines)
