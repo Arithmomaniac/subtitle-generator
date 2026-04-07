@@ -1,6 +1,6 @@
 # 📚 subtitle-generator
 
-Generate bizarre book subtitles in the pop-nonfiction pattern — *"X, Y, and the Z of W"* — by mining real parts from the Library of Congress MARC database, then recombining them slot-machine style.
+Generate bizarre book subtitles in the pop-nonfiction pattern — *"X, Y, and the Z of W"* — by mining real parts from the Library of Congress MARC database and Open Library, then recombining them slot-machine style.
 
 Optionally generate a **full book jacket** with title, back cover copy, trade journal reviews, and endorsement blurbs from real people — powered by the GitHub Copilot SDK.
 
@@ -24,8 +24,8 @@ celebrity culture, theology, and the collapse of New England
 
 ## How it works
 
-1. **Download** ~25M MARC records from the LOC bulk distribution (43 files, ~9 GB)
-2. **Extract** 2.4M English subtitles from MARC field 245$b into SQLite
+1. **Download** ~25M MARC records from the LOC bulk distribution (43 files, ~9 GB) and/or ~35M edition records from Open Library (~9.2 GB)
+2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication)
 3. **Pattern match** subtitles matching "X, Y, and the Z of W" using regex + spaCy NLP validation
 4. **Decompose** into typed slots: list items, action nouns, of-objects
 5. **Generate** by randomly drawing one filler per slot — uniform random, no weighting
@@ -33,8 +33,8 @@ celebrity culture, theology, and the collapse of New England
 
 ### Strict vs Loose mode
 
-- **Strict** (~3K list items, ~670 action nouns, ~1.9K of-objects) — fillers from NLP-validated tricolon subtitles only
-- **Loose** (~7K / ~2.7K / ~3.9K) — expanded from the full 2.4M corpus with two-pass tuning (rule-based + vector similarity)
+- **Strict** (~8.4K list items, ~1.8K action nouns, ~5.2K of-objects) — fillers from NLP-validated tricolon subtitles only
+- **Loose** (~30K / ~6.8K / ~27K) — expanded from the full 11M corpus with two-pass tuning (rule-based + vector similarity)
 
 ## Setup
 
