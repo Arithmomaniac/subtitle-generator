@@ -159,7 +159,7 @@ def build_slots_cmd(loose: bool):
 @click.option("--loose", is_flag=True, help="Use expanded slot fillers from full corpus.")
 @click.option("--jacket", is_flag=True, help="Generate full book jacket (title, back cover, reviews, blurbs).")
 @click.option("--sources", is_flag=True, help="Show which real books each slot filler came from.")
-@click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5-mini).")
+@click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in jacket output.")
 def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None, show_concept: bool):
     """Generate bizarre subtitles — slot machine style!"""
@@ -199,7 +199,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 @click.option("--loose", is_flag=True, help="Use expanded slot fillers (only for random generation).")
 @click.option("--seed", default=None, type=int, help="Random seed (only for random generation).")
 @click.option("--sources", is_flag=True, help="Show source books for each slot filler (only for random generation).")
-@click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5-mini).")
+@click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in output.")
 def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, model: str | None, show_concept: bool):
     """Generate a full book jacket — title, back cover, reviews, and blurbs.

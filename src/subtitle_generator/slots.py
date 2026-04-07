@@ -184,9 +184,9 @@ def build_slots(conn: sqlite3.Connection):
     conn.commit()
 
     # NLP-validated slot extraction
-    list_items_seen = set()
-    action_nouns_seen = set()
-    of_objects_seen = set()
+    list_items_seen: dict[str, int] = {}  # filler → source subtitle_id
+    action_nouns_seen: dict[str, int] = {}
+    of_objects_seen: dict[str, int] = {}
     clean_matches = 0
 
     for i, m in enumerate(matches):
@@ -208,10 +208,11 @@ def build_slots(conn: sqlite3.Connection):
             continue
 
         clean_matches += 1
+        sid = m["subtitle_id"]
         for item in valid_items:
-            list_items_seen.add(item)
-        action_nouns_seen.add(action)
-        of_objects_seen.add(obj)
+            list_items_seen.setdefault(item, sid)
+        action_nouns_seen.setdefault(action, sid)
+        of_objects_seen.setdefault(obj, sid)
 
         if (i + 1) % 2000 == 0:
             click.echo(f"  ...validated {i + 1:,} / {len(matches):,}")
@@ -219,9 +220,9 @@ def build_slots(conn: sqlite3.Connection):
     click.echo(f"Clean matches (NLP-validated): {clean_matches:,}")
 
     filler_rows = (
-        [("list_item", x, "strict", None) for x in list_items_seen]
-        + [("action_noun", x, "strict", None) for x in action_nouns_seen]
-        + [("of_object", x, "strict", None) for x in of_objects_seen]
+        [("list_item", x, "strict", sid) for x, sid in list_items_seen.items()]
+        + [("action_noun", x, "strict", sid) for x, sid in action_nouns_seen.items()]
+        + [("of_object", x, "strict", sid) for x, sid in of_objects_seen.items()]
     )
     conn.executemany(
         "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id) "

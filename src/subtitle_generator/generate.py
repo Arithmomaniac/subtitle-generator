@@ -58,15 +58,29 @@ def generate_subtitle(
 
 
 def find_source(conn: sqlite3.Connection, filler: str) -> tuple[str, str] | None:
-    """Find a real book (title + subtitle) that contains this filler text.
+    """Find the real book a slot filler was extracted from.
 
+    First tries the exact source_subtitle_id linkage from slot_fillers,
+    then falls back to a random LIKE search.
     Returns (description, source_tag) where source_tag is 'LOC' or 'OL'.
     """
-    escaped = filler.replace("'", "''")
+    # Try exact source via slot_fillers → subtitles join
     row = conn.execute(
-        "SELECT title, subtitle, source_file FROM subtitles "
-        f"WHERE subtitle LIKE '%{escaped}%' LIMIT 1"
+        "SELECT s.title, s.subtitle, s.source_file "
+        "FROM slot_fillers sf "
+        "JOIN subtitles s ON s.id = sf.source_subtitle_id "
+        "WHERE sf.filler = ? AND sf.source_subtitle_id IS NOT NULL "
+        "LIMIT 1",
+        (filler,),
     ).fetchone()
+
+    # Fallback: substring search (for loose fillers without source linkage)
+    if not row:
+        escaped = filler.replace("'", "''")
+        row = conn.execute(
+            "SELECT title, subtitle, source_file FROM subtitles "
+            f"WHERE subtitle LIKE '%{escaped}%' ORDER BY RANDOM() LIMIT 1"
+        ).fetchone()
     if row:
         title = (row[0] or "").strip().rstrip(" /:")
         subtitle = (row[1] or "").strip().rstrip(" /:")
