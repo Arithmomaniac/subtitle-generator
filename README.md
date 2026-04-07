@@ -50,6 +50,10 @@ uv run subtitle-gen download --parts all
 # Extract subtitles into SQLite
 uv run subtitle-gen extract
 
+# Optional: Download and extract Open Library data (~9.2 GB download)
+uv run subtitle-gen download-ol
+uv run subtitle-gen extract-ol
+
 # Build slot fillers (strict mode)
 uv run subtitle-gen build-slots
 
@@ -99,7 +103,9 @@ uv run subtitle-gen generate --jacket --loose --sources --model claude-haiku-4.5
 | Command | Description |
 |---|---|
 | `download` | Download LOC MARC bulk data files |
+| `download-ol` | Download Open Library editions dump |
 | `extract` | Parse MARC files → SQLite subtitles table |
+| `extract-ol` | Parse Open Library dump → SQLite (deduplicates against LOC) |
 | `analyze` | POS-tag subtitles, extract structural templates |
 | `build-slots` | Extract slot fillers (regex + NLP validated) |
 | `generate` | Random subtitle generation (+ optional `--jacket`) |
@@ -117,9 +123,15 @@ uv run subtitle-gen generate --jacket --loose --sources --model claude-haiku-4.5
 - **click** — CLI framework
 - **GitHub Copilot SDK** — LLM + web search for jacket generation
 
-## Data source
+## Data sources
 
-[Library of Congress MARC Distribution Services](https://www.loc.gov/cds/products/marcDist.php) — Books All, 2016 retrospective conversion, UTF-8 encoding. ~25M records across 43 files. Free and open access.
+### Library of Congress MARC (2016)
+
+[Library of Congress MARC Distribution Services](https://www.loc.gov/cds/products/marcDist.php) — Books All, 2016 retrospective conversion, UTF-8 encoding. ~25M records across 43 files. Free and open access. This is the latest (and only post-2014) bulk open-access LOC MARC dataset; no 2019+ bulk downloads exist despite some sources claiming otherwise.
+
+### Open Library
+
+[Open Library bulk data dumps](https://openlibrary.org/developers/dumps) — ~35M edition records with a dedicated `subtitle` field (when present). Community-contributed data, so subtitle quality varies more than LOC MARC. Provides broader coverage (more genres, formats, and publishing venues) and includes books published after 2016.
 
 ## License
 

@@ -7,6 +7,11 @@ import click
 from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
+from subtitle_generator.extract_openlibrary import (
+    download_ol_dump,
+    ensure_isbn_column,
+    extract_from_ol_dump,
+)
 from subtitle_generator.generate import format_sources, generate_subtitle, slot_stats
 from subtitle_generator.jacket import generate_jacket
 from subtitle_generator.slots import build_loose_slots, build_slots
@@ -77,6 +82,30 @@ def extract(parts: str | None, all_langs: bool):
         click.echo(f"  {mrc_file.name}: {records:,} records → {subs:,} subtitles")
 
     click.echo(f"\nTotal: {total_records:,} records → {total_subtitles:,} subtitles")
+    click.echo(f"Database: {DB_PATH}")
+    conn.close()
+
+
+@cli.command("download-ol")
+@click.option("--force", is_flag=True, help="Re-download even if file exists.")
+def download_ol(force: bool):
+    """Download Open Library editions dump (~9.2 GB compressed)."""
+    download_ol_dump(force=force)
+
+
+@cli.command("extract-ol")
+@click.option("--all-langs", is_flag=True, help="Include non-English subtitles.")
+@click.option("--no-dedup", is_flag=True, help="Skip deduplication (faster for testing).")
+def extract_ol(all_langs: bool, no_dedup: bool):
+    """Extract subtitles from Open Library editions dump into SQLite."""
+    conn = get_db()
+    ensure_isbn_column(conn)
+    lines, subs, dupes = extract_from_ol_dump(
+        conn, english_only=not all_langs, dedup=not no_dedup,
+    )
+    click.echo(f"\nDone: {lines:,} lines → {subs:,} subtitles ({dupes:,} duplicates skipped)")
+    total = conn.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0]
+    click.echo(f"Total subtitles in database: {total:,}")
     click.echo(f"Database: {DB_PATH}")
     conn.close()
 
