@@ -79,6 +79,9 @@ uv run subtitle-gen generate --sources
 # Generate a full book jacket (title, back cover, reviews, blurbs)
 uv run subtitle-gen generate --jacket
 
+# Jacket with deep research (two-phase: web search for concept, then jacket)
+uv run subtitle-gen generate --jacket --deep-research
+
 # Standalone jacket command — custom subtitle
 uv run subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
 
@@ -87,6 +90,7 @@ uv run subtitle-gen jacket --model gpt-4.1
 
 # All the flags
 uv run subtitle-gen generate --jacket --loose --sources --model claude-haiku-4.5 -n 3
+uv run subtitle-gen generate --jacket --deep-research --show-concept --model gpt-5.4-mini
 ```
 
 ### Available jacket models (sub-1x cost)
