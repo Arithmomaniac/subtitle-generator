@@ -56,7 +56,7 @@ def _is_valid_action(phrase: str, nlp) -> bool:
     if not words or len(words) > 3:
         return False
     # Orthographic checks (can't express via POS)
-    if any(w.isupper() and len(w) > 1 for w in phrase.split()):
+    if any(_is_all_caps_noise(w) for w in phrase.split()):
         return False
     head = words[-1]
     if head in ACTION_WHITELIST:
@@ -77,6 +77,12 @@ def _is_valid_action(phrase: str, nlp) -> bool:
     return False
 
 
+def _is_all_caps_noise(word: str) -> bool:
+    """Reject full all-caps words 5+ letters (catalog noise like GOLF, SAMUEL).
+    Allow short acronyms (CIA, NBA, BBC) — they're real pop-nonfiction terms."""
+    return word.isupper() and len(word) >= 5
+
+
 # POS tags allowed in list items: only content words (+ hyphens)
 _LIST_ITEM_ALLOWED_POS = {"NOUN", "PROPN", "ADJ"}
 
@@ -89,9 +95,7 @@ def _is_valid_list_item(phrase: str, nlp) -> bool:
     # Orthographic checks (can't express via POS)
     if re.search(r"\d{4}", phrase):
         return False
-    if any(w.isupper() and len(w) > 1 for w in words):
-        return False
-    if any(len(w) <= 2 and w.isupper() and w not in ("US", "UK", "EU", "AI") for w in words):
+    if any(_is_all_caps_noise(w) for w in words):
         return False
     doc = nlp(phrase)
     # Every token must be a content word (allow hyphens as connecting punctuation)
@@ -117,7 +121,7 @@ def _is_valid_object(phrase: str, nlp) -> bool:
     # Orthographic checks (can't express via POS)
     if re.search(r"\d{4}", phrase):
         return False
-    if any(w.isupper() and len(w) > 1 for w in words):
+    if any(_is_all_caps_noise(w) for w in words):
         return False
     doc = nlp(phrase)
     for t in doc:
