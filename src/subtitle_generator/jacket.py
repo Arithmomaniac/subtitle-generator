@@ -27,9 +27,12 @@ landscape around these themes and produce a rich, detailed book concept.
 
 **Steps:**
 1. Identify the key themes and topics in the subtitle
-2. Use web_search to find real-world context: notable scholars, authors, or public figures
-   associated with these topics; landmark books or articles; historical events or cultural
-   flashpoints; ongoing debates or surprising connections between the themes
+2. Use web_search to find real-world context from a MIX of popular and specialist sources:
+   bestselling books and notable trade nonfiction on related topics; longform journalism,
+   magazine features, or documentary films; notable public figures, cultural controversies,
+   or surprising historical connections; AND relevant academic work where it adds depth.
+   The goal is a pop-nonfiction book — think Malcolm Gladwell, Mary Roach, or Erik Larson,
+   not a university press monograph.
 3. Synthesize your findings into a detailed Internal Concept (5-8 sentences)
 
 **Output format — use this exact header:**
@@ -145,14 +148,17 @@ Restate the subtitle exactly as given.
 
 ## Internal Concept
 Before writing anything, use web_search to research the key themes in the subtitle — the
-people, events, scholarly debates, cultural phenomena, and real-world intersections these
-topics evoke. Look for specific names, controversies, landmark books, or surprising
-connections that ground the concept in reality.
+people, events, cultural phenomena, and real-world intersections these topics evoke. Look
+for a MIX of popular and specialist sources: bestselling books, longform journalism,
+documentaries, cultural controversies, notable public figures, AND relevant academic work.
+The goal is a pop-nonfiction book, not a monograph — it should feel like something Malcolm
+Gladwell, Mary Roach, or Erik Larson might write.
 
 Then write 5-8 sentences describing the book's core thesis, tone, and target audience.
-Weave in the specific real-world details you found — a particular scholar's argument,
-a pivotal historical moment, a cultural flashpoint. The concept should feel like it could
-only describe ONE specific book, not a generic treatment of the topic.
+Weave in specific real-world details you found — a journalist's investigation, a cultural
+flashpoint, a surprising historical connection, a bestselling book on a related theme.
+The concept should feel like it could only describe ONE specific book, not a generic
+treatment of the topic.
 This anchors everything else — both reviews must describe the SAME book.
 
 ## Back Cover
