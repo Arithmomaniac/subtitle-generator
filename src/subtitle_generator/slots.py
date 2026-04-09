@@ -19,6 +19,67 @@ PATTERN_RE = re.compile(
 
 NOISE_WORDS = {"hearing", "subcommittee", "committee", "congress", "session"}
 
+# Generic/bland words that don't carry pop-nonfiction punch
+_WEAK_FILLERS = {
+    "things", "factors", "indicators", "regions", "aspects", "elements",
+    "issues", "items", "matters", "topics", "areas", "units", "features",
+    "conditions", "situations", "circumstances", "parameters", "variables",
+    "data", "results", "outcomes", "findings", "processes", "procedures",
+    "methods", "techniques", "approaches", "activities", "operations",
+    "developments", "achievements", "productions", "perceptions",
+}
+
+# MARC catalog / library-science terms that leak from the data source
+_MARC_JARGON = {
+    "bibliographies", "bibliography", "monograph", "monographs",
+    "proceedings", "dissertations", "yearbook", "yearbooks",
+    "catalog", "catalogue", "catalogues", "catalogs",
+    "supplements", "appendix", "appendices", "abstracts",
+    "periodicals", "serials", "pamphlets", "leaflets",
+    "lead ores", "defects", "specimens", "reagents",
+}
+
+
+def _normalize_spacing(phrase: str) -> str:
+    """Fix common spacing artifacts from MARC data extraction.
+    'U. S.' → 'U.S.', 'D. C' → 'D.C.', etc.
+    """
+    # Fix spaced-out initials: "U. S." → "U.S."
+    phrase = re.sub(r"\b([A-Z])\.\s+([A-Z])\.?", r"\1.\2.", phrase)
+    # Fix spaced-out initials without trailing dot: "D. C" → "D.C."
+    phrase = re.sub(r"\b([A-Z])\.\s+([A-Z])\b", r"\1.\2.", phrase)
+    return phrase.strip()
+
+
+def _is_truncated(phrase: str) -> bool:
+    """Detect fillers cut off mid-word (e.g. 'Independent Fil')."""
+    words = phrase.split()
+    if not words:
+        return False
+    last = words[-1]
+    # Short lowercase fragment at end (2-3 chars, not a real word pattern)
+    if len(last) <= 3 and last[0].isupper() and not last.isupper():
+        # Likely a truncated word like "Fil", "Rel", "Gov"
+        # Allow real short words by checking if it looks like a fragment
+        if len(last) <= 2 and len(words) > 1:
+            return True
+    # Ends with a lone capital letter (truncation artifact)
+    if len(last) == 1 and last.isupper() and len(words) > 1:
+        return True
+    return False
+
+
+def _is_weak_or_jargon(phrase: str) -> bool:
+    """Reject generic abstractions and MARC catalog jargon."""
+    lower = phrase.lower().strip()
+    if lower in _WEAK_FILLERS or lower in _MARC_JARGON:
+        return True
+    # Also check individual words for MARC jargon in multi-word phrases
+    for word in lower.split():
+        if word in _MARC_JARGON:
+            return True
+    return False
+
 # Deverbal/process suffixes for action noun validation
 ACTION_SUFFIXES = (
     "ing", "tion", "sion", "ment", "ance", "ence", "ery", "ure",
@@ -235,10 +296,14 @@ def build_slots(conn: sqlite3.Connection):
     clean_matches = 0
 
     for i, m in enumerate(matches):
-        action = m["action_noun"]
-        obj = m["of_object"]
+        action = _normalize_spacing(m["action_noun"])
+        obj = _normalize_spacing(m["of_object"])
 
+        if _is_truncated(action) or _is_weak_or_jargon(action):
+            continue
         if not _is_valid_action(action, nlp):
+            continue
+        if _is_truncated(obj) or _is_weak_or_jargon(obj):
             continue
         if not _is_valid_object(obj, nlp):
             continue
@@ -246,7 +311,10 @@ def build_slots(conn: sqlite3.Connection):
         valid_items = []
         for item in m["list_items"]:
             cleaned = re.sub(r"[\s]*[/:;,.]\s*$", "", item).strip()
-            if cleaned and _is_valid_list_item(cleaned, nlp):
+            cleaned = _normalize_spacing(cleaned)
+            if not cleaned or _is_truncated(cleaned) or _is_weak_or_jargon(cleaned):
+                continue
+            if _is_valid_list_item(cleaned, nlp):
                 valid_items.append(cleaned)
 
         if len(valid_items) < 2:
