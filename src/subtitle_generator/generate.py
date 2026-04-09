@@ -34,12 +34,12 @@ def _weighted_sample(
     weights = [math.sqrt(r[1]) for r in rows]
 
     if tone_target is not None:
-        spread = 0.8
+        spread = 0.4
         for i, (_, freq) in enumerate(rows):
             filler_score = math.log10(1 + freq)
             bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
-            # Blend: 70% bias + 30% base weight to keep some randomness
-            weights[i] *= (0.3 + 0.7 * bias)
+            # Aggressive blend: near-zero floor so distant fillers are strongly suppressed
+            weights[i] *= (0.05 + 0.95 * bias)
 
     chosen = []
     # Weighted sampling without replacement
