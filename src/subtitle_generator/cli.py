@@ -181,7 +181,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, **kwargs)
+            md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, **kwargs)
             click.echo(md)
             if sources:
                 click.echo(format_sources(conn, sub))
@@ -216,25 +216,26 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
       subtitle-gen jacket --model claude-haiku-4.5  # use a different model
     """
     kwargs = {"model": model} if model else {}
+    conn = get_db()
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
-        md = generate_jacket(subtitle, show_concept=show_concept, deep_research=deep_research, **kwargs)
+        md = generate_jacket(subtitle, show_concept=show_concept, deep_research=deep_research, conn=conn, **kwargs)
         click.echo(md)
     else:
-        conn = get_db()
         mode = "loose" if loose else "strict"
         stats = slot_stats(conn, mode=mode)
         if not stats:
             click.echo("No slots found. Run 'build-slots' first.")
+            conn.close()
             return
         click.echo(f"Slot machine loaded ({mode} mode): {stats}\n")
         sub = generate_subtitle(conn, seed=seed, mode=mode)
         click.echo(f"Generating jacket for: {sub.text}\n")
-        md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, **kwargs)
+        md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, **kwargs)
         click.echo(md)
         if sources:
             click.echo(format_sources(conn, sub))
-        conn.close()
+    conn.close()
 
 
 @cli.command()

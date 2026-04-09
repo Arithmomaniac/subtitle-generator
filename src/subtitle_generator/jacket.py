@@ -1,7 +1,9 @@
 """Generate full book jackets using the Copilot SDK (LLM + web_search)."""
 
 import asyncio
+import math
 import re
+import sqlite3
 
 import click
 from copilot import CopilotClient
@@ -20,6 +22,78 @@ REQUIRED_SECTIONS = [
 
 MAX_RETRIES = 2
 
+# --- Accessibility scoring & tone tiers ---
+
+_SUBTITLE_RE = re.compile(
+    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+the\s+(?P<action>.+?)\s+of\s+(?P<object>.+)$",
+    re.IGNORECASE,
+)
+
+TONE_HIGH = """\
+This is an airport bookstore book. Think Malcolm Gladwell, Michael Pollan, Mary Roach,
+or Bill Bryson. The reader grabs it on impulse. Prioritize bestselling trade nonfiction,
+podcasts, magazine features, and pop-culture references in your research. Keep the tone
+accessible, narrative-driven, and full of surprising anecdotes."""
+
+TONE_MEDIUM = """\
+This is a quality indie bookstore book. Think Rebecca Solnit, Pankaj Mishra, or Merlin
+Sheldrake. The reader is curious and educated but not specialist. Blend trade nonfiction,
+longform journalism, and accessible academic work. The tone should be essayistic and
+intellectually engaging without being dense."""
+
+TONE_LOW = """\
+This is a smart university press crossover — think Princeton's 'Lives of Great Ideas'
+series or Yale's cultural history list. The reader is intellectually adventurous. Blend
+academic depth with essayistic flair, referencing both specialist scholarship and trade
+nonfiction for context. Rigorous but never dry."""
+
+
+def _parse_subtitle_fillers(subtitle: str) -> list[str]:
+    """Extract the slot fillers from a subtitle string."""
+    m = _SUBTITLE_RE.match(subtitle)
+    if not m:
+        return []
+    list_part = m.group("list_part")
+    action = m.group("action").strip()
+    obj = re.sub(r"[\s]*[/:;,.]\s*$", "", m.group("object")).strip()
+    items = [item.strip() for item in list_part.split(",") if item.strip()]
+    return items + [action, obj]
+
+
+def _lookup_freq(conn: sqlite3.Connection, filler: str) -> int:
+    """Look up a filler's corpus frequency. Returns 1 if not found."""
+    row = conn.execute(
+        "SELECT freq FROM slot_fillers WHERE filler = ? LIMIT 1", (filler,)
+    ).fetchone()
+    return row[0] if row else 1
+
+
+def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None) -> tuple[str, float]:
+    """Compute an accessibility tier for a subtitle based on filler frequencies.
+
+    Returns (tone_text, score) where score is mean(log10(1+freq)).
+    Higher score = more pop-accessible fillers.
+    """
+    fillers = _parse_subtitle_fillers(subtitle)
+    if not fillers or conn is None:
+        return TONE_MEDIUM, 0.0
+
+    freqs = [_lookup_freq(conn, f) for f in fillers]
+    score = sum(math.log10(1 + f) for f in freqs) / len(freqs)
+
+    # Thresholds tuned to the distribution:
+    # score > 1.0 → fillers avg freq ~10+ (pop staples like Race, Power, America)
+    # score 0.5-1.0 → fillers avg freq ~2-10 (mainstream nonfiction)
+    # score < 0.5 → fillers avg freq ~1-2 (niche/academic)
+    if score > 1.0:
+        tone = TONE_HIGH
+    elif score >= 0.5:
+        tone = TONE_MEDIUM
+    else:
+        tone = TONE_LOW
+
+    return tone, score
+
 RESEARCH_PROMPT = """\
 You are a publishing industry researcher. I will give you a randomly generated book subtitle
 in the pop-nonfiction pattern "X, Y, and the Z of W". Your job is to research the real-world
@@ -27,12 +101,10 @@ landscape around these themes and produce a rich, detailed book concept.
 
 **Steps:**
 1. Identify the key themes and topics in the subtitle
-2. Use web_search to find real-world context from a MIX of popular and specialist sources:
-   bestselling books and notable trade nonfiction on related topics; longform journalism,
-   magazine features, or documentary films; notable public figures, cultural controversies,
-   or surprising historical connections; AND relevant academic work where it adds depth.
-   The goal is a pop-nonfiction book — think Malcolm Gladwell, Mary Roach, or Erik Larson,
-   not a university press monograph.
+2. Use web_search to find real-world context:
+
+{tone}
+
 3. Synthesize your findings into a detailed Internal Concept (5-8 sentences)
 
 **Output format — use this exact header:**
@@ -148,11 +220,9 @@ Restate the subtitle exactly as given.
 
 ## Internal Concept
 Before writing anything, use web_search to research the key themes in the subtitle — the
-people, events, cultural phenomena, and real-world intersections these topics evoke. Look
-for a MIX of popular and specialist sources: bestselling books, longform journalism,
-documentaries, cultural controversies, notable public figures, AND relevant academic work.
-The goal is a pop-nonfiction book, not a monograph — it should feel like something Malcolm
-Gladwell, Mary Roach, or Erik Larson might write.
+people, events, cultural phenomena, and real-world intersections these topics evoke.
+
+{tone}
 
 Then write 5-8 sentences describing the book's core thesis, tone, and target audience.
 Weave in specific real-world details you found — a journalist's investigation, a cultural
@@ -247,7 +317,8 @@ DEFAULT_MODEL = "gpt-5.4-mini"
 
 
 async def _generate_jacket_async(
-    subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0, deep_research: bool = False,
+    subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
+    deep_research: bool = False, conn: sqlite3.Connection | None = None,
 ) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry.
 
@@ -256,6 +327,10 @@ async def _generate_jacket_async(
       Phase 2: Jacket prompt that builds on the established concept
     Otherwise uses the enhanced one-shot prompt (which also does web search for concept).
     """
+    tone, score = compute_accessibility(subtitle, conn)
+    tier_name = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
+    click.echo(f"  📚 Tone tier: {tier_name} (accessibility score: {score:.2f})")
+
     async with CopilotClient() as client:
         async with await client.create_session(
             on_permission_request=PermissionHandler.approve_all,
@@ -267,7 +342,7 @@ async def _generate_jacket_async(
             if deep_research:
                 # Phase 1: Research the subtitle's themes
                 click.echo("  🔍 Deep research: searching for real-world context...")
-                research_prompt = RESEARCH_PROMPT.format(subtitle=subtitle)
+                research_prompt = RESEARCH_PROMPT.format(subtitle=subtitle, tone=tone)
                 result = await session.send_and_wait(research_prompt, timeout=timeout)
                 concept_content = (result.data.content or "") if result and result.data else ""
 
@@ -280,7 +355,7 @@ async def _generate_jacket_async(
             if deep_research and concept_content:
                 prompt = JACKET_PROMPT_PHASE2.format(subtitle=subtitle)
             else:
-                prompt = JACKET_PROMPT.format(subtitle=subtitle)
+                prompt = JACKET_PROMPT.format(subtitle=subtitle, tone=tone)
 
             for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
                 result = await session.send_and_wait(prompt, timeout=timeout)
@@ -323,9 +398,12 @@ def _strip_internal_concept(content: str) -> str:
 def generate_jacket(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     show_concept: bool = False, deep_research: bool = False,
+    conn: sqlite3.Connection | None = None,
 ) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
-    content = asyncio.run(_generate_jacket_async(subtitle, model=model, timeout=timeout, deep_research=deep_research))
+    content = asyncio.run(_generate_jacket_async(
+        subtitle, model=model, timeout=timeout, deep_research=deep_research, conn=conn,
+    ))
     if not show_concept:
         content = _strip_internal_concept(content)
     return content
