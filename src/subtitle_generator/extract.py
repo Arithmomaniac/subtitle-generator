@@ -70,7 +70,7 @@ def extract_from_file(
     source = mrc_path.name
 
     with open(mrc_path, "rb") as f:
-        reader = MARCReader(f, to_unicode=True, force_utf8=True, utf8_handling="ignore")
+        reader = MARCReader(f, to_unicode=True, force_utf8=False, utf8_handling="replace")
         for record in reader:
             if record is None:
                 continue
