@@ -211,10 +211,20 @@ def _is_valid_object(phrase: str, nlp) -> bool:
 
 
 def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
-    """Find all subtitles matching X, Y, and the Z of W."""
+    """Find all subtitles matching X, Y, and the Z of W.
+
+    Open Library records without any institutional identifier (ISBN, LCCN)
+    are excluded — they tend to be dissertations, pamphlets, or government
+    reports whose language doesn't reflect real published-book subtitles.
+    """
     rows = conn.execute(
         "SELECT id, title, subtitle FROM subtitles "
-        "WHERE subtitle LIKE '%, % and the % of %'"
+        "WHERE subtitle LIKE '%, % and the % of %' "
+        "AND NOT ("
+        "  source_file = 'openlibrary'"
+        "  AND (isbn IS NULL OR isbn = '')"
+        "  AND (lccn IS NULL OR lccn = '')"
+        ")"
     ).fetchall()
 
     matches = []
@@ -387,7 +397,14 @@ def _mine_the_x_of_y(conn: sqlite3.Connection, nlp) -> tuple[set, set]:
     the_x_of_y_re = re.compile(
         r"the\s+(.{2,30}?)\s+of\s+(.{2,60}?)(?:\s*[,:;.]|$)", re.IGNORECASE,
     )
-    rows = conn.execute("SELECT id, subtitle FROM subtitles").fetchall()
+    rows = conn.execute(
+        "SELECT id, subtitle FROM subtitles "
+        "WHERE NOT ("
+        "  source_file = 'openlibrary'"
+        "  AND (isbn IS NULL OR isbn = '')"
+        "  AND (lccn IS NULL OR lccn = '')"
+        ")"
+    ).fetchall()
 
     action_nouns = set()
     of_objects = set()
@@ -424,7 +441,12 @@ def _mine_comma_lists(conn: sqlite3.Connection, nlp) -> set:
     Uses cheap heuristics only — tune pass cleans up later.
     """
     rows = conn.execute(
-        "SELECT subtitle FROM subtitles WHERE subtitle LIKE '%, %, and %'"
+        "SELECT subtitle FROM subtitles WHERE subtitle LIKE '%, %, and %' "
+        "AND NOT ("
+        "  source_file = 'openlibrary'"
+        "  AND (isbn IS NULL OR isbn = '')"
+        "  AND (lccn IS NULL OR lccn = '')"
+        ")"
     ).fetchall()
 
     list_re = re.compile(r"^(.+),\s+and\s+", re.IGNORECASE)
