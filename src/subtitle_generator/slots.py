@@ -55,6 +55,12 @@ def _is_valid_action(phrase: str, nlp) -> bool:
     words = phrase.lower().split()
     if not words or len(words) > 3:
         return False
+    # Reject parens, quotes, special chars
+    if re.search(r"""['"()\[\]\u2018\u2019\u201c\u201d]""", phrase):
+        return False
+    # Reject ALL-CAPS words
+    if any(w.isupper() and len(w) > 1 for w in phrase.split()):
+        return False
     head = words[-1]
     if head in ACTION_WHITELIST:
         return True
@@ -76,23 +82,61 @@ def _is_valid_list_item(phrase: str, nlp) -> bool:
     words = phrase.split()
     if not (1 <= len(words) <= 3):
         return False
-    if phrase.lower().startswith(("and ", "or ", "with ", "from ", "to ", "the ")):
+    # Reject compound fragments ("Loans and deposits")
+    if " and " in phrase.lower() or " or " in phrase.lower():
         return False
     if re.match(r"^\d", phrase) or re.search(r"\d{4}", phrase):
         return False
+    # Reject embedded quotes, possessives, parens, and brackets
+    if re.search(r"""['"()\[\]\u2018\u2019\u201c\u201d]""", phrase):
+        return False
+    # Reject ALL-CAPS words (catalog artifacts)
+    if any(w.isupper() and len(w) > 1 for w in words):
+        return False
+    # Reject abbreviations (1-2 letter uppercase words that aren't common)
+    if any(len(w) <= 2 and w.isupper() and w not in ("US", "UK", "EU", "AI") for w in words):
+        return False
     doc = nlp(phrase)
-    return any(t.pos_ in ("NOUN", "PROPN", "ADJ") for t in doc)
+    # Must contain at least one real noun (ADJ alone isn't enough)
+    if not any(t.pos_ in ("NOUN", "PROPN") for t in doc):
+        return False
+    # Reject phrases led by function words (prepositions, conjunctions, determiners, verbs)
+    if doc[0].pos_ in ("ADP", "CCONJ", "SCONJ", "DET", "VERB", "AUX", "PART", "ADV"):
+        return False
+    return True
 
 
 def _is_valid_object(phrase: str, nlp) -> bool:
-    """The 'of X' part should be a meaningful NP, 1-6 words."""
+    """The 'of X' part should be a meaningful NP, 1-5 words."""
     words = phrase.split()
-    if not (1 <= len(words) <= 6):
+    if not (1 <= len(words) <= 5):
         return False
     if re.search(r"\d{4}", phrase):
         return False
+    # Reject internal commas (trailing location patterns like "Oaxaca, Mexico")
+    if "," in phrase:
+        return False
+    # Reject possessives, embedded quotes, parens, brackets
+    if re.search(r"""['()\[\]\u2018\u2019\u201c\u201d]""", phrase):
+        return False
+    if '"' in phrase:
+        return False
+    # Reject ALL-CAPS words (catalog artifacts)
+    if any(w.isupper() and len(w) > 1 for w in words):
+        return False
+    # Reject non-English articles at start
+    if words[0].lower() in ("der", "die", "das", "les", "la", "le", "el", "los", "las", "des", "du"):
+        return False
     doc = nlp(phrase)
-    return any(t.pos_ in ("NOUN", "PROPN") for t in doc)
+    if not any(t.pos_ in ("NOUN", "PROPN") for t in doc):
+        return False
+    # Reject determiner-led phrases ("Every Christian", "a new species")
+    if doc[0].pos_ == "DET":
+        return False
+    # Reject if contains pronouns ("himself", "its")
+    if any(t.pos_ == "PRON" for t in doc):
+        return False
+    return True
 
 
 def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
