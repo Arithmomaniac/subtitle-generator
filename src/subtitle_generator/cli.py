@@ -199,10 +199,13 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
     click.echo()
 
-    # Compute tone target for filler weighting (average of requested tiers)
+    # Compute per-slot tone targets (average across requested tiers)
     tone_target = None
     if tone_set:
-        tone_target = sum(TONE_TARGETS[t] for t in tone_set) / len(tone_set)
+        merged = {}
+        for slot in ["list_item", "action_noun", "of_object"]:
+            merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
+        tone_target = merged
 
     for i in range(count):
         s = seed + i if seed is not None else None

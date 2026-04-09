@@ -52,15 +52,23 @@ def _weighted_sample(
     return chosen
 
 
-# Tone target scores for filler biasing (log10 scale)
-TONE_TARGETS = {"pop": 1.5, "mainstream": 0.75, "niche": 0.25}
+# Tone target scores for filler biasing (log10 scale), per slot type.
+# of_object has a much thinner pop tail, so its targets are lower.
+TONE_TARGETS = {
+    "pop": {"list_item": 1.5, "action_noun": 1.5, "of_object": 1.0},
+    "mainstream": {"list_item": 0.75, "action_noun": 0.75, "of_object": 0.6},
+    "niche": {"list_item": 0.25, "action_noun": 0.25, "of_object": 0.25},
+}
 
 
 def generate_subtitle(
     conn: sqlite3.Connection, seed: int | None = None, mode: str = "strict",
-    tone_target: float | None = None,
+    tone_target: dict[str, float] | None = None,
 ) -> GeneratedSubtitle:
-    """Generate one random subtitle in the 'X, Y, and the Z of W' pattern."""
+    """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
+
+    tone_target maps slot_type → log10 target score for filler biasing.
+    """
     rng = None
     if seed is not None:
         rng = random.Random(seed)
@@ -83,9 +91,13 @@ def generate_subtitle(
             item1="", item2="", action_noun="", of_object="",
         )
 
-    items = _weighted_sample(list_rows, 2, rng, tone_target)
-    action_noun = _weighted_sample(action_rows, 1, rng, tone_target)[0]
-    of_object = _weighted_sample(obj_rows, 1, rng, tone_target)[0]
+    list_target = tone_target.get("list_item") if tone_target else None
+    action_target = tone_target.get("action_noun") if tone_target else None
+    obj_target = tone_target.get("of_object") if tone_target else None
+
+    items = _weighted_sample(list_rows, 2, rng, list_target)
+    action_noun = _weighted_sample(action_rows, 1, rng, action_target)[0]
+    of_object = _weighted_sample(obj_rows, 1, rng, obj_target)[0]
 
     return GeneratedSubtitle(
         text=f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}",
