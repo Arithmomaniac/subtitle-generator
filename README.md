@@ -28,12 +28,12 @@ celebrity culture, theology, and the collapse of New England
 2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication)
 3. **Pattern match** subtitles matching "X, Y, and the Z of W" using regex + spaCy NLP validation
 4. **Decompose** into typed slots: list items, action nouns, of-objects
-5. **Generate** by randomly drawing one filler per slot — uniform random, no weighting
-6. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with web-search-enhanced endorsement blurbs
+5. **Generate** by randomly drawing one filler per slot — weighted by √(corpus frequency) so common terms appear more often while rare ones still surface
+6. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with web-search-enriched concept, trade journal reviews, and endorsement blurbs from real people. Tone auto-adapts to the subtitle's accessibility level (pop → mainstream → niche).
 
 ### Strict vs Loose mode
 
-- **Strict** (~8.4K list items, ~1.8K action nouns, ~5.2K of-objects) — fillers from NLP-validated tricolon subtitles only
+- **Strict** (~4.6K list items, ~1.1K action nouns, ~2.8K of-objects) — fillers from NLP-validated tricolon subtitles only, with POS-based quality filtering
 - **Loose** (~30K / ~6.8K / ~27K) — expanded from the full 11M corpus with two-pass tuning (rule-based + vector similarity)
 
 ## Setup
@@ -76,22 +76,44 @@ uv run subtitle-gen generate --loose
 # Show source books for each filler
 uv run subtitle-gen generate --sources
 
+# Bias toward pop-accessible subtitles (or: mainstream, niche)
+uv run subtitle-gen generate --tone pop
+uv run subtitle-gen generate --tone pop,mainstream   # exclude niche
+
 # Generate a full book jacket (title, back cover, reviews, blurbs)
 uv run subtitle-gen generate --jacket
 
 # Jacket with deep research (two-phase: web search for concept, then jacket)
 uv run subtitle-gen generate --jacket --deep-research
 
+# Show the internal concept that anchors reviews/blurbs
+uv run subtitle-gen generate --jacket --show-concept
+
 # Standalone jacket command — custom subtitle
 uv run subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
+
+# Override tone tier for jacket (force pop voice on a niche subtitle)
+uv run subtitle-gen jacket --tone pop "Helmontian Chymistry, Particularism, and the Eclipse of iconophobia"
 
 # Jacket with a specific model
 uv run subtitle-gen jacket --model gpt-4.1
 
 # All the flags
 uv run subtitle-gen generate --jacket --loose --sources --model claude-haiku-4.5 -n 3
-uv run subtitle-gen generate --jacket --deep-research --show-concept --model gpt-5.4-mini
+uv run subtitle-gen generate --jacket --deep-research --show-concept --tone pop --model gpt-5.4-mini
 ```
+
+### Tone tiers
+
+The jacket prompt auto-adapts based on the subtitle's accessibility score (derived from filler corpus frequency):
+
+| Tier | Score | Voice | Examples |
+|------|-------|-------|----------|
+| **pop** | > 1.0 | Airport bookstore (Gladwell, Pollan, Bryson) | Race, Power, America |
+| **mainstream** | 0.5–1.0 | Indie bookstore (Solnit, Mishra, Sheldrake) | Tolkien, Brooklyn |
+| **niche** | < 0.5 | University press crossover (Princeton, Yale) | Helmontian Chymistry |
+
+Use `--tone` to bias subtitle generation toward a tier, or override the jacket tone for custom subtitles. Multiple tiers can be comma-separated.
 
 ### Available jacket models (sub-1x cost)
 
