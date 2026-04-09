@@ -12,17 +12,16 @@ from subtitle_generator.extract_openlibrary import (
     ensure_isbn_column,
     extract_from_ol_dump,
 )
-from subtitle_generator.generate import format_sources, generate_subtitle, slot_stats
+from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
-    compute_accessibility, generate_jacket,
+    compute_accessibility, generate_jacket, sample_tone,
 )
 from subtitle_generator.slots import build_loose_slots, build_slots
 from subtitle_generator.tune import run_autoresearch
 
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
-_MAX_REJECTION_ATTEMPTS = 200
 _VALID_TONES = set(_TONE_CHOICES.keys())
 
 
@@ -35,36 +34,6 @@ def _parse_tone(tone_str: str | None) -> set[str] | None:
     if invalid:
         raise click.BadParameter(f"Invalid tone(s): {', '.join(invalid)}. Choose from: pop, mainstream, niche")
     return tones
-
-
-def _score_to_tier(score: float) -> str:
-    """Map an accessibility score to a tier name."""
-    if score > 1.0:
-        return "pop"
-    elif score >= 0.5:
-        return "mainstream"
-    else:
-        return "niche"
-
-
-# Ordered from most accessible to least
-_TIER_ORDER = ["pop", "mainstream", "niche"]
-
-
-def _closest_tone_override(score: float, allowed: set[str]) -> str | None:
-    """Pick the tone text for the closest allowed tier to the actual score.
-
-    Returns the tone prompt text, or None if allowed is None/empty.
-    """
-    if not allowed:
-        return None
-    actual = _score_to_tier(score)
-    if actual in allowed:
-        return _TONE_CHOICES[actual]
-    # Find closest allowed tier by distance in the ordered list
-    actual_idx = _TIER_ORDER.index(actual)
-    best = min(allowed, key=lambda t: abs(_TIER_ORDER.index(t) - actual_idx))
-    return _TONE_CHOICES[best]
 
 
 @click.group()
@@ -227,40 +196,29 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         return
     click.echo(f"Slot machine loaded ({mode} mode): {stats}")
     if tone_set:
-        click.echo(f"Tone filter: {', '.join(sorted(tone_set))}")
+        click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
     click.echo()
 
-    generated = 0
-    attempts = 0
-    while generated < count:
-        s = (seed + attempts) if seed is not None else None
-        sub = generate_subtitle(conn, seed=s, mode=mode)
-        attempts += 1
+    # Compute tone target for filler weighting (average of requested tiers)
+    tone_target = None
+    if tone_set:
+        tone_target = sum(TONE_TARGETS[t] for t in tone_set) / len(tone_set)
 
-        # Tone filtering: reject subtitles whose tier isn't in the requested set
-        if tone_set:
-            _, score = compute_accessibility(sub.text, conn)
-            if _score_to_tier(score) not in tone_set:
-                if attempts > _MAX_REJECTION_ATTEMPTS and generated == 0:
-                    click.echo(f"⚠ Could not find a matching subtitle after {attempts} attempts.")
-                    break
-                continue
-
-        generated += 1
+    for i in range(count):
+        s = seed + i if seed is not None else None
+        sub = generate_subtitle(conn, seed=s, mode=mode, tone_target=tone_target)
 
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            _, s = compute_accessibility(sub.text, conn)
-            tone_override = _closest_tone_override(s, tone_set)
-            md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, tone_override=tone_override, **kwargs)
+            md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
             click.echo(md)
             if sources:
                 click.echo(format_sources(conn, sub))
-            if generated < count:
+            if i < count - 1:
                 click.echo("\n" + "=" * 72 + "\n")
         else:
-            click.echo(f"  {generated:2d}. {sub.text}")
+            click.echo(f"  {i + 1:2d}. {sub.text}")
             if sources:
                 click.echo(format_sources(conn, sub))
                 click.echo()
@@ -293,9 +251,7 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
     conn = get_db()
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
-        _, score = compute_accessibility(subtitle, conn)
-        tone_override = _closest_tone_override(score, tone_set)
-        md = generate_jacket(subtitle, show_concept=show_concept, deep_research=deep_research, conn=conn, tone_override=tone_override, **kwargs)
+        md = generate_jacket(subtitle, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
         click.echo(md)
     else:
         mode = "loose" if loose else "strict"
@@ -307,9 +263,7 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
         click.echo(f"Slot machine loaded ({mode} mode): {stats}\n")
         sub = generate_subtitle(conn, seed=seed, mode=mode)
         click.echo(f"Generating jacket for: {sub.text}\n")
-        _, score = compute_accessibility(sub.text, conn)
-        tone_override = _closest_tone_override(score, tone_set)
-        md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, tone_override=tone_override, **kwargs)
+        md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
         click.echo(md)
         if sources:
             click.echo(format_sources(conn, sub))

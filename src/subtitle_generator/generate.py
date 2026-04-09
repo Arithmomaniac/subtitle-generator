@@ -19,10 +19,28 @@ class GeneratedSubtitle:
     of_object: str
 
 
-def _weighted_sample(rows: list[tuple[str, int]], k: int, rng: random.Random | None = None) -> list[str]:
-    """Pick k unique fillers weighted by sqrt(freq)."""
+def _weighted_sample(
+    rows: list[tuple[str, int]], k: int,
+    rng: random.Random | None = None,
+    tone_target: float | None = None,
+) -> list[str]:
+    """Pick k unique fillers weighted by sqrt(freq), optionally biased by tone.
+
+    When tone_target is set, applies a log-space Gaussian bias that boosts
+    fillers near the target frequency and suppresses distant ones.
+    tone_target is a log10 score: ~1.5 for pop, ~0.75 for mainstream, ~0.25 for niche.
+    """
     fillers = [r[0] for r in rows]
     weights = [math.sqrt(r[1]) for r in rows]
+
+    if tone_target is not None:
+        spread = 0.8
+        for i, (_, freq) in enumerate(rows):
+            filler_score = math.log10(1 + freq)
+            bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
+            # Blend: 70% bias + 30% base weight to keep some randomness
+            weights[i] *= (0.3 + 0.7 * bias)
+
     chosen = []
     # Weighted sampling without replacement
     for _ in range(k):
@@ -34,8 +52,13 @@ def _weighted_sample(rows: list[tuple[str, int]], k: int, rng: random.Random | N
     return chosen
 
 
+# Tone target scores for filler biasing (log10 scale)
+TONE_TARGETS = {"pop": 1.5, "mainstream": 0.75, "niche": 0.25}
+
+
 def generate_subtitle(
-    conn: sqlite3.Connection, seed: int | None = None, mode: str = "strict"
+    conn: sqlite3.Connection, seed: int | None = None, mode: str = "strict",
+    tone_target: float | None = None,
 ) -> GeneratedSubtitle:
     """Generate one random subtitle in the 'X, Y, and the Z of W' pattern."""
     rng = None
@@ -60,9 +83,9 @@ def generate_subtitle(
             item1="", item2="", action_noun="", of_object="",
         )
 
-    items = _weighted_sample(list_rows, 2, rng)
-    action_noun = _weighted_sample(action_rows, 1, rng)[0]
-    of_object = _weighted_sample(obj_rows, 1, rng)[0]
+    items = _weighted_sample(list_rows, 2, rng, tone_target)
+    action_noun = _weighted_sample(action_rows, 1, rng, tone_target)[0]
+    of_object = _weighted_sample(obj_rows, 1, rng, tone_target)[0]
 
     return GeneratedSubtitle(
         text=f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}",

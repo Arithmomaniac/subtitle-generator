@@ -94,6 +94,38 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
 
     return tone, score
 
+
+# Tier indices for probabilistic sampling
+_TIERS = [
+    ("pop", TONE_HIGH, 1.5),       # center score for pop
+    ("mainstream", TONE_MEDIUM, 0.75),  # center score for mainstream
+    ("niche", TONE_LOW, 0.25),     # center score for niche
+]
+
+
+def sample_tone(score: float, allowed_tiers: set[str] | None = None) -> tuple[str, str]:
+    """Randomly sample a tone tier with probabilities centered on the score.
+
+    Returns (tier_name, tone_text). Probabilities are Gaussian-weighted
+    by distance from each tier's center score. allowed_tiers clamps the
+    selection to a subset (zeroing out disallowed tiers and renormalizing).
+    """
+    spread = 0.6  # controls how peaked the distribution is
+    weights = []
+    tiers = []
+    for name, text, center in _TIERS:
+        if allowed_tiers and name not in allowed_tiers:
+            continue
+        w = math.exp(-((score - center) / spread) ** 2)
+        weights.append(w)
+        tiers.append((name, text))
+
+    if not tiers:
+        return "mainstream", TONE_MEDIUM
+
+    chosen = random.choices(tiers, weights=weights, k=1)[0]
+    return chosen
+
 RESEARCH_PROMPT = """\
 You are a publishing industry researcher. I will give you a randomly generated book subtitle
 in the pop-nonfiction pattern "X, Y, and the Z of W". Your job is to research the real-world
@@ -319,7 +351,7 @@ DEFAULT_MODEL = "gpt-5.4-mini"
 async def _generate_jacket_async(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     deep_research: bool = False, conn: sqlite3.Connection | None = None,
-    tone_override: str | None = None,
+    tone_override: str | None = None, allowed_tiers: set[str] | None = None,
 ) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry.
 
@@ -330,11 +362,15 @@ async def _generate_jacket_async(
     """
     if tone_override:
         tone = tone_override
-        click.echo(f"  📚 Tone tier: override")
+        click.echo(f"  📚 Tone: override")
     else:
-        tone, score = compute_accessibility(subtitle, conn)
-        tier_name = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
-        click.echo(f"  📚 Tone tier: {tier_name} (accessibility score: {score:.2f})")
+        _, score = compute_accessibility(subtitle, conn)
+        tier_name, tone = sample_tone(score, allowed_tiers)
+        natural = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
+        if tier_name != natural:
+            click.echo(f"  📚 Tone: {tier_name} (natural: {natural}, score: {score:.2f})")
+        else:
+            click.echo(f"  📚 Tone: {tier_name} (score: {score:.2f})")
 
     async with CopilotClient() as client:
         async with await client.create_session(
@@ -404,11 +440,12 @@ def generate_jacket(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     show_concept: bool = False, deep_research: bool = False,
     conn: sqlite3.Connection | None = None, tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
 ) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
     content = asyncio.run(_generate_jacket_async(
         subtitle, model=model, timeout=timeout, deep_research=deep_research,
-        conn=conn, tone_override=tone_override,
+        conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
     ))
     if not show_concept:
         content = _strip_internal_concept(content)
