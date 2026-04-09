@@ -22,8 +22,29 @@ from subtitle_generator.tune import run_autoresearch
 
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
-_TONE_THRESHOLDS = {"pop": 1.0, "mainstream": 0.5, "niche": 0.0}
 _MAX_REJECTION_ATTEMPTS = 200
+_VALID_TONES = set(_TONE_CHOICES.keys())
+
+
+def _parse_tone(tone_str: str | None) -> set[str] | None:
+    """Parse a comma-separated tone string into a set of valid tier names."""
+    if not tone_str:
+        return None
+    tones = {t.strip().lower() for t in tone_str.split(",")}
+    invalid = tones - _VALID_TONES
+    if invalid:
+        raise click.BadParameter(f"Invalid tone(s): {', '.join(invalid)}. Choose from: pop, mainstream, niche")
+    return tones
+
+
+def _score_to_tier(score: float) -> str:
+    """Map an accessibility score to a tier name."""
+    if score > 1.0:
+        return "pop"
+    elif score >= 0.5:
+        return "mainstream"
+    else:
+        return "niche"
 
 
 @click.group()
@@ -170,9 +191,11 @@ def build_slots_cmd(loose: bool):
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in jacket output.")
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
-@click.option("--tone", type=click.Choice(["pop", "mainstream", "niche"]), default=None, help="Filter subtitles by accessibility tier, or override jacket tone.")
+@click.option("--tone", default=None, help="Filter by accessibility tier: pop, mainstream, niche (comma-separated for multiple, e.g. 'pop,mainstream').")
 def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None):
     """Generate bizarre subtitles — slot machine style!"""
+    tone_set = _parse_tone(tone)
+
     if count is None:
         count = 1 if jacket else 10
 
@@ -183,8 +206,8 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         click.echo("No slots found. Run 'build-slots' first.")
         return
     click.echo(f"Slot machine loaded ({mode} mode): {stats}")
-    if tone:
-        click.echo(f"Tone filter: {tone}")
+    if tone_set:
+        click.echo(f"Tone filter: {', '.join(sorted(tone_set))}")
     click.echo()
 
     generated = 0
@@ -194,25 +217,23 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         sub = generate_subtitle(conn, seed=s, mode=mode)
         attempts += 1
 
-        # Tone filtering: reject subtitles that don't match the requested tier
-        if tone:
+        # Tone filtering: reject subtitles whose tier isn't in the requested set
+        if tone_set:
             _, score = compute_accessibility(sub.text, conn)
-            if tone == "pop" and score <= _TONE_THRESHOLDS["pop"]:
+            if _score_to_tier(score) not in tone_set:
+                if attempts > _MAX_REJECTION_ATTEMPTS and generated == 0:
+                    click.echo(f"⚠ Could not find a matching subtitle after {attempts} attempts.")
+                    break
                 continue
-            elif tone == "mainstream" and (score <= _TONE_THRESHOLDS["mainstream"] or score > _TONE_THRESHOLDS["pop"]):
-                continue
-            elif tone == "niche" and score >= _TONE_THRESHOLDS["mainstream"]:
-                continue
-            if attempts > _MAX_REJECTION_ATTEMPTS and generated == 0:
-                click.echo(f"⚠ Could not find a '{tone}' subtitle after {attempts} attempts.")
-                break
 
         generated += 1
 
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            tone_override = _TONE_CHOICES[tone] if tone else None
+            tone_override = _TONE_CHOICES[tone] if tone and not tone_set else None
+            if tone_set and len(tone_set) == 1:
+                tone_override = _TONE_CHOICES[next(iter(tone_set))]
             md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, tone_override=tone_override, **kwargs)
             click.echo(md)
             if sources:
@@ -235,7 +256,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in output.")
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
-@click.option("--tone", type=click.Choice(["pop", "mainstream", "niche"]), default=None, help="Override auto-detected tone tier for jacket generation.")
+@click.option("--tone", default=None, help="Override tone tier: pop, mainstream, niche (comma-separated for multiple).")
 def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None):
     """Generate a full book jacket — title, back cover, reviews, and blurbs.
 
@@ -249,7 +270,8 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
       subtitle-gen jacket --model claude-haiku-4.5  # use a different model
     """
     kwargs = {"model": model} if model else {}
-    tone_override = _TONE_CHOICES[tone] if tone else None
+    tone_set = _parse_tone(tone)
+    tone_override = _TONE_CHOICES[next(iter(tone_set))] if tone_set and len(tone_set) == 1 else None
     conn = get_db()
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
