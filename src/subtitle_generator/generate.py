@@ -20,9 +20,9 @@ class GeneratedSubtitle:
 
 
 def _weighted_sample(rows: list[tuple[str, int]], k: int, rng: random.Random | None = None) -> list[str]:
-    """Pick k unique fillers weighted by log10(1 + freq)."""
+    """Pick k unique fillers weighted by sqrt(freq)."""
     fillers = [r[0] for r in rows]
-    weights = [math.log10(1 + r[1]) for r in rows]
+    weights = [math.sqrt(r[1]) for r in rows]
     chosen = []
     # Weighted sampling without replacement
     for _ in range(k):
