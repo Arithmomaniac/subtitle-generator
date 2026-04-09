@@ -1,5 +1,6 @@
 """Generate bizarre subtitles by randomly combining slot fillers."""
 
+import math
 import random
 import re
 import sqlite3
@@ -18,40 +19,55 @@ class GeneratedSubtitle:
     of_object: str
 
 
+def _weighted_sample(rows: list[tuple[str, int]], k: int, rng: random.Random | None = None) -> list[str]:
+    """Pick k unique fillers weighted by log10(1 + freq)."""
+    fillers = [r[0] for r in rows]
+    weights = [math.log10(1 + r[1]) for r in rows]
+    chosen = []
+    # Weighted sampling without replacement
+    for _ in range(k):
+        pick = (rng or random).choices(fillers, weights=weights, k=1)[0]
+        idx = fillers.index(pick)
+        chosen.append(pick)
+        fillers.pop(idx)
+        weights.pop(idx)
+    return chosen
+
+
 def generate_subtitle(
     conn: sqlite3.Connection, seed: int | None = None, mode: str = "strict"
 ) -> GeneratedSubtitle:
     """Generate one random subtitle in the 'X, Y, and the Z of W' pattern."""
+    rng = None
     if seed is not None:
-        random.seed(seed)
+        rng = random.Random(seed)
 
     mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
 
-    list_items = conn.execute(
-        f"SELECT filler FROM slot_fillers WHERE slot_type = 'list_item' {mode_filter} ORDER BY RANDOM() LIMIT 2"
+    list_rows = conn.execute(
+        f"SELECT filler, freq FROM slot_fillers WHERE slot_type = 'list_item' {mode_filter}"
     ).fetchall()
-    action = conn.execute(
-        f"SELECT filler FROM slot_fillers WHERE slot_type = 'action_noun' {mode_filter} ORDER BY RANDOM() LIMIT 1"
-    ).fetchone()
-    obj = conn.execute(
-        f"SELECT filler FROM slot_fillers WHERE slot_type = 'of_object' {mode_filter} ORDER BY RANDOM() LIMIT 1"
-    ).fetchone()
+    action_rows = conn.execute(
+        f"SELECT filler, freq FROM slot_fillers WHERE slot_type = 'action_noun' {mode_filter}"
+    ).fetchall()
+    obj_rows = conn.execute(
+        f"SELECT filler, freq FROM slot_fillers WHERE slot_type = 'of_object' {mode_filter}"
+    ).fetchall()
 
-    if len(list_items) < 2 or not action or not obj:
+    if len(list_rows) < 2 or not action_rows or not obj_rows:
         return GeneratedSubtitle(
             text="(not enough fillers — run 'build-slots' first)",
             item1="", item2="", action_noun="", of_object="",
         )
 
-    item1 = list_items[0][0]
-    item2 = list_items[1][0]
-    action_noun = action[0]
-    of_object = obj[0]
+    items = _weighted_sample(list_rows, 2, rng)
+    action_noun = _weighted_sample(action_rows, 1, rng)[0]
+    of_object = _weighted_sample(obj_rows, 1, rng)[0]
 
     return GeneratedSubtitle(
-        text=f"{item1}, {item2}, and the {action_noun} of {of_object}",
-        item1=item1,
-        item2=item2,
+        text=f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}",
+        item1=items[0],
+        item2=items[1],
         action_noun=action_noun,
         of_object=of_object,
     )

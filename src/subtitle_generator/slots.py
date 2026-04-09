@@ -149,9 +149,14 @@ def ensure_slot_tables(conn: sqlite3.Connection):
             filler TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT 'strict',
             source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
             UNIQUE(slot_type, filler)
         )
     """)
+    # Migration: add freq column if missing (pre-existing databases)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(slot_fillers)")}
+    if "freq" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN freq INTEGER NOT NULL DEFAULT 1")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()
@@ -184,9 +189,9 @@ def build_slots(conn: sqlite3.Connection):
     conn.commit()
 
     # NLP-validated slot extraction
-    list_items_seen: dict[str, int] = {}  # filler → source subtitle_id
-    action_nouns_seen: dict[str, int] = {}
-    of_objects_seen: dict[str, int] = {}
+    list_items_seen: dict[str, tuple[int, int]] = {}  # filler → (source_subtitle_id, count)
+    action_nouns_seen: dict[str, tuple[int, int]] = {}
+    of_objects_seen: dict[str, tuple[int, int]] = {}
     clean_matches = 0
 
     for i, m in enumerate(matches):
@@ -210,9 +215,12 @@ def build_slots(conn: sqlite3.Connection):
         clean_matches += 1
         sid = m["subtitle_id"]
         for item in valid_items:
-            list_items_seen.setdefault(item, sid)
-        action_nouns_seen.setdefault(action, sid)
-        of_objects_seen.setdefault(obj, sid)
+            prev = list_items_seen.get(item)
+            list_items_seen[item] = (prev[0] if prev else sid, (prev[1] if prev else 0) + 1)
+        prev = action_nouns_seen.get(action)
+        action_nouns_seen[action] = (prev[0] if prev else sid, (prev[1] if prev else 0) + 1)
+        prev = of_objects_seen.get(obj)
+        of_objects_seen[obj] = (prev[0] if prev else sid, (prev[1] if prev else 0) + 1)
 
         if (i + 1) % 2000 == 0:
             click.echo(f"  ...validated {i + 1:,} / {len(matches):,}")
@@ -220,13 +228,13 @@ def build_slots(conn: sqlite3.Connection):
     click.echo(f"Clean matches (NLP-validated): {clean_matches:,}")
 
     filler_rows = (
-        [("list_item", x, "strict", sid) for x, sid in list_items_seen.items()]
-        + [("action_noun", x, "strict", sid) for x, sid in action_nouns_seen.items()]
-        + [("of_object", x, "strict", sid) for x, sid in of_objects_seen.items()]
+        [("list_item", x, "strict", sid, freq) for x, (sid, freq) in list_items_seen.items()]
+        + [("action_noun", x, "strict", sid, freq) for x, (sid, freq) in action_nouns_seen.items()]
+        + [("of_object", x, "strict", sid, freq) for x, (sid, freq) in of_objects_seen.items()]
     )
     conn.executemany(
-        "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id, freq) "
+        "VALUES (?, ?, ?, ?, ?)",
         filler_rows,
     )
     conn.commit()
