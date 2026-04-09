@@ -51,6 +51,20 @@ def _normalize_spacing(phrase: str) -> str:
     return phrase.strip()
 
 
+def _has_encoding_artifacts(phrase: str) -> bool:
+    """Reject fillers with mojibake or non-ASCII noise from MARC data."""
+    # Common mojibake characters: ¿, Ã, Â, Æ, ï¿½, replacement char
+    if re.search(r"[¿\ufffd\u00c3\u00c2\u00c6]", phrase):
+        return True
+    # Non-ASCII that isn't common diacritics (é, ñ, ü, etc.)
+    for ch in phrase:
+        if ord(ch) > 127:
+            # Allow common Latin diacritics (À-ÿ range minus control chars)
+            if not ("\u00c0" <= ch <= "\u024f" or ch in "\u2013\u2014"):
+                return True
+    return False
+
+
 def _is_truncated(phrase: str) -> bool:
     """Detect fillers cut off mid-word (e.g. 'Independent Fil')."""
     words = phrase.split()
@@ -299,11 +313,11 @@ def build_slots(conn: sqlite3.Connection):
         action = _normalize_spacing(m["action_noun"])
         obj = _normalize_spacing(m["of_object"])
 
-        if _is_truncated(action) or _is_weak_or_jargon(action):
+        if _has_encoding_artifacts(action) or _is_truncated(action) or _is_weak_or_jargon(action):
             continue
         if not _is_valid_action(action, nlp):
             continue
-        if _is_truncated(obj) or _is_weak_or_jargon(obj):
+        if _has_encoding_artifacts(obj) or _is_truncated(obj) or _is_weak_or_jargon(obj):
             continue
         if not _is_valid_object(obj, nlp):
             continue
@@ -312,7 +326,7 @@ def build_slots(conn: sqlite3.Connection):
         for item in m["list_items"]:
             cleaned = re.sub(r"[\s]*[/:;,.]\s*$", "", item).strip()
             cleaned = _normalize_spacing(cleaned)
-            if not cleaned or _is_truncated(cleaned) or _is_weak_or_jargon(cleaned):
+            if not cleaned or _has_encoding_artifacts(cleaned) or _is_truncated(cleaned) or _is_weak_or_jargon(cleaned):
                 continue
             if _is_valid_list_item(cleaned, nlp):
                 valid_items.append(cleaned)
