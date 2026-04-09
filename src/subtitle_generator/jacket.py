@@ -319,6 +319,7 @@ DEFAULT_MODEL = "gpt-5.4-mini"
 async def _generate_jacket_async(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     deep_research: bool = False, conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None,
 ) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry.
 
@@ -327,9 +328,13 @@ async def _generate_jacket_async(
       Phase 2: Jacket prompt that builds on the established concept
     Otherwise uses the enhanced one-shot prompt (which also does web search for concept).
     """
-    tone, score = compute_accessibility(subtitle, conn)
-    tier_name = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
-    click.echo(f"  📚 Tone tier: {tier_name} (accessibility score: {score:.2f})")
+    if tone_override:
+        tone = tone_override
+        click.echo(f"  📚 Tone tier: override")
+    else:
+        tone, score = compute_accessibility(subtitle, conn)
+        tier_name = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
+        click.echo(f"  📚 Tone tier: {tier_name} (accessibility score: {score:.2f})")
 
     async with CopilotClient() as client:
         async with await client.create_session(
@@ -398,11 +403,12 @@ def _strip_internal_concept(content: str) -> str:
 def generate_jacket(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     show_concept: bool = False, deep_research: bool = False,
-    conn: sqlite3.Connection | None = None,
+    conn: sqlite3.Connection | None = None, tone_override: str | None = None,
 ) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
     content = asyncio.run(_generate_jacket_async(
-        subtitle, model=model, timeout=timeout, deep_research=deep_research, conn=conn,
+        subtitle, model=model, timeout=timeout, deep_research=deep_research,
+        conn=conn, tone_override=tone_override,
     ))
     if not show_concept:
         content = _strip_internal_concept(content)
