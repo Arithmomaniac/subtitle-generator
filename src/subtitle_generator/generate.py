@@ -56,7 +56,7 @@ def _weighted_sample(
 # of_object has a much thinner pop tail, so its targets are lower.
 TONE_TARGETS = {
     "pop": {"list_item": 1.5, "action_noun": 1.5, "of_object": 1.0},
-    "mainstream": {"list_item": 0.75, "action_noun": 0.75, "of_object": 0.6},
+    "mainstream": {"list_item": 1.0, "action_noun": 1.0, "of_object": 0.8},
     "niche": {"list_item": 0.25, "action_noun": 0.25, "of_object": 0.25},
 }
 
