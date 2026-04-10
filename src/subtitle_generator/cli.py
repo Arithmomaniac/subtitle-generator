@@ -230,8 +230,7 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
             if i < count - 1:
                 click.echo("\n" + "=" * 72 + "\n")
         else:
-            remix_tag = " [remixed]" if sub.remixed else ""
-            click.echo(f"  {i + 1:2d}. {sub.text}{remix_tag}")
+            click.echo(f"  {i + 1:2d}. {sub.text}")
             if sources:
                 click.echo(format_sources(conn, sub))
                 click.echo()
