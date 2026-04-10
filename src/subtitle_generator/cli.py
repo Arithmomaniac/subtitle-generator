@@ -38,7 +38,15 @@ def _parse_tone(tone_str: str | None) -> set[str] | None:
 
 @click.group()
 def cli():
-    """Generate bizarre book subtitles from LOC MARC data."""
+    """Generate bizarre book subtitles from LOC MARC data.
+
+    \b
+    Quick start:
+      subtitle-gen download --parts 1-5   # grab a few MARC files
+      subtitle-gen extract                 # parse into SQLite
+      subtitle-gen build-slots             # extract slot fillers
+      subtitle-gen generate                # slot-machine time
+    """
     pass
 
 
@@ -59,7 +67,15 @@ def version():
     "--keep-gz", is_flag=True, help="Keep .gz files instead of decompressing."
 )
 def download(parts: str, force: bool, keep_gz: bool):
-    """Download LOC MARC bulk data files (Books All, 2016 retrospective)."""
+    """Download LOC MARC bulk data files (Books All, 2016 retrospective).
+
+    \b
+    Examples:
+      subtitle-gen download --parts 1        # single file (~200 MB)
+      subtitle-gen download --parts 1-5      # range
+      subtitle-gen download --parts all      # all 43 files (~9 GB)
+      subtitle-gen download --parts 1 --force  # re-download
+    """
     part_nums = parse_parts_arg(parts)
     click.echo(f"Downloading {len(part_nums)} part(s): {part_nums}")
     for p in part_nums:
@@ -75,7 +91,14 @@ def download(parts: str, force: bool, keep_gz: bool):
 )
 @click.option("--all-langs", is_flag=True, help="Include non-English subtitles.")
 def extract(parts: str | None, all_langs: bool):
-    """Extract subtitles from downloaded MARC files into SQLite."""
+    """Extract subtitles from downloaded MARC files into SQLite.
+
+    \b
+    Examples:
+      subtitle-gen extract               # all downloaded .mrc files
+      subtitle-gen extract --parts 1-5   # specific parts only
+      subtitle-gen extract --all-langs   # include non-English
+    """
     raw_dir = DATA_DIR / "raw"  # DATA_DIR = .../data
     if parts:
         part_nums = parse_parts_arg(parts)
@@ -107,7 +130,13 @@ def extract(parts: str | None, all_langs: bool):
 @cli.command("download-ol")
 @click.option("--force", is_flag=True, help="Re-download even if file exists.")
 def download_ol(force: bool):
-    """Download Open Library editions dump (~9.2 GB compressed)."""
+    """Download Open Library editions dump (~9.2 GB compressed).
+
+    \b
+    Examples:
+      subtitle-gen download-ol           # download (~9.2 GB)
+      subtitle-gen download-ol --force   # re-download
+    """
     download_ol_dump(force=force)
 
 
@@ -115,7 +144,13 @@ def download_ol(force: bool):
 @click.option("--all-langs", is_flag=True, help="Include non-English subtitles.")
 @click.option("--no-dedup", is_flag=True, help="Skip deduplication (faster for testing).")
 def extract_ol(all_langs: bool, no_dedup: bool):
-    """Extract subtitles from Open Library editions dump into SQLite."""
+    """Extract subtitles from Open Library editions dump into SQLite.
+
+    \b
+    Examples:
+      subtitle-gen extract-ol             # extract + deduplicate vs LOC
+      subtitle-gen extract-ol --no-dedup  # skip dedup (faster)
+    """
     conn = get_db()
     ensure_isbn_column(conn)
     lines, subs, dupes = extract_from_ol_dump(
@@ -131,7 +166,13 @@ def extract_ol(all_langs: bool, no_dedup: bool):
 @cli.command()
 @click.option("--limit", default=None, type=int, help="Max subtitles to analyze.")
 def analyze(limit: int | None):
-    """POS-tag subtitles and extract structural templates."""
+    """POS-tag subtitles and extract structural templates.
+
+    \b
+    Examples:
+      subtitle-gen analyze              # analyze all subtitles
+      subtitle-gen analyze --limit 1000 # quick test run
+    """
     conn = get_db()
     analyze_subtitles(conn, limit=limit)
     build_pattern_index(conn)
@@ -142,7 +183,14 @@ def analyze(limit: int | None):
 @click.option("--top", default=50, help="Show top N patterns.")
 @click.option("--min-count", default=10, help="Minimum occurrence count.")
 def patterns(top: int, min_count: int):
-    """Show discovered subtitle patterns ranked by frequency."""
+    """Show discovered subtitle patterns ranked by frequency.
+
+    \b
+    Examples:
+      subtitle-gen patterns                  # top 50, min 10 occurrences
+      subtitle-gen patterns --top 10         # just the top 10
+      subtitle-gen patterns --min-count 100  # only common patterns
+    """
     conn = get_db()
     rows = conn.execute(
         "SELECT template, count, example_subtitle FROM patterns "
@@ -162,7 +210,15 @@ def patterns(top: int, min_count: int):
 
 @cli.command("build-slots")
 def build_slots_cmd():
-    """Extract slot fillers from matched subtitles (regex + NLP validated)."""
+    """Extract slot fillers from matched subtitles (regex + NLP validated).
+
+    Runs regex pattern matching, spaCy POS/NER validation, and of-object
+    decomposition. Rebuilds the entire slot_fillers table from scratch.
+
+    \b
+    Examples:
+      subtitle-gen build-slots   # extract all slot fillers
+    """
     conn = get_db()
     build_slots(conn)
     conn.close()
@@ -178,10 +234,23 @@ def build_slots_cmd():
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Filter by accessibility tier: pop, mainstream, niche (comma-separated for multiple, e.g. 'pop,mainstream').")
 @click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
-@click.option("--remix-prob", default=None, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated value or 0.5.")
-@click.option("--min-sim", default=None, type=float, help="Minimum cosine similarity for remix coherence filter. Default: calibrated value or 0.0.")
+@click.option("--remix-prob", default=None, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
+@click.option("--min-sim", default=None, type=float, help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
 def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None):
-    """Generate bizarre subtitles — slot machine style!"""
+    """Generate random subtitles in the "X, Y, and the Z of W" pattern.
+
+    Draws slot fillers from the extracted pool, optionally remixing multi-word
+    of-objects into novel combinations (enabled by default).
+
+    \b
+    Examples:
+      subtitle-gen generate                         # 10 random subtitles
+      subtitle-gen generate -n 5 --sources          # 5 with source books
+      subtitle-gen generate --tone pop              # bias toward accessible
+      subtitle-gen generate --no-remix              # original of-objects only
+      subtitle-gen generate --jacket                # 1 subtitle + full jacket
+      subtitle-gen generate --jacket --deep-research  # jacket with web search
+    """
     tone_set = _parse_tone(tone)
 
     if count is None:
@@ -284,7 +353,14 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
 @click.option("--slot-type", default=None, help="Filter by slot type.")
 @click.option("--sample", default=20, help="Number of fillers to show per type.")
 def slots(slot_type: str | None, sample: int):
-    """Show available slot fillers."""
+    """Show available slot fillers.
+
+    \b
+    Examples:
+      subtitle-gen slots                          # sample all types
+      subtitle-gen slots --slot-type of_object    # just of-objects
+      subtitle-gen slots --sample 5               # fewer per type
+    """
     conn = get_db()
     if slot_type:
         types = [slot_type]
@@ -310,13 +386,16 @@ def slots(slot_type: str | None, sample: int):
 @click.option("--samples", default=50, type=int, help="Subtitles per parameter level (default: 50). Rated in a single LLM call per level.")
 @click.option("--model", default="gpt-5.4-mini", help="LLM model for rating (default: gpt-5.4-mini).")
 def calibrate_remix_cmd(samples: int, model: str):
-    """Auto-tune remix_prob and min_sim using LLM evaluation.
+    """Auto-tune remix parameters using LLM-based rating.
 
-    Two-phase calibration:
-      Phase 1: Sweep embedding threshold (min_sim) at remix_prob=1.0
-      Phase 2: Sweep remix probability (remix_prob) at optimal min_sim
+    Generates subtitles at various remix_prob and min_sim levels, rates them
+    with an LLM, and stores the best values in the database.
 
-    Results are stored in the database and become defaults for 'generate --remix'.
+    \b
+    Examples:
+      subtitle-gen calibrate-remix                     # 50 samples/level
+      subtitle-gen calibrate-remix --samples 100       # higher confidence
+      subtitle-gen calibrate-remix --model gpt-4.1     # different rater
     """
     conn = get_db()
     run_calibration(conn, samples=samples, model=model)
