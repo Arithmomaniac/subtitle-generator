@@ -399,6 +399,46 @@ def calibrate_remix_cmd(samples: int, model: str):
     conn.close()
 
 
+@cli.command()
+@click.option("--port", default=8742, type=click.IntRange(min=1024, max=65535), help="Port to listen on.")
+@click.option("--no-open", is_flag=True, help="Don't open browser automatically.")
+def serve(port: int, no_open: bool):
+    """Start the web app locally.
+
+    Runs a local HTTP server serving the web frontend and API endpoints.
+    Opens the default browser automatically.
+
+    \b
+    Examples:
+      subtitle-gen serve                # start on port 8742, open browser
+      subtitle-gen serve --port 9000    # custom port
+      subtitle-gen serve --no-open      # don't open browser
+    """
+    import threading
+    import webbrowser
+
+    from subtitle_generator.serve import create_server
+
+    web_dir = Path(__file__).parent.parent.parent / "web"
+    if not web_dir.is_dir():
+        click.echo(f"Warning: web/ directory not found at {web_dir}")
+        click.echo("  API endpoints will still be served.\n")
+
+    server = create_server(port=port, web_dir=web_dir)
+    url = f"http://localhost:{port}"
+    click.echo(f"Serving on {url}")
+    click.echo("Press Ctrl+C to stop.\n")
+
+    if not no_open:
+        threading.Timer(0.5, webbrowser.open, args=[url]).start()
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("\nShutting down.")
+        server.shutdown()
+
+
 @cli.command("export-db")
 @click.option("--output", "-o", default="api/data/subtitles.mini.db", help="Output path for mini DB.")
 def export_db_cmd(output: str):
