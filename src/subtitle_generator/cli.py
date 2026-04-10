@@ -108,8 +108,7 @@ def extract(parts: str | None, all_langs: bool):
         mrc_files = sorted(raw_dir.glob("*.mrc"))
 
     if not mrc_files:
-        click.echo("No .mrc files found. Run 'download' first.")
-        return
+        raise click.ClickException("No .mrc files found. Run 'subtitle-gen download' first.")
 
     conn = get_db()
     total_records = 0
@@ -180,8 +179,8 @@ def analyze(limit: int | None):
 
 
 @cli.command()
-@click.option("--top", default=50, help="Show top N patterns.")
-@click.option("--min-count", default=10, help="Minimum occurrence count.")
+@click.option("--top", default=50, type=click.IntRange(min=1), help="Show top N patterns.")
+@click.option("--min-count", default=10, type=click.IntRange(min=1), help="Minimum occurrence count.")
 def patterns(top: int, min_count: int):
     """Show discovered subtitle patterns ranked by frequency.
 
@@ -198,8 +197,7 @@ def patterns(top: int, min_count: int):
         (min_count, top),
     ).fetchall()
     if not rows:
-        click.echo("No patterns found. Run 'analyze' first.")
-        return
+        raise click.ClickException("No patterns found. Run 'subtitle-gen analyze' first.")
     click.echo(f"Top {len(rows)} patterns (min count: {min_count}):\n")
     for i, (template, count, example) in enumerate(rows, 1):
         click.echo(f"{i:3d}. [{count:,}x] {template}")
@@ -225,7 +223,7 @@ def build_slots_cmd():
 
 
 @cli.command()
-@click.option("--count", "-n", default=None, type=int, help="Number of subtitles to generate (default: 10, or 1 with --jacket).")
+@click.option("--count", "-n", default=None, type=click.IntRange(min=1), help="Number of subtitles to generate (default: 10, or 1 with --jacket).")
 @click.option("--seed", default=None, type=int, help="Random seed for reproducibility.")
 @click.option("--jacket", is_flag=True, help="Generate full book jacket (title, back cover, reviews, blurbs).")
 @click.option("--sources", is_flag=True, help="Show which real books each slot filler came from.")
@@ -234,8 +232,8 @@ def build_slots_cmd():
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Filter by accessibility tier: pop, mainstream, niche (comma-separated for multiple, e.g. 'pop,mainstream').")
 @click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
-@click.option("--remix-prob", default=None, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
-@click.option("--min-sim", default=None, type=float, help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
+@click.option("--remix-prob", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
+@click.option("--min-sim", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
 def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None):
     """Generate random subtitles in the "X, Y, and the Z of W" pattern.
 
@@ -259,8 +257,7 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     conn = get_db()
     stats = slot_stats(conn)
     if not stats:
-        click.echo("No slots found. Run 'build-slots' first.")
-        return
+        raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
 
     # Use calibrated defaults (baked in), DB override, or CLI override
     if remix_prob is None:
@@ -336,9 +333,8 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
     else:
         stats = slot_stats(conn)
         if not stats:
-            click.echo("No slots found. Run 'build-slots' first.")
             conn.close()
-            return
+            raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
         click.echo(f"Slot machine loaded: {stats}\n")
         sub = generate_subtitle(conn, seed=seed)
         click.echo(f"Generating jacket for: {sub.text}\n")
@@ -351,7 +347,7 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
 
 @cli.command()
 @click.option("--slot-type", default=None, help="Filter by slot type.")
-@click.option("--sample", default=20, help="Number of fillers to show per type.")
+@click.option("--sample", default=20, type=click.IntRange(min=1), help="Number of fillers to show per type.")
 def slots(slot_type: str | None, sample: int):
     """Show available slot fillers.
 
@@ -383,7 +379,7 @@ def slots(slot_type: str | None, sample: int):
 
 
 @cli.command("calibrate-remix")
-@click.option("--samples", default=50, type=int, help="Subtitles per parameter level (default: 50). Rated in a single LLM call per level.")
+@click.option("--samples", default=50, type=click.IntRange(min=1), help="Subtitles per parameter level (default: 50). Rated in a single LLM call per level.")
 @click.option("--model", default="gpt-5.4-mini", help="LLM model for rating (default: gpt-5.4-mini).")
 def calibrate_remix_cmd(samples: int, model: str):
     """Auto-tune remix parameters using LLM-based rating.
