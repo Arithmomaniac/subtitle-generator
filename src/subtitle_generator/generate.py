@@ -156,7 +156,6 @@ def _classify_for_remix(phrase: str, doc) -> tuple[str, int] | tuple[str, str, i
 def compose_compound(
     conn: sqlite3.Connection,
     rng: random.Random | None,
-    mode: str,
     tone_target: dict[str, float] | None,
     ctx: dict,
     word_count: int,
@@ -165,7 +164,6 @@ def compose_compound(
 
     Returns (composed_text, parts_dict) or None if composition fails.
     """
-    mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
     mod_word_count = word_count - 1  # head is always 1 word
     mod_space_count = mod_word_count - 1
 
@@ -182,9 +180,9 @@ def compose_compound(
 
     # Draw modifier with matching POS and word count
     mod_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers "
-        f"WHERE slot_type = 'of_modifier' AND pos_tag = ? "
-        f"AND length(filler) - length(replace(filler, ' ', '')) = ? {mode_filter}",
+        "SELECT filler, freq FROM slot_fillers "
+        "WHERE slot_type = 'of_modifier' AND pos_tag = ? "
+        "AND length(filler) - length(replace(filler, ' ', '')) = ? AND mode = 'strict'",
         (chosen_mod_pos, mod_space_count),
     ).fetchall()
     if not mod_rows:
@@ -192,8 +190,8 @@ def compose_compound(
 
     # Draw head
     head_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers "
-        f"WHERE slot_type = 'of_head' {mode_filter}",
+        "SELECT filler, freq FROM slot_fillers "
+        "WHERE slot_type = 'of_head' AND mode = 'strict'",
     ).fetchall()
     if not head_rows:
         return None
@@ -210,7 +208,6 @@ def compose_compound(
 def compose_prepositional(
     conn: sqlite3.Connection,
     rng: random.Random | None,
-    mode: str,
     tone_target: dict[str, float] | None,
     ctx: dict,
     prep: str,
@@ -221,16 +218,14 @@ def compose_prepositional(
     Returns (composed_text, parts_dict) or None if composition fails.
     Enforces strict bucket word-count matching.
     """
-    mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
-
     topic_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers "
-        f"WHERE slot_type = 'of_topic' AND prep = ? {mode_filter}",
+        "SELECT filler, freq FROM slot_fillers "
+        "WHERE slot_type = 'of_topic' AND prep = ? AND mode = 'strict'",
         (prep,),
     ).fetchall()
     comp_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers "
-        f"WHERE slot_type = 'of_complement' AND prep = ? {mode_filter}",
+        "SELECT filler, freq FROM slot_fillers "
+        "WHERE slot_type = 'of_complement' AND prep = ? AND mode = 'strict'",
         (prep,),
     ).fetchall()
     if not topic_rows or not comp_rows:
@@ -250,7 +245,7 @@ def compose_prepositional(
 
 
 def generate_subtitle(
-    conn: sqlite3.Connection, seed: int | None = None, mode: str = "strict",
+    conn: sqlite3.Connection, seed: int | None = None,
     tone_target: dict[str, float] | None = None,
     remix_prob: float = 0.0, min_sim: float = 0.0,
 ) -> GeneratedSubtitle:
@@ -264,16 +259,14 @@ def generate_subtitle(
     if seed is not None:
         rng = random.Random(seed)
 
-    mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
-
     list_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers WHERE slot_type = 'list_item' {mode_filter}"
+        "SELECT filler, freq FROM slot_fillers WHERE slot_type = 'list_item' AND mode = 'strict'"
     ).fetchall()
     action_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers WHERE slot_type = 'action_noun' {mode_filter}"
+        "SELECT filler, freq FROM slot_fillers WHERE slot_type = 'action_noun' AND mode = 'strict'"
     ).fetchall()
     obj_rows = conn.execute(
-        f"SELECT filler, freq FROM slot_fillers WHERE slot_type = 'of_object' {mode_filter}"
+        "SELECT filler, freq FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
     ).fetchall()
 
     if len(list_rows) < 2 or not action_rows or not obj_rows:
@@ -297,7 +290,7 @@ def generate_subtitle(
     if remix_prob > 0 and len(of_object.split()) >= 2:
         should_remix = (rng or random).random() < remix_prob
         if should_remix:
-            result = _try_remix(conn, rng, mode, tone_target, of_object, min_sim)
+            result = _try_remix(conn, rng, tone_target, of_object, min_sim)
             if result:
                 of_object, remix_parts = result
                 remixed = True
@@ -316,7 +309,6 @@ def generate_subtitle(
 def _try_remix(
     conn: sqlite3.Connection,
     rng: random.Random | None,
-    mode: str,
     tone_target: dict[str, float] | None,
     original_of_object: str,
     min_sim: float,
@@ -335,10 +327,10 @@ def _try_remix(
     for _ in range(max_retries):
         if classification[0] == "type1":
             _, word_count = classification
-            result = compose_compound(conn, rng, mode, tone_target, ctx, word_count)
+            result = compose_compound(conn, rng, tone_target, ctx, word_count)
         else:
             _, prep, word_count = classification
-            result = compose_prepositional(conn, rng, mode, tone_target, ctx, prep, word_count)
+            result = compose_prepositional(conn, rng, tone_target, ctx, prep, word_count)
 
         if result is None:
             continue
@@ -424,10 +416,9 @@ def format_sources(conn: sqlite3.Connection, sub: GeneratedSubtitle) -> str:
     return "\n".join(lines)
 
 
-def slot_stats(conn: sqlite3.Connection, mode: str = "strict") -> dict:
-    """Get counts per slot type for a given mode."""
-    mode_filter = "" if mode == "loose" else "AND mode = 'strict'"
+def slot_stats(conn: sqlite3.Connection) -> dict:
+    """Get counts per slot type."""
     rows = conn.execute(
-        f"SELECT slot_type, COUNT(*) FROM slot_fillers WHERE 1=1 {mode_filter} GROUP BY slot_type"
+        "SELECT slot_type, COUNT(*) FROM slot_fillers WHERE mode = 'strict' GROUP BY slot_type"
     ).fetchall()
     return dict(rows)

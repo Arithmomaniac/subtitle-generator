@@ -17,8 +17,7 @@ from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
     compute_accessibility, generate_jacket, sample_tone,
 )
-from subtitle_generator.slots import build_loose_slots, build_slots
-from subtitle_generator.tune import run_autoresearch
+from subtitle_generator.slots import build_slots
 
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
@@ -161,20 +160,16 @@ def patterns(top: int, min_count: int):
 
 
 @cli.command("build-slots")
-@click.option("--loose", is_flag=True, help="Also mine the full corpus for expanded slots.")
-def build_slots_cmd(loose: bool):
+def build_slots_cmd():
     """Extract slot fillers from matched subtitles (regex + NLP validated)."""
     conn = get_db()
     build_slots(conn)
-    if loose:
-        build_loose_slots(conn)
     conn.close()
 
 
 @cli.command()
 @click.option("--count", "-n", default=None, type=int, help="Number of subtitles to generate (default: 10, or 1 with --jacket).")
 @click.option("--seed", default=None, type=int, help="Random seed for reproducibility.")
-@click.option("--loose", is_flag=True, help="Use expanded slot fillers from full corpus.")
 @click.option("--jacket", is_flag=True, help="Generate full book jacket (title, back cover, reviews, blurbs).")
 @click.option("--sources", is_flag=True, help="Show which real books each slot filler came from.")
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
@@ -184,7 +179,7 @@ def build_slots_cmd(loose: bool):
 @click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
 @click.option("--remix-prob", default=0.5, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0, default: 0.5).")
 @click.option("--min-sim", default=0.0, type=float, help="Minimum cosine similarity for remix coherence filter (default: 0.0 = no filter).")
-def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float, min_sim: float):
+def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float, min_sim: float):
     """Generate bizarre subtitles — slot machine style!"""
     tone_set = _parse_tone(tone)
     effective_remix_prob = remix_prob if remix else 0.0
@@ -193,12 +188,11 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
         count = 1 if jacket else 10
 
     conn = get_db()
-    mode = "loose" if loose else "strict"
-    stats = slot_stats(conn, mode=mode)
+    stats = slot_stats(conn)
     if not stats:
         click.echo("No slots found. Run 'build-slots' first.")
         return
-    click.echo(f"Slot machine loaded ({mode} mode): {stats}")
+    click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
         click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
     if effective_remix_prob > 0:
@@ -215,7 +209,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 
     for i in range(count):
         s = seed + i if seed is not None else None
-        sub = generate_subtitle(conn, seed=s, mode=mode, tone_target=tone_target, remix_prob=effective_remix_prob, min_sim=min_sim)
+        sub = generate_subtitle(conn, seed=s, tone_target=tone_target, remix_prob=effective_remix_prob, min_sim=min_sim)
 
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
@@ -227,7 +221,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
             if i < count - 1:
                 click.echo("\n" + "=" * 72 + "\n")
         else:
-            remix_tag = " 🔀" if sub.remixed else ""
+            remix_tag = " [remixed]" if sub.remixed else ""
             click.echo(f"  {i + 1:2d}. {sub.text}{remix_tag}")
             if sources:
                 click.echo(format_sources(conn, sub))
@@ -237,14 +231,13 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 
 @cli.command()
 @click.argument("subtitle", required=False, default=None)
-@click.option("--loose", is_flag=True, help="Use expanded slot fillers (only for random generation).")
 @click.option("--seed", default=None, type=int, help="Random seed (only for random generation).")
 @click.option("--sources", is_flag=True, help="Show source books for each slot filler (only for random generation).")
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in output.")
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Override tone tier: pop, mainstream, niche (comma-separated for multiple).")
-def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None):
+def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None):
     """Generate a full book jacket — title, back cover, reviews, and blurbs.
 
     Pass a subtitle string to jacket a specific text, or omit to generate a random one.
@@ -253,7 +246,7 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
     Examples:
       subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
       subtitle-gen jacket                    # random subtitle
-      subtitle-gen jacket --loose --sources  # random from loose pool + show sources
+      subtitle-gen jacket --sources          # random + show sources
       subtitle-gen jacket --model claude-haiku-4.5  # use a different model
     """
     kwargs = {"model": model} if model else {}
@@ -264,14 +257,13 @@ def jacket(subtitle: str | None, loose: bool, seed: int | None, sources: bool, m
         md = generate_jacket(subtitle, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
         click.echo(md)
     else:
-        mode = "loose" if loose else "strict"
-        stats = slot_stats(conn, mode=mode)
+        stats = slot_stats(conn)
         if not stats:
             click.echo("No slots found. Run 'build-slots' first.")
             conn.close()
             return
-        click.echo(f"Slot machine loaded ({mode} mode): {stats}\n")
-        sub = generate_subtitle(conn, seed=seed, mode=mode)
+        click.echo(f"Slot machine loaded: {stats}\n")
+        sub = generate_subtitle(conn, seed=seed)
         click.echo(f"Generating jacket for: {sub.text}\n")
         md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
         click.echo(md)
@@ -303,16 +295,6 @@ def slots(slot_type: str | None, sample: int):
         click.echo(f"\n{st} ({total:,} total):")
         for (f,) in rows:
             click.echo(f"  {f}")
-    conn.close()
-
-
-@cli.command()
-@click.option("--iterations", "-i", default=10, help="Max tuning iterations.")
-@click.option("--batch-size", "-b", default=50, help="Subtitles per iteration.")
-def tune(iterations: int, batch_size: int):
-    """Run autoresearch loop to improve loose mode quality (LLM-graded)."""
-    conn = get_db()
-    run_autoresearch(conn, max_iterations=iterations, batch_size=batch_size)
     conn.close()
 
 
