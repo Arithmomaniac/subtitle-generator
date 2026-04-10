@@ -13,6 +13,7 @@ from subtitle_generator.extract_openlibrary import (
     extract_from_ol_dump,
 )
 from subtitle_generator.calibrate import run_calibration
+from subtitle_generator.export_db import export_mini_db
 from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
@@ -396,6 +397,34 @@ def calibrate_remix_cmd(samples: int, model: str):
     conn = get_db()
     run_calibration(conn, samples=samples, model=model)
     conn.close()
+
+
+@cli.command("export-db")
+@click.option("--output", "-o", default="api/data/subtitles.mini.db", help="Output path for mini DB.")
+def export_db_cmd(output: str):
+    """Export a minimal SQLite database for web/API deployment.
+
+    Creates a small (~1-2 MB) DB with just the tables needed for subtitle
+    generation: slot_fillers, config, and a sources lookup table.
+
+    \b
+    Examples:
+      subtitle-gen export-db                           # default output
+      subtitle-gen export-db -o web/data/mini.db       # custom path
+    """
+    output_path = Path(output)
+    conn = get_db()
+    click.echo(f"Exporting mini DB to {output_path} ...")
+    stats = export_mini_db(conn, output_path)
+    conn.close()
+
+    for table, count in stats.items():
+        click.echo(f"  {table}: {count:,} rows")
+    size_kb = output_path.stat().st_size / 1024
+    if size_kb >= 1024:
+        click.echo(f"Output: {output_path} ({size_kb / 1024:.1f} MB)")
+    else:
+        click.echo(f"Output: {output_path} ({size_kb:.0f} KB)")
 
 
 if __name__ == "__main__":

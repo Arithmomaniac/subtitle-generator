@@ -335,6 +335,45 @@ The subtitle is:
 """
 
 
+_TONE_TO_TIER: dict[str, str] = {TONE_HIGH: "pop", TONE_MEDIUM: "mainstream", TONE_LOW: "niche"}
+_TIER_TO_TONE: dict[str, str] = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
+
+
+def build_jacket_prompt(
+    subtitle: str,
+    conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
+) -> tuple[str, str, str]:
+    """Construct the jacket generation prompts without calling the LLM.
+
+    Returns (system_prompt, user_prompt, tone_tier) where:
+    - system_prompt contains role instructions, format requirements, and tone context
+    - user_prompt contains the subtitle framing
+    - tone_tier is "pop", "mainstream", or "niche"
+    """
+    if tone_override:
+        tone = tone_override
+        tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
+    else:
+        _, score = compute_accessibility(subtitle, conn)
+        tone_tier, tone = sample_tone(score, allowed_tiers)
+
+    full_prompt = JACKET_PROMPT.format(subtitle=subtitle, tone=tone)
+
+    # Split at the --- separator into system (instructions) and user (subtitle) parts
+    sep = "\n\n---\n\n"
+    idx = full_prompt.rfind(sep)
+    if idx >= 0:
+        system_prompt = full_prompt[:idx]
+        user_prompt = full_prompt[idx + len(sep) :]
+    else:
+        system_prompt = full_prompt
+        user_prompt = subtitle
+
+    return system_prompt, user_prompt, tone_tier
+
+
 def _validate_jacket(content: str) -> list[str]:
     """Check that all required sections are present. Returns list of missing section names."""
     missing = []
@@ -361,17 +400,19 @@ async def _generate_jacket_async(
       Phase 2: Jacket prompt that builds on the established concept
     Otherwise uses the enhanced one-shot prompt (which also does web search for concept).
     """
+    system_prompt, user_prompt, tone_tier = build_jacket_prompt(
+        subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+    )
+
     if tone_override:
-        tone = tone_override
         click.echo(f"  📚 Tone: override")
     else:
         _, score = compute_accessibility(subtitle, conn)
-        tier_name, tone = sample_tone(score, allowed_tiers)
         natural = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
-        if tier_name != natural:
-            click.echo(f"  📚 Tone: {tier_name} (natural: {natural}, score: {score:.2f})")
+        if tone_tier != natural:
+            click.echo(f"  📚 Tone: {tone_tier} (natural: {natural}, score: {score:.2f})")
         else:
-            click.echo(f"  📚 Tone: {tier_name} (score: {score:.2f})")
+            click.echo(f"  📚 Tone: {tone_tier} (score: {score:.2f})")
 
     async with CopilotClient() as client:
         async with await client.create_session(
@@ -384,6 +425,7 @@ async def _generate_jacket_async(
             if deep_research:
                 # Phase 1: Research the subtitle's themes
                 click.echo("  🔍 Deep research: searching for real-world context...")
+                tone = tone_override if tone_override else _TIER_TO_TONE.get(tone_tier, TONE_MEDIUM)
                 research_prompt = RESEARCH_PROMPT.format(subtitle=subtitle, tone=tone)
                 result = await session.send_and_wait(research_prompt, timeout=timeout)
                 concept_content = (result.data.content or "") if result and result.data else ""
@@ -397,7 +439,7 @@ async def _generate_jacket_async(
             if deep_research and concept_content:
                 prompt = JACKET_PROMPT_PHASE2.format(subtitle=subtitle)
             else:
-                prompt = JACKET_PROMPT.format(subtitle=subtitle, tone=tone)
+                prompt = system_prompt + "\n\n---\n\n" + user_prompt
 
             for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
                 result = await session.send_and_wait(prompt, timeout=timeout)
