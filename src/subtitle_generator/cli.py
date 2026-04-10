@@ -193,13 +193,13 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
         click.echo("No slots found. Run 'build-slots' first.")
         return
 
-    # Read calibrated defaults if user didn't override
+    # Use calibrated defaults (baked in), DB override, or CLI override
     if remix_prob is None:
         row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'").fetchone()
-        remix_prob = float(row[0]) if row else 1.0
+        remix_prob = float(row[0]) if row else 0.8
     if min_sim is None:
         row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'").fetchone()
-        min_sim = float(row[0]) if row else 0.0
+        min_sim = float(row[0]) if row else 0.1
     effective_remix_prob = remix_prob if remix else 0.0
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
