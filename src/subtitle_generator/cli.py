@@ -308,7 +308,7 @@ def slots(slot_type: str | None, sample: int):
 
 
 @cli.command("calibrate-remix")
-@click.option("--samples", default=15, type=int, help="Subtitles per parameter level (default: 15).")
+@click.option("--samples", default=50, type=int, help="Subtitles per parameter level (default: 50). Rated in a single LLM call per level.")
 @click.option("--model", default="gpt-5.4-mini", help="LLM model for rating (default: gpt-5.4-mini).")
 def calibrate_remix_cmd(samples: int, model: str):
     """Auto-tune remix_prob and min_sim using LLM evaluation.

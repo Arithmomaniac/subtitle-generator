@@ -24,7 +24,7 @@ RATING_PROMPT = """\
 You are rating generated book subtitles for quality. Each subtitle follows \
 the pattern "X, Y, and the Z of W" where W is the of-object.
 
-Rate this subtitle on three dimensions (1-10 each):
+Rate EACH subtitle on three dimensions (1-10 each):
 - **Coherence**: Does the of-object make grammatical and semantic sense? \
 (10 = perfectly natural, 1 = word salad)
 - **Evocativeness**: Does it evoke curiosity — would you pick up this book? \
@@ -32,25 +32,32 @@ Rate this subtitle on three dimensions (1-10 each):
 - **Surprise**: Does it pair unexpected concepts in an interesting way? \
 (10 = delightfully unexpected, 1 = completely predictable)
 
-Subtitle: "{subtitle}"
+Subtitles to rate:
+{subtitle_list}
 
-Respond with ONLY a JSON object, no other text:
-{{"coherence": <1-10>, "evocativeness": <1-10>, "surprise": <1-10>}}"""
+Respond with ONLY a JSON array, one object per subtitle in the same order:
+[{{"coherence": <1-10>, "evocativeness": <1-10>, "surprise": <1-10>}}, ...]"""
 
 
-def _parse_rating(text: str) -> dict[str, int] | None:
-    """Extract rating JSON from LLM response."""
-    # Try to find JSON in the response
-    match = re.search(r"\{[^}]+\}", text)
+def _parse_batch_ratings(text: str, expected_count: int) -> list[dict[str, int]]:
+    """Extract rating JSON array from LLM response."""
+    # Find JSON array in response
+    match = re.search(r"\[[\s\S]*\]", text)
     if not match:
-        return None
+        return []
     try:
         data = json.loads(match.group())
-        if all(k in data for k in ("coherence", "evocativeness", "surprise")):
-            return {k: int(data[k]) for k in ("coherence", "evocativeness", "surprise")}
+        if isinstance(data, list):
+            results = []
+            for item in data:
+                if isinstance(item, dict) and all(k in item for k in ("coherence", "evocativeness", "surprise")):
+                    results.append({k: int(item[k]) for k in ("coherence", "evocativeness", "surprise")})
+                else:
+                    results.append({"coherence": 0, "evocativeness": 0, "surprise": 0})
+            return results
     except (json.JSONDecodeError, ValueError):
         pass
-    return None
+    return []
 
 
 def _compute_subtitle_centroid(conn: sqlite3.Connection, nlp) -> np.ndarray | None:
@@ -104,37 +111,48 @@ def _compute_baseline_stats(
     }
 
 
-async def _rate_subtitle(session, subtitle: str) -> dict[str, int] | None:
-    """Rate a single subtitle via LLM."""
-    prompt = RATING_PROMPT.format(subtitle=subtitle)
-    try:
-        result = await session.send_and_wait(prompt, timeout=30.0)
-        if result and result.data and result.data.content:
-            return _parse_rating(result.data.content)
-    except Exception:
-        pass
-    return None
-
-
 async def _rate_batch(subtitles: list[str], model: str) -> list[dict]:
-    """Rate a batch of subtitles sequentially via LLM."""
+    """Rate a batch of subtitles via LLM. Splits into chunks if needed."""
+    # With 50 subtitles the JSON array can get truncated; chunk to ~25
+    chunk_size = 25
+    all_ratings = []
+    for start in range(0, len(subtitles), chunk_size):
+        chunk = subtitles[start:start + chunk_size]
+        ratings = await _rate_chunk(chunk, model, retries=2)
+        all_ratings.extend(ratings)
+    return all_ratings
+
+
+async def _rate_chunk(subtitles: list[str], model: str, retries: int = 2) -> list[dict]:
+    """Rate a chunk of subtitles in a single LLM call, with retry."""
     from copilot import CopilotClient
     from copilot.session import PermissionHandler
 
-    ratings = []
-    async with CopilotClient() as client:
-        async with await client.create_session(
-            on_permission_request=PermissionHandler.approve_all,
-            model=model,
-            infinite_sessions={"enabled": False},
-        ) as session:
-            for subtitle in subtitles:
-                rating = await _rate_subtitle(session, subtitle)
-                if rating:
-                    ratings.append(rating)
-                else:
-                    ratings.append({"coherence": 0, "evocativeness": 0, "surprise": 0})
-    return ratings
+    subtitle_list = "\n".join(f"{i+1}. {s}" for i, s in enumerate(subtitles))
+    prompt = RATING_PROMPT.format(subtitle_list=subtitle_list)
+
+    for attempt in range(retries + 1):
+        try:
+            async with CopilotClient() as client:
+                async with await client.create_session(
+                    on_permission_request=PermissionHandler.approve_all,
+                    model=model,
+                    infinite_sessions={"enabled": False},
+                ) as session:
+                    result = await session.send_and_wait(prompt, timeout=60.0)
+                    if result and result.data and result.data.content:
+                        ratings = _parse_batch_ratings(result.data.content, len(subtitles))
+                        if len(ratings) == len(subtitles):
+                            return ratings
+                        if attempt < retries:
+                            click.echo(f"    (got {len(ratings)}/{len(subtitles)} ratings, retrying...)")
+        except Exception as e:
+            if attempt < retries:
+                click.echo(f"    (attempt {attempt+1} failed: {e}, retrying...)")
+
+    # All retries failed
+    click.echo(f"    (batch rating failed after {retries+1} attempts)")
+    return [{"coherence": 0, "evocativeness": 0, "surprise": 0}] * len(subtitles)
 
 
 def _avg_score(ratings: list[dict]) -> float:
@@ -163,10 +181,14 @@ def _dimension_avgs(ratings: list[dict]) -> dict[str, float]:
 
 def run_calibration(
     conn: sqlite3.Connection,
-    samples: int = 15,
+    samples: int = 50,
     model: str = "gpt-5.4-mini",
 ):
-    """Two-phase LLM calibration of remix_prob and min_sim."""
+    """Two-phase LLM calibration of remix_prob and min_sim.
+    
+    Each level generates `samples` subtitles and rates them all in a single
+    LLM call (cheap — one call per level, not per subtitle).
+    """
     click.echo("=== Remix Calibration ===\n")
 
     # Load remix context (spaCy model, of-object centroid)
