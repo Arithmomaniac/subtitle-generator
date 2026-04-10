@@ -181,9 +181,13 @@ def build_slots_cmd(loose: bool):
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in jacket output.")
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Filter by accessibility tier: pop, mainstream, niche (comma-separated for multiple, e.g. 'pop,mainstream').")
-def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None):
+@click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
+@click.option("--remix-prob", default=0.5, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0, default: 0.5).")
+@click.option("--min-sim", default=0.0, type=float, help="Minimum cosine similarity for remix coherence filter (default: 0.0 = no filter).")
+def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float, min_sim: float):
     """Generate bizarre subtitles — slot machine style!"""
     tone_set = _parse_tone(tone)
+    effective_remix_prob = remix_prob if remix else 0.0
 
     if count is None:
         count = 1 if jacket else 10
@@ -197,6 +201,8 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
     click.echo(f"Slot machine loaded ({mode} mode): {stats}")
     if tone_set:
         click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
+    if effective_remix_prob > 0:
+        click.echo(f"Remix: prob={effective_remix_prob:.1f}, min_sim={min_sim:.2f}")
     click.echo()
 
     # Compute per-slot tone targets (average across requested tiers)
@@ -209,7 +215,7 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
 
     for i in range(count):
         s = seed + i if seed is not None else None
-        sub = generate_subtitle(conn, seed=s, mode=mode, tone_target=tone_target)
+        sub = generate_subtitle(conn, seed=s, mode=mode, tone_target=tone_target, remix_prob=effective_remix_prob, min_sim=min_sim)
 
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
@@ -221,7 +227,8 @@ def generate(count: int | None, seed: int | None, loose: bool, jacket: bool, sou
             if i < count - 1:
                 click.echo("\n" + "=" * 72 + "\n")
         else:
-            click.echo(f"  {i + 1:2d}. {sub.text}")
+            remix_tag = " 🔀" if sub.remixed else ""
+            click.echo(f"  {i + 1:2d}. {sub.text}{remix_tag}")
             if sources:
                 click.echo(format_sources(conn, sub))
                 click.echo()
