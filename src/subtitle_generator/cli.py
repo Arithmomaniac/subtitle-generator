@@ -196,7 +196,7 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     # Read calibrated defaults if user didn't override
     if remix_prob is None:
         row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'").fetchone()
-        remix_prob = float(row[0]) if row else 0.5
+        remix_prob = float(row[0]) if row else 1.0
     if min_sim is None:
         row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'").fetchone()
         min_sim = float(row[0]) if row else 0.0
