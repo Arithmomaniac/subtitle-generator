@@ -12,6 +12,7 @@ from subtitle_generator.extract_openlibrary import (
     ensure_isbn_column,
     extract_from_ol_dump,
 )
+from subtitle_generator.calibrate import run_calibration
 from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
@@ -177,12 +178,11 @@ def build_slots_cmd():
 @click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Filter by accessibility tier: pop, mainstream, niche (comma-separated for multiple, e.g. 'pop,mainstream').")
 @click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
-@click.option("--remix-prob", default=0.5, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0, default: 0.5).")
-@click.option("--min-sim", default=0.0, type=float, help="Minimum cosine similarity for remix coherence filter (default: 0.0 = no filter).")
-def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float, min_sim: float):
+@click.option("--remix-prob", default=None, type=float, help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated value or 0.5.")
+@click.option("--min-sim", default=None, type=float, help="Minimum cosine similarity for remix coherence filter. Default: calibrated value or 0.0.")
+def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None):
     """Generate bizarre subtitles — slot machine style!"""
     tone_set = _parse_tone(tone)
-    effective_remix_prob = remix_prob if remix else 0.0
 
     if count is None:
         count = 1 if jacket else 10
@@ -192,6 +192,15 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     if not stats:
         click.echo("No slots found. Run 'build-slots' first.")
         return
+
+    # Read calibrated defaults if user didn't override
+    if remix_prob is None:
+        row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'").fetchone()
+        remix_prob = float(row[0]) if row else 0.5
+    if min_sim is None:
+        row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'").fetchone()
+        min_sim = float(row[0]) if row else 0.0
+    effective_remix_prob = remix_prob if remix else 0.0
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
         click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
@@ -295,6 +304,23 @@ def slots(slot_type: str | None, sample: int):
         click.echo(f"\n{st} ({total:,} total):")
         for (f,) in rows:
             click.echo(f"  {f}")
+    conn.close()
+
+
+@cli.command("calibrate-remix")
+@click.option("--samples", default=15, type=int, help="Subtitles per parameter level (default: 15).")
+@click.option("--model", default="gpt-5.4-mini", help="LLM model for rating (default: gpt-5.4-mini).")
+def calibrate_remix_cmd(samples: int, model: str):
+    """Auto-tune remix_prob and min_sim using LLM evaluation.
+
+    Two-phase calibration:
+      Phase 1: Sweep embedding threshold (min_sim) at remix_prob=1.0
+      Phase 2: Sweep remix probability (remix_prob) at optimal min_sim
+
+    Results are stored in the database and become defaults for 'generate --remix'.
+    """
+    conn = get_db()
+    run_calibration(conn, samples=samples, model=model)
     conn.close()
 
 
