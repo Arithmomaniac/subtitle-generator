@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Subtitle Generator</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
+.app{max-width:860px;margin:0 auto;padding:20px}
+
+/* Header */
+.header{text-align:center;padding:16px 0;border-bottom:1px solid #333;margin-bottom:20px}
+.header h1{font-size:20px;color:#f0f0f0;font-weight:600}
+.header .tagline{font-size:12px;color:#666;margin-top:4px}
+.mode-badge{display:inline-block;margin-top:6px;padding:2px 10px;border-radius:12px;font-size:10px;font-weight:700;text-transform:uppercase}
+.mode-local{background:#2d6a4f;color:#b7e4c7}
+.mode-azure{background:#3a506b;color:#bde0fe}
+
+/* Settings */
+.settings{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:14px 18px;margin-bottom:18px}
+.settings-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;cursor:pointer}
+.settings-header h2{font-size:12px;color:#888;text-transform:uppercase;letter-spacing:1px}
+.settings-toggle{font-size:11px;color:#6c8ebf;border:none;background:none;cursor:pointer}
+.settings-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px}
+.settings-grid.collapsed{display:none}
+.setting label{display:block;font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
+.setting select,.setting input[type=number]{width:100%;padding:5px 8px;background:#0f1a30;border:1px solid #333;border-radius:5px;color:#e0e0e0;font-size:12px}
+.setting .switch-row{display:flex;align-items:center;gap:6px}
+.switch{width:32px;height:18px;border-radius:9px;background:#444;position:relative;cursor:pointer;transition:background .2s;flex-shrink:0}
+.switch.on{background:#2d6a4f}
+.switch .knob{width:14px;height:14px;border-radius:50%;background:#fff;position:absolute;top:2px;left:2px;transition:left .2s}
+.switch.on .knob{left:16px}
+.switch-label{font-size:12px;color:#aaa}
+
+/* Subtitle display */
+.subtitle-display{background:#0f1a30;border:2px solid #2a2a4a;border-radius:12px;padding:20px;margin-bottom:16px;text-align:center;min-height:90px;display:flex;flex-direction:column;justify-content:center}
+.pattern-label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+.slot-row{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px;font-size:18px;line-height:1.8}
+.slot{display:inline-flex;align-items:center;gap:3px;padding:3px 10px;border-radius:7px;cursor:pointer;transition:all .15s;position:relative}
+.slot:hover{transform:translateY(-1px);filter:brightness(1.15)}
+.slot-list1{background:#1a3a2a;border:1px solid #2d6a4f;color:#a8dadc}
+.slot-list2{background:#1a2a3a;border:1px solid #3a6b8c;color:#a8c8dc}
+.slot-action{background:#2a1a3a;border:1px solid #6b3a8c;color:#d4a8dc}
+.slot-of{background:#3a2a1a;border:1px solid #8c6b3a;color:#dcd4a8}
+.slot-subpart{background:#332a1a;border:1px dashed #8c6b3a;color:#dcd4a8;font-size:16px}
+.slot.locked{border-width:2px;border-style:solid}
+.lock-icon{font-size:11px;opacity:.35;cursor:pointer;user-select:none}
+.slot.locked .lock-icon{opacity:1;color:#ffd700}
+.punc{color:#555;font-size:18px;user-select:none}
+.slot-text{cursor:text}
+.slot-edit{background:#0f1a30;border:1px solid #555;border-radius:4px;color:#e0e0e0;font-size:16px;padding:2px 6px;width:auto;min-width:60px;outline:none}
+.empty-state{color:#555;font-style:italic;font-size:16px}
+
+/* Actions */
+.actions{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-bottom:18px}
+.btn{padding:8px 20px;border-radius:7px;border:none;font-size:13px;font-weight:600;cursor:pointer;transition:all .12s}
+.btn:hover{transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn-primary{background:#e07a5f;color:#fff}
+.btn-secondary{background:#2a2a4a;color:#ccc;border:1px solid #444}
+.btn-jacket{background:#3d405b;color:#f4f1de;border:1px solid #555}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+
+/* Sources */
+.sources{background:#0f1a30;border:1px solid #2a2a4a;border-radius:8px;padding:10px 14px;margin-bottom:18px;display:none}
+.sources.visible{display:block}
+.sources h4{font-size:10px;color:#666;text-transform:uppercase;margin-bottom:6px;cursor:pointer}
+.source-line{font-size:11px;color:#777;margin-bottom:3px;line-height:1.4}
+.source-line .filler{color:#aaa;font-weight:600}
+.source-line .book{color:#6c8ebf}
+.source-line .tag{color:#555}
+.source-line .remix-info{color:#dcd4a8;font-style:italic}
+
+/* Jacket */
+.jacket-section{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:16px 20px;margin-bottom:18px;display:none}
+.jacket-section.visible{display:block}
+.jacket-section h3{font-size:16px;color:#f4f1de;margin-bottom:4px}
+.jacket-subtitle{font-size:13px;color:#e07a5f;font-style:italic;margin-bottom:14px}
+.jacket-body{font-size:12px;color:#bbb;line-height:1.6;white-space:pre-wrap}
+.jacket-loading{color:#888;font-style:italic}
+
+/* Prompt copy */
+.prompt-section{background:#1a2a1a;border:1px solid #2d6a4f;border-radius:10px;padding:14px 18px;margin-bottom:18px;display:none}
+.prompt-section.visible{display:block}
+.prompt-section h3{font-size:13px;color:#81b29a;margin-bottom:6px}
+.prompt-text{background:#0f1a30;border:1px solid #333;border-radius:6px;padding:10px;font-family:'Cascadia Code',monospace;font-size:11px;color:#ccc;line-height:1.5;white-space:pre-wrap;max-height:250px;overflow-y:auto}
+.prompt-actions{display:flex;gap:8px;margin-top:8px;align-items:center}
+.model-links{font-size:11px;color:#6c8ebf}
+.model-links a{color:#6c8ebf;text-decoration:none;margin:0 4px}
+.model-links a:hover{text-decoration:underline}
+
+/* Footer */
+.footer{text-align:center;padding:14px 0;font-size:10px;color:#444;border-top:1px solid #222}
+
+/* Spinner */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #444;border-top-color:#e07a5f;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
+</style>
+</head>
+<body>
+<div class="app">
+
+<div class="header">
+  <h1>Subtitle Generator</h1>
+  <div class="tagline">X, Y, and the Z of W</div>
+  <span class="mode-badge mode-local" id="modeBadge">detecting...</span>
+</div>
+
+<div class="settings">
+  <div class="settings-header" onclick="toggleSettings()">
+    <h2>Settings</h2>
+    <button class="settings-toggle" id="settingsToggle">collapse</button>
+  </div>
+  <div class="settings-grid" id="settingsGrid">
+    <div class="setting">
+      <label>Tone</label>
+      <select id="tone">
+        <option value="">Any</option>
+        <option value="pop">Pop</option>
+        <option value="mainstream">Mainstream</option>
+        <option value="niche">Niche</option>
+        <option value="pop,mainstream">Pop + Mainstream</option>
+      </select>
+    </div>
+    <div class="setting">
+      <label>Remix</label>
+      <div class="switch-row">
+        <div class="switch on" id="remixSwitch" onclick="toggleSwitch(this)"><div class="knob"></div></div>
+        <span class="switch-label">Enabled</span>
+      </div>
+    </div>
+    <div class="setting local-only">
+      <label>Remix Prob</label>
+      <input type="number" id="remixProb" value="0.8" min="0" max="1" step="0.1">
+    </div>
+    <div class="setting local-only">
+      <label>Min Similarity</label>
+      <input type="number" id="minSim" value="0.1" min="0" max="1" step="0.05">
+    </div>
+    <div class="setting local-only">
+      <label>Model</label>
+      <select id="model">
+        <option value="gpt-5.4-mini" selected>gpt-5.4-mini</option>
+        <option value="gpt-4.1">gpt-4.1</option>
+        <option value="claude-haiku-4.5">claude-haiku-4.5</option>
+        <option value="gpt-5-mini">gpt-5-mini</option>
+      </select>
+    </div>
+    <div class="setting local-only">
+      <label>Deep Research</label>
+      <div class="switch-row">
+        <div class="switch" id="deepResearch" onclick="toggleSwitch(this)"><div class="knob"></div></div>
+        <span class="switch-label">Off</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="subtitle-display" id="subtitleDisplay">
+  <div class="pattern-label">Generated Subtitle</div>
+  <div class="slot-row" id="slotRow">
+    <span class="empty-state">Click Generate to start</span>
+  </div>
+</div>
+
+<div class="actions">
+  <button class="btn btn-primary" id="generateBtn" onclick="doGenerate()">Generate</button>
+  <button class="btn btn-secondary" onclick="clearLocks()">Clear Locks</button>
+  <button class="btn btn-secondary" onclick="copySubtitle()">Copy</button>
+  <button class="btn btn-jacket" id="jacketBtn" onclick="doJacket()">Generate Jacket</button>
+  <button class="btn btn-jacket" id="promptBtn" onclick="doJacket(true)" style="display:none">Build Prompt</button>
+</div>
+
+<div class="sources" id="sources"></div>
+
+<div class="jacket-section" id="jacketSection">
+  <div class="jacket-body" id="jacketBody"></div>
+</div>
+
+<div class="prompt-section" id="promptSection">
+  <h3>Jacket Prompt</h3>
+  <div class="prompt-text" id="promptText"></div>
+  <div class="prompt-actions">
+    <button class="btn btn-primary" style="padding:5px 14px;font-size:11px" onclick="copyPrompt()">Copy Prompt</button>
+    <span class="model-links">
+      Paste into:
+      <a href="https://chatgpt.com" target="_blank">ChatGPT</a>
+      <a href="https://claude.ai" target="_blank">Claude</a>
+      <a href="https://gemini.google.com" target="_blank">Gemini</a>
+    </span>
+  </div>
+</div>
+
+<div class="footer">subtitle-generator &mdash; data from Library of Congress &amp; Open Library</div>
+
+</div>
+<script>
+// ── State ──
+let mode = 'detecting';
+let apiBase = '';
+let currentSub = null;
+const locks = {};
+
+// ── Init ──
+(async function init() {
+  loadSettings();
+  await detectMode();
+})();
+
+async function detectMode() {
+  const badge = document.getElementById('modeBadge');
+  try {
+    const r = await fetch(apiBase + '/api/health');
+    if (r.ok) {
+      const d = await r.json();
+      mode = d.mode || 'local';
+    } else {
+      mode = 'azure';
+    }
+  } catch {
+    // Try common Azure Functions URL patterns
+    mode = 'azure';
+  }
+  badge.textContent = mode === 'local' ? 'Local Mode' : 'Web Mode';
+  badge.className = 'mode-badge ' + (mode === 'local' ? 'mode-local' : 'mode-azure');
+  applyMode();
+}
+
+function applyMode() {
+  const isLocal = mode === 'local';
+  document.querySelectorAll('.local-only').forEach(el => {
+    el.style.display = isLocal ? '' : 'none';
+  });
+  document.getElementById('jacketBtn').style.display = isLocal ? '' : 'none';
+  document.getElementById('promptBtn').style.display = 'inline-block';
+  if (isLocal) {
+    document.getElementById('promptBtn').textContent = 'Build Prompt';
+  }
+}
+
+// ── Settings ──
+function toggleSettings() {
+  const grid = document.getElementById('settingsGrid');
+  const btn = document.getElementById('settingsToggle');
+  const collapsed = grid.classList.toggle('collapsed');
+  btn.textContent = collapsed ? 'expand' : 'collapse';
+}
+
+function toggleSwitch(el) {
+  el.classList.toggle('on');
+  const label = el.nextElementSibling;
+  if (label) label.textContent = el.classList.contains('on') ? 'Enabled' : 'Off';
+  saveSettings();
+}
+
+function saveSettings() {
+  const s = {
+    tone: document.getElementById('tone').value,
+    remix: document.getElementById('remixSwitch').classList.contains('on'),
+    remixProb: document.getElementById('remixProb').value,
+    minSim: document.getElementById('minSim').value,
+    model: document.getElementById('model').value,
+    deepResearch: document.getElementById('deepResearch').classList.contains('on'),
+  };
+  localStorage.setItem('subtitle-gen-settings', JSON.stringify(s));
+}
+
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem('subtitle-gen-settings'));
+    if (!s) return;
+    if (s.tone) document.getElementById('tone').value = s.tone;
+    if (s.remix === false) document.getElementById('remixSwitch').classList.remove('on');
+    if (s.remixProb) document.getElementById('remixProb').value = s.remixProb;
+    if (s.minSim) document.getElementById('minSim').value = s.minSim;
+    if (s.model) document.getElementById('model').value = s.model;
+    if (s.deepResearch) document.getElementById('deepResearch').classList.add('on');
+  } catch {}
+}
+
+document.querySelectorAll('.setting select, .setting input').forEach(el => {
+  el.addEventListener('change', saveSettings);
+});
+
+// ── Generate ──
+async function doGenerate() {
+  const btn = document.getElementById('generateBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Generating...';
+
+  const remixOn = document.getElementById('remixSwitch').classList.contains('on');
+  const body = {
+    tone: document.getElementById('tone').value || null,
+    remix_prob: remixOn ? parseFloat(document.getElementById('remixProb').value) : 0,
+    min_sim: parseFloat(document.getElementById('minSim').value),
+    locks: Object.keys(locks).length > 0 ? locks : null,
+  };
+
+  try {
+    const r = await fetch(apiBase + '/api/generate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({error: r.statusText}));
+      alert('Error: ' + (err.error || r.statusText));
+      return;
+    }
+    currentSub = await r.json();
+    renderSubtitle(currentSub);
+    renderSources(currentSub);
+    // Hide jacket/prompt sections on new generate
+    document.getElementById('jacketSection').classList.remove('visible');
+    document.getElementById('promptSection').classList.remove('visible');
+  } catch (e) {
+    alert('Failed to connect to API: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate';
+  }
+}
+
+// ── Render subtitle with lockable slots ──
+function renderSubtitle(sub) {
+  const row = document.getElementById('slotRow');
+  const slots = [
+    {key: 'item1', value: sub.item1, cls: 'slot-list1'},
+    {key: '_comma1', punc: ','},
+    {key: 'item2', value: sub.item2, cls: 'slot-list2'},
+    {key: '_comma2', punc: ', and the'},
+    {key: 'action_noun', value: sub.action_noun, cls: 'slot-action'},
+    {key: '_of', punc: 'of'},
+  ];
+
+  // Of-object: show sub-parts if remixed
+  if (sub.remixed && sub.remix_parts) {
+    if (sub.remix_parts.modifier !== undefined) {
+      slots.push({key: 'of_modifier', value: sub.remix_parts.modifier, cls: 'slot-subpart'});
+      slots.push({key: 'of_head', value: sub.remix_parts.head, cls: 'slot-subpart'});
+    } else if (sub.remix_parts.topic !== undefined) {
+      slots.push({key: 'of_topic', value: sub.remix_parts.topic, cls: 'slot-subpart'});
+      slots.push({key: '_prep', punc: sub.remix_parts.prep});
+      slots.push({key: 'of_complement', value: sub.remix_parts.complement, cls: 'slot-subpart'});
+    }
+  } else {
+    slots.push({key: 'of_object', value: sub.of_object, cls: 'slot-of'});
+  }
+
+  row.innerHTML = '';
+  for (const s of slots) {
+    if (s.punc !== undefined) {
+      const span = document.createElement('span');
+      span.className = 'punc';
+      span.textContent = s.punc;
+      row.appendChild(span);
+      continue;
+    }
+    const div = document.createElement('div');
+    div.className = 'slot ' + s.cls + (locks[s.key] ? ' locked' : '');
+    div.dataset.key = s.key;
+
+    const text = document.createElement('span');
+    text.className = 'slot-text';
+    text.textContent = s.value;
+    text.onclick = () => startEdit(div, s.key, s.value);
+    div.appendChild(text);
+
+    const lock = document.createElement('span');
+    lock.className = 'lock-icon';
+    lock.textContent = locks[s.key] ? '\u{1F512}' : '\u{1F513}';
+    lock.onclick = (e) => { e.stopPropagation(); toggleLock(s.key, s.value, div, lock); };
+    div.appendChild(lock);
+
+    row.appendChild(div);
+  }
+}
+
+function toggleLock(key, value, slotEl, lockEl) {
+  if (locks[key]) {
+    delete locks[key];
+    slotEl.classList.remove('locked');
+    lockEl.textContent = '\u{1F513}';
+  } else {
+    locks[key] = value;
+    slotEl.classList.add('locked');
+    lockEl.textContent = '\u{1F512}';
+  }
+}
+
+function clearLocks() {
+  for (const k of Object.keys(locks)) delete locks[k];
+  if (currentSub) renderSubtitle(currentSub);
+}
+
+function startEdit(slotEl, key, currentValue) {
+  const textEl = slotEl.querySelector('.slot-text');
+  if (slotEl.querySelector('.slot-edit')) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'slot-edit';
+  input.value = currentValue;
+  input.style.width = Math.max(60, currentValue.length * 10) + 'px';
+  textEl.style.display = 'none';
+  slotEl.insertBefore(input, textEl);
+  input.focus();
+  input.select();
+
+  const finish = () => {
+    const val = input.value.trim();
+    if (val && val !== currentValue) {
+      locks[key] = val;
+      textEl.textContent = val;
+      slotEl.classList.add('locked');
+      const lockEl = slotEl.querySelector('.lock-icon');
+      if (lockEl) lockEl.textContent = '\u{1F512}';
+      // Update currentSub
+      if (currentSub) {
+        if (key === 'item1') currentSub.item1 = val;
+        else if (key === 'item2') currentSub.item2 = val;
+        else if (key === 'action_noun') currentSub.action_noun = val;
+        else if (key === 'of_object') currentSub.of_object = val;
+      }
+    }
+    input.remove();
+    textEl.style.display = '';
+  };
+  input.addEventListener('blur', finish);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); if (e.key === 'Escape') { input.value = currentValue; input.blur(); }});
+}
+
+// ── Sources ──
+function renderSources(sub) {
+  const el = document.getElementById('sources');
+  if (!sub.sources || Object.keys(sub.sources).length === 0) {
+    el.classList.remove('visible');
+    return;
+  }
+  const labels = {
+    item1: 'List item 1', item2: 'List item 2', action_noun: 'Action noun',
+    of_object: 'Of-object', of_modifier: 'Modifier', of_head: 'Head',
+    of_topic: 'Topic', of_complement: 'Complement'
+  };
+  let html = '<h4>Sources</h4>';
+  for (const [key, src] of Object.entries(sub.sources)) {
+    const label = labels[key] || key;
+    const filler = sub[key] || (sub.remix_parts && sub.remix_parts[key.replace('of_','')]) || '';
+    const book = src.title ? `<span class="book">${escHtml(src.title)}</span> <span class="tag">[${src.tag}]</span>` : '<span class="tag">(source not found)</span>';
+    html += `<div class="source-line"><span class="filler">${escHtml(String(filler))}</span> &larr; ${book}</div>`;
+  }
+  if (sub.remixed && sub.remix_similarity != null) {
+    html += `<div class="source-line remix-info">Remix similarity: ${sub.remix_similarity.toFixed(3)}</div>`;
+  }
+  el.innerHTML = html;
+  el.classList.add('visible');
+}
+
+// ── Jacket ──
+async function doJacket(dryRunOverride) {
+  if (!currentSub) { alert('Generate a subtitle first.'); return; }
+
+  const dryRun = dryRunOverride === true || mode !== 'local';
+  const btn = dryRun ? document.getElementById('promptBtn') : document.getElementById('jacketBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>' + (dryRun ? 'Building...' : 'Generating...');
+
+  const body = {
+    subtitle: currentSub.text,
+    model: document.getElementById('model').value,
+    deep_research: document.getElementById('deepResearch').classList.contains('on'),
+    dry_run: dryRun,
+  };
+
+  try {
+    const r = await fetch(apiBase + '/api/jacket', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({error: r.statusText}));
+      alert('Error: ' + (err.error || r.statusText));
+      return;
+    }
+    const data = await r.json();
+
+    // Always show the prompt
+    document.getElementById('promptText').textContent = data.prompt;
+    document.getElementById('promptSection').classList.add('visible');
+
+    // Show generated jacket if available
+    if (data.result) {
+      document.getElementById('jacketBody').textContent = data.result;
+      document.getElementById('jacketSection').classList.add('visible');
+    } else {
+      document.getElementById('jacketSection').classList.remove('visible');
+    }
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = dryRun ? 'Build Prompt' : 'Generate Jacket';
+  }
+}
+
+function copyPrompt() {
+  const text = document.getElementById('promptText').textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = event.target;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy Prompt', 1500);
+  });
+}
+
+function copySubtitle() {
+  if (!currentSub) return;
+  navigator.clipboard.writeText(currentSub.text).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = orig, 1500);
+  });
+}
+
+// ── Util ──
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+</script>
+</body>
+</html>
