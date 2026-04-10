@@ -113,7 +113,7 @@ ACTION_WHITELIST = {
 
 
 def _load_nlp():
-    return spacy.load("en_core_web_sm", disable=["ner", "lemmatizer"])
+    return spacy.load("en_core_web_sm", disable=["lemmatizer"])
 
 
 def _is_noise(subtitle: str) -> bool:
@@ -210,6 +210,107 @@ def _is_valid_object(phrase: str, nlp) -> bool:
     return True
 
 
+# --- Of-object decomposition ---
+
+def _decompose_compound(phrase: str, doc) -> tuple[str, str, str, str] | None:
+    """Decompose a 2-3 word compound NP into (modifier, modifier_pos, head, head_pos).
+
+    Uses dependency parsing: ROOT = head noun, everything before ROOT = modifier.
+    Returns None if phrase is excluded or doesn't fit the pattern.
+    """
+    tokens = [t for t in doc if not t.is_space]
+    words = phrase.split()
+    if len(words) not in (2, 3):
+        return None
+
+    # Exclusion: PERSON entity
+    if any(e.label_ == "PERSON" for e in doc.ents):
+        return None
+
+    # Find ROOT
+    roots = [t for t in tokens if t.dep_ == "ROOT"]
+    if not roots:
+        return None
+    root = roots[0]
+
+    # ROOT must be a noun
+    if root.pos_ not in ("NOUN", "PROPN"):
+        return None
+
+    # ROOT must be the last content token
+    if root != tokens[-1]:
+        return None
+
+    # Exclusion: HEAD is NUM/ordinal
+    if root.pos_ == "NUM" or root.text in ("I", "II", "III", "IV", "V"):
+        return None
+
+    modifier_tokens = tokens[:-1]
+    if not modifier_tokens:
+        return None
+
+    # Exclusion: full-phrase GPE (e.g., "New York" as a 2-word of-object)
+    if len(words) == 2:
+        for ent in doc.ents:
+            if ent.label_ == "GPE" and ent.start == 0 and ent.end == len(tokens):
+                return None
+
+    # Exclusion: NOUN+NOUN for 2-word (compound nouns not freely composable)
+    if len(words) == 2 and all(t.pos_ == "NOUN" for t in tokens):
+        return None
+
+    modifier = " ".join(t.text for t in modifier_tokens)
+    modifier_pos = "+".join(t.pos_ for t in modifier_tokens)
+    head = root.text
+    head_pos = root.pos_
+
+    # Reconstruction guard: modifier + head must equal original tokens
+    reconstructed = " ".join(t.text for t in modifier_tokens) + " " + head
+    original = " ".join(t.text for t in tokens)
+    if reconstructed != original:
+        return None
+
+    return modifier, modifier_pos, head, head_pos
+
+
+def _decompose_prepositional(phrase: str, doc) -> tuple[str, str, str, str, str] | None:
+    """Decompose a prepositional NP into (topic, topic_pos, prep, complement, complement_pos).
+
+    Split at first ADP: everything before = topic, the prep, everything after = complement.
+    Returns None if no valid split found.
+    """
+    tokens = [t for t in doc if not t.is_space]
+
+    # Find first ADP
+    adp_idx = None
+    for i, t in enumerate(tokens):
+        if t.pos_ == "ADP":
+            adp_idx = i
+            break
+    if adp_idx is None:
+        return None
+
+    topic_tokens = tokens[:adp_idx]
+    prep_token = tokens[adp_idx]
+    complement_tokens = tokens[adp_idx + 1:]
+
+    # Both sides must be non-empty and have at least one noun
+    if not topic_tokens or not complement_tokens:
+        return None
+    if not any(t.pos_ in ("NOUN", "PROPN") for t in topic_tokens):
+        return None
+    if not any(t.pos_ in ("NOUN", "PROPN") for t in complement_tokens):
+        return None
+
+    topic = " ".join(t.text for t in topic_tokens)
+    topic_pos = "+".join(t.pos_ for t in topic_tokens)
+    prep = prep_token.text.lower()
+    complement = " ".join(t.text for t in complement_tokens)
+    complement_pos = "+".join(t.pos_ for t in complement_tokens)
+
+    return topic, topic_pos, prep, complement, complement_pos
+
+
 def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
     """Find all subtitles matching X, Y, and the Z of W.
 
@@ -275,13 +376,25 @@ def ensure_slot_tables(conn: sqlite3.Connection):
             mode TEXT NOT NULL DEFAULT 'strict',
             source_subtitle_id INTEGER,
             freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
             UNIQUE(slot_type, filler)
         )
     """)
-    # Migration: add freq column if missing (pre-existing databases)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    # Migration: add columns if missing (pre-existing databases)
     cols = {r[1] for r in conn.execute("PRAGMA table_info(slot_fillers)")}
     if "freq" not in cols:
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN freq INTEGER NOT NULL DEFAULT 1")
+    if "pos_tag" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN pos_tag TEXT")
+    if "prep" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN prep TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()
@@ -378,6 +491,186 @@ def build_slots(conn: sqlite3.Connection):
         click.echo(f"  {slot_type}: {count:,} unique fillers")
 
     click.echo("Strict slot extraction complete!")
+
+    # --- Decompose of-objects into sub-parts for remixing ---
+    _decompose_of_objects(conn, nlp, of_objects_seen)
+
+
+def _case_merge_key(filler: str) -> str:
+    """Key for case-insensitive merging."""
+    return filler.lower()
+
+
+def _decompose_of_objects(
+    conn: sqlite3.Connection,
+    nlp,
+    of_objects_seen: dict[str, tuple[int, int]],
+):
+    """Decompose validated of-objects into sub-parts for remixing.
+
+    Type 1 (compound): 2-3 word NPs without prepositions → of_modifier + of_head
+    Type 2 (prepositional): NPs with a preposition → of_topic + of_complement
+    """
+    click.echo("\nDecomposing of-objects for remixing...")
+
+    # Accumulate sub-parts: key → {filler: (source_sid, freq, pos_tag, prep)}
+    # Using case-insensitive merge: lower(filler) → (canonical_filler, source_sid, total_freq, pos_tag, prep)
+    modifiers: dict[str, list] = {}   # lower → [canonical, sid, freq, pos_tag]
+    heads: dict[str, list] = {}
+    topics: dict[str, list] = {}      # lower → [canonical, sid, freq, pos_tag, prep]
+    complements: dict[str, list] = {}
+
+    # Batch parse all of-objects for decomposition
+    of_objects = list(of_objects_seen.keys())
+    of_meta = {obj: of_objects_seen[obj] for obj in of_objects}
+    docs = list(nlp.pipe(of_objects, batch_size=500))
+
+    type1_count = 0
+    type2_count = 0
+
+    for obj, doc in zip(of_objects, docs):
+        sid, freq = of_meta[obj]
+        words = obj.split()
+
+        # Try prepositional decomposition first (any word count with ADP)
+        prep_result = _decompose_prepositional(obj, doc)
+        if prep_result:
+            topic, topic_pos, prep, complement, complement_pos = prep_result
+            type2_count += 1
+
+            # Accumulate topic (case-insensitive merge, sum freq)
+            tk = _case_merge_key(topic)
+            if tk in topics:
+                existing = topics[tk]
+                existing[2] += freq  # sum freq
+            else:
+                topics[tk] = [topic, sid, freq, topic_pos, prep]
+
+            # Accumulate complement
+            ck = _case_merge_key(complement)
+            if ck in complements:
+                existing = complements[ck]
+                existing[2] += freq
+            else:
+                complements[ck] = [complement, sid, freq, complement_pos, prep]
+            continue
+
+        # Try compound decomposition (2-3 words, no prep)
+        if len(words) in (2, 3):
+            comp_result = _decompose_compound(obj, doc)
+            if comp_result:
+                modifier, modifier_pos, head, head_pos = comp_result
+                type1_count += 1
+
+                # Accumulate modifier (case-insensitive merge, sum freq)
+                mk = _case_merge_key(modifier)
+                if mk in modifiers:
+                    existing = modifiers[mk]
+                    existing[2] += freq
+                else:
+                    modifiers[mk] = [modifier, sid, freq, modifier_pos]
+
+                # Accumulate head
+                hk = _case_merge_key(head)
+                if hk in heads:
+                    existing = heads[hk]
+                    existing[2] += freq
+                else:
+                    heads[hk] = [head, sid, freq, head_pos]
+
+    click.echo(f"  Type 1 (compound): {type1_count:,} of-objects decomposed")
+    click.echo(f"  Type 2 (prepositional): {type2_count:,} of-objects decomposed")
+
+    # Insert decomposed sub-parts
+    rows = []
+    for data in modifiers.values():
+        canonical, sid, freq, pos_tag = data
+        rows.append(("of_modifier", canonical, "strict", sid, freq, pos_tag, None))
+    for data in heads.values():
+        canonical, sid, freq, pos_tag = data
+        rows.append(("of_head", canonical, "strict", sid, freq, pos_tag, None))
+    for data in topics.values():
+        canonical, sid, freq, pos_tag, prep = data
+        rows.append(("of_topic", canonical, "strict", sid, freq, pos_tag, prep))
+    for data in complements.values():
+        canonical, sid, freq, pos_tag, prep = data
+        rows.append(("of_complement", canonical, "strict", sid, freq, pos_tag, prep))
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO slot_fillers "
+        "(slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+
+    # Report counts
+    for slot_type in ["of_modifier", "of_head", "of_topic", "of_complement"]:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM slot_fillers WHERE slot_type = ?", (slot_type,)
+        ).fetchone()[0]
+        click.echo(f"  {slot_type}: {count:,} unique fillers")
+
+    # Store POS pattern distributions in config table for generation
+    _store_decomposition_config(conn)
+
+    click.echo("Of-object decomposition complete!")
+
+
+def _store_decomposition_config(conn: sqlite3.Connection):
+    """Compute and store POS pattern distributions and prep group sizes."""
+    # Clear stale config keys
+    conn.execute("DELETE FROM config WHERE key LIKE 'remix_%'")
+
+    # Type 1: POS pattern distributions by output word count
+    # We need modifier_pos + head_pos patterns, grouped by total word count.
+    # Since modifiers and heads are stored separately, we reconstruct the pattern
+    # from the modifier's pos_tag (which encodes the full modifier POS, e.g. "ADJ" or
+    # "PROPN+PROPN") combined with the head's pos_tag.
+    # We compute this from the of_modifier rows grouped by pos_tag and word count.
+    for bucket in (2, 3):
+        mod_word_count = bucket - 1  # head is always 1 word
+        mod_space_count = mod_word_count - 1
+        rows = conn.execute(
+            "SELECT pos_tag, SUM(freq) as total_freq "
+            "FROM slot_fillers "
+            "WHERE slot_type = 'of_modifier' "
+            "AND length(filler) - length(replace(filler, ' ', '')) = ? "
+            "GROUP BY pos_tag ORDER BY total_freq DESC",
+            (mod_space_count,),
+        ).fetchall()
+        # Also get head POS distribution
+        head_rows = conn.execute(
+            "SELECT pos_tag, SUM(freq) as total_freq "
+            "FROM slot_fillers WHERE slot_type = 'of_head' "
+            "GROUP BY pos_tag ORDER BY total_freq DESC"
+        ).fetchall()
+        if rows:
+            mod_patterns = {pat: freq for pat, freq in rows}
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                (f"remix_mod_pos_{bucket}word", json.dumps(mod_patterns)),
+            )
+        if head_rows:
+            head_patterns = {pat: freq for pat, freq in head_rows}
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                ("remix_head_pos", json.dumps(head_patterns)),
+            )
+
+    # Type 2: prep group sizes
+    rows = conn.execute(
+        "SELECT prep, COUNT(*) FROM slot_fillers "
+        "WHERE slot_type = 'of_topic' GROUP BY prep ORDER BY COUNT(*) DESC"
+    ).fetchall()
+    if rows:
+        prep_groups = {prep: count for prep, count in rows}
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+            ("remix_prep_groups", json.dumps(prep_groups)),
+        )
+
+    conn.commit()
 
 
 # Boilerplate words to reject in loose mode
