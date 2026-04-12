@@ -1,41 +1,50 @@
-"""E2E browser tests for the subtitle-generator web app using Playwright."""
+"""E2E browser tests for the subtitle-generator web app using Playwright.
+
+Supports both local and deployed modes via BASE_URL env var:
+  python tests/test_e2e.py                          # local (localhost:8742)
+  BASE_URL=https://subtitlegenst.z13.web.core.windows.net python tests/test_e2e.py
+"""
 
 import asyncio
+import os
 from playwright.async_api import async_playwright
+
+BASE_URL = os.environ.get("BASE_URL", "http://localhost:8742")
 
 
 async def test():
+    is_local = "localhost" in BASE_URL
+    print(f"Testing against: {BASE_URL} ({'local' if is_local else 'deployed'})\n")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
         # 1. Load page
         print("TEST 1: Load page")
-        await page.goto("http://localhost:8742")
+        await page.goto(BASE_URL)
         title = await page.title()
         assert "Subtitle Generator" in title, f"Bad title: {title}"
         print(f"  PASS: title = {title}")
 
         # 2. Check mode badge appears
         print("TEST 2: Mode detection")
-        # Wait for Alpine to detect mode (async health check)
         await page.wait_for_function(
             "() => document.querySelector('.mode-badge')?.textContent?.includes('Mode')",
-            timeout=10000,
+            timeout=15000,
         )
         badge_text = await page.locator(".mode-badge").text_content()
-        print(f"  Badge text: {badge_text}")
-        assert "Local" in badge_text, f"Expected Local mode, got: {badge_text}"
-        print("  PASS: local mode detected")
+        expected_mode = "Local" if is_local else "Web"
+        assert expected_mode in badge_text, f"Expected {expected_mode} mode, got: {badge_text}"
+        print(f"  PASS: {badge_text}")
 
         # 3. Click Generate
         print("TEST 3: Generate subtitle")
         gen_btn = page.locator("button:has-text('Generate')").first
         await gen_btn.click()
-        # Wait for Alpine to render slots
         await page.wait_for_function(
             "() => document.querySelectorAll('.slot').length >= 4",
-            timeout=30000,
+            timeout=60000,  # cold start can be slow on Azure
         )
         slots = await page.locator(".slot").count()
         assert slots >= 4, f"Expected >= 4 slots, got {slots}"
@@ -49,10 +58,9 @@ async def test():
 
         # 4. Check sources appear
         print("TEST 4: Sources panel")
-        # Wait for Alpine to render sources (x-show transition)
         await page.wait_for_function(
             "() => document.querySelectorAll('.source-line').length >= 4",
-            timeout=10000,
+            timeout=15000,
         )
         source_lines = await page.locator(".source-line").count()
         assert source_lines >= 4, f"Expected >= 4 source lines, got {source_lines}"
@@ -62,10 +70,9 @@ async def test():
         print("TEST 5: Build Prompt")
         prompt_btn = page.locator("button:has-text('Build Prompt')")
         await prompt_btn.click()
-        prompt_section = page.locator(".prompt-section")
         await page.wait_for_function(
             "() => document.querySelector('.prompt-text')?.textContent?.length > 100",
-            timeout=10000,
+            timeout=30000,
         )
         prompt_text = await page.locator(".prompt-text").text_content()
         assert len(prompt_text) > 100, f"Prompt too short: {len(prompt_text)} chars"
@@ -77,22 +84,44 @@ async def test():
         assert await copy_btn.is_visible(), "No Copy button"
         print("  PASS: Copy button present")
 
-        # 7. Settings visibility in local mode
+        # 7. Settings (mode-dependent)
         print("TEST 7: Settings")
         tone_select = page.locator("select").first
         await tone_select.select_option("pop")
-        # In local mode, model picker should be visible (after models load)
+        if is_local:
+            await page.wait_for_function(
+                "() => document.querySelectorAll('select').length >= 2",
+                timeout=15000,
+            )
+            model_selects = await page.locator("select").count()
+            assert model_selects >= 2, f"Expected >= 2 selects (tone + model), got {model_selects}"
+            print("  PASS: model picker visible (local mode)")
+        else:
+            # In web mode, model picker should be hidden (not visible)
+            await page.wait_for_timeout(2000)
+            model_visible = await page.locator("select").nth(1).is_visible()
+            assert not model_visible, "Model picker should be hidden in web mode"
+            print("  PASS: model picker hidden (web mode)")
+
+        # 8. Generate with tone bias
+        print("TEST 8: Generate with tone=pop")
+        await gen_btn.click()
         await page.wait_for_function(
-            "() => document.querySelectorAll('select').length >= 2",
-            timeout=10000,
+            "() => document.querySelectorAll('.slot').length >= 4",
+            timeout=60000,
         )
-        model_selects = await page.locator("select").count()
-        assert model_selects >= 2, f"Expected >= 2 selects (tone + model), got {model_selects}"
-        print("  PASS: settings interactive, model picker visible")
+        slots2 = await page.locator(".slot").count()
+        assert slots2 >= 4, f"Expected >= 4 slots, got {slots2}"
+        print("  PASS: regenerated with tone bias")
+
+        # 9. GitHub link in footer
+        print("TEST 9: GitHub link")
+        gh_link = page.locator("a[href*='github.com/Arithmomaniac/subtitle-generator']")
+        assert await gh_link.count() > 0, "No GitHub link in footer"
+        print("  PASS: GitHub link present")
 
         print()
-        print("ALL 7 TESTS PASSED")
-        await browser.close()
+        print(f"ALL 9 TESTS PASSED ({BASE_URL})")
         await browser.close()
 
 
