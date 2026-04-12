@@ -37,19 +37,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 .subtitle-display{background:#0f1a30;border:2px solid #2a2a4a;border-radius:12px;padding:20px;margin-bottom:16px;text-align:center;min-height:90px;display:flex;flex-direction:column;justify-content:center}
 .pattern-label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
 .slot-row{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px;font-size:18px;line-height:1.8}
-.slot{display:inline-flex;align-items:center;gap:3px;padding:3px 10px;border-radius:7px;cursor:pointer;transition:all .15s;position:relative}
-.slot:hover{transform:translateY(-1px);filter:brightness(1.15)}
+.slot{display:inline-flex;align-items:center;gap:3px;padding:3px 10px;border-radius:7px;transition:all .15s;position:relative}
 .slot-list1{background:#1a3a2a;border:1px solid #2d6a4f;color:#a8dadc}
 .slot-list2{background:#1a2a3a;border:1px solid #3a6b8c;color:#a8c8dc}
 .slot-action{background:#2a1a3a;border:1px solid #6b3a8c;color:#d4a8dc}
 .slot-of{background:#3a2a1a;border:1px solid #8c6b3a;color:#dcd4a8}
 .slot-subpart{background:#332a1a;border:1px dashed #8c6b3a;color:#dcd4a8;font-size:16px}
-.slot.locked{border-width:2px;border-style:solid}
-.lock-icon{font-size:11px;opacity:.35;cursor:pointer;user-select:none}
-.slot.locked .lock-icon{opacity:1;color:#ffd700}
 .punc{color:#555;font-size:18px;user-select:none}
-.slot-text{cursor:text}
-.slot-edit{background:#0f1a30;border:1px solid #555;border-radius:4px;color:#e0e0e0;font-size:16px;padding:2px 6px;width:auto;min-width:60px;outline:none}
 .empty-state{color:#555;font-style:italic;font-size:16px}
 
 /* Actions */
@@ -166,7 +160,6 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 
 <div class="actions">
   <button class="btn btn-primary" id="generateBtn" onclick="doGenerate()">Generate</button>
-  <button class="btn btn-secondary" onclick="clearLocks()">Clear Locks</button>
   <button class="btn btn-secondary" onclick="copySubtitle()">Copy</button>
   <button class="btn btn-jacket" id="jacketBtn" onclick="doJacket()">Generate Jacket</button>
   <button class="btn btn-jacket" id="promptBtn" onclick="doJacket(true)" style="display:none">Build Prompt</button>
@@ -200,7 +193,6 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 let mode = 'detecting';
 let apiBase = '';
 let currentSub = null;
-const locks = {};
 
 // ── Init ──
 (async function init() {
@@ -294,7 +286,6 @@ async function doGenerate() {
     tone: document.getElementById('tone').value || null,
     remix_prob: remixOn ? parseFloat(document.getElementById('remixProb').value) : 0,
     min_sim: parseFloat(document.getElementById('minSim').value),
-    locks: Object.keys(locks).length > 0 ? locks : null,
   };
 
   try {
@@ -322,30 +313,30 @@ async function doGenerate() {
   }
 }
 
-// ── Render subtitle with lockable slots ──
+// ── Render subtitle ──
 function renderSubtitle(sub) {
   const row = document.getElementById('slotRow');
   const slots = [
-    {key: 'item1', value: sub.item1, cls: 'slot-list1'},
-    {key: '_comma1', punc: ','},
-    {key: 'item2', value: sub.item2, cls: 'slot-list2'},
-    {key: '_comma2', punc: ', and the'},
-    {key: 'action_noun', value: sub.action_noun, cls: 'slot-action'},
-    {key: '_of', punc: 'of'},
+    {value: sub.item1, cls: 'slot-list1'},
+    {punc: ','},
+    {value: sub.item2, cls: 'slot-list2'},
+    {punc: ', and the'},
+    {value: sub.action_noun, cls: 'slot-action'},
+    {punc: 'of'},
   ];
 
   // Of-object: show sub-parts if remixed
   if (sub.remixed && sub.remix_parts) {
     if (sub.remix_parts.modifier !== undefined) {
-      slots.push({key: 'of_modifier', value: sub.remix_parts.modifier, cls: 'slot-subpart'});
-      slots.push({key: 'of_head', value: sub.remix_parts.head, cls: 'slot-subpart'});
+      slots.push({value: sub.remix_parts.modifier, cls: 'slot-subpart'});
+      slots.push({value: sub.remix_parts.head, cls: 'slot-subpart'});
     } else if (sub.remix_parts.topic !== undefined) {
-      slots.push({key: 'of_topic', value: sub.remix_parts.topic, cls: 'slot-subpart'});
-      slots.push({key: '_prep', punc: sub.remix_parts.prep});
-      slots.push({key: 'of_complement', value: sub.remix_parts.complement, cls: 'slot-subpart'});
+      slots.push({value: sub.remix_parts.topic, cls: 'slot-subpart'});
+      slots.push({punc: sub.remix_parts.prep});
+      slots.push({value: sub.remix_parts.complement, cls: 'slot-subpart'});
     }
   } else {
-    slots.push({key: 'of_object', value: sub.of_object, cls: 'slot-of'});
+    slots.push({value: sub.of_object, cls: 'slot-of'});
   }
 
   row.innerHTML = '';
@@ -358,76 +349,10 @@ function renderSubtitle(sub) {
       continue;
     }
     const div = document.createElement('div');
-    div.className = 'slot ' + s.cls + (locks[s.key] ? ' locked' : '');
-    div.dataset.key = s.key;
-
-    const text = document.createElement('span');
-    text.className = 'slot-text';
-    text.textContent = s.value;
-    text.onclick = () => startEdit(div, s.key, s.value);
-    div.appendChild(text);
-
-    const lock = document.createElement('span');
-    lock.className = 'lock-icon';
-    lock.textContent = locks[s.key] ? '\u{1F512}' : '\u{1F513}';
-    lock.onclick = (e) => { e.stopPropagation(); toggleLock(s.key, s.value, div, lock); };
-    div.appendChild(lock);
-
+    div.className = 'slot ' + s.cls;
+    div.textContent = s.value;
     row.appendChild(div);
   }
-}
-
-function toggleLock(key, value, slotEl, lockEl) {
-  if (locks[key]) {
-    delete locks[key];
-    slotEl.classList.remove('locked');
-    lockEl.textContent = '\u{1F513}';
-  } else {
-    locks[key] = value;
-    slotEl.classList.add('locked');
-    lockEl.textContent = '\u{1F512}';
-  }
-}
-
-function clearLocks() {
-  for (const k of Object.keys(locks)) delete locks[k];
-  if (currentSub) renderSubtitle(currentSub);
-}
-
-function startEdit(slotEl, key, currentValue) {
-  const textEl = slotEl.querySelector('.slot-text');
-  if (slotEl.querySelector('.slot-edit')) return;
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.className = 'slot-edit';
-  input.value = currentValue;
-  input.style.width = Math.max(60, currentValue.length * 10) + 'px';
-  textEl.style.display = 'none';
-  slotEl.insertBefore(input, textEl);
-  input.focus();
-  input.select();
-
-  const finish = () => {
-    const val = input.value.trim();
-    if (val && val !== currentValue) {
-      locks[key] = val;
-      textEl.textContent = val;
-      slotEl.classList.add('locked');
-      const lockEl = slotEl.querySelector('.lock-icon');
-      if (lockEl) lockEl.textContent = '\u{1F512}';
-      // Update currentSub
-      if (currentSub) {
-        if (key === 'item1') currentSub.item1 = val;
-        else if (key === 'item2') currentSub.item2 = val;
-        else if (key === 'action_noun') currentSub.action_noun = val;
-        else if (key === 'of_object') currentSub.of_object = val;
-      }
-    }
-    input.remove();
-    textEl.style.display = '';
-  };
-  input.addEventListener('blur', finish);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); if (e.key === 'Escape') { input.value = currentValue; input.blur(); }});
 }
 
 // ── Sources ──
