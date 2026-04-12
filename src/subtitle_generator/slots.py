@@ -395,6 +395,16 @@ def ensure_slot_tables(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN pos_tag TEXT")
     if "prep" not in cols:
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN prep TEXT")
+    if "remix_type" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN remix_type TEXT")
+    if "remix_prep" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN remix_prep TEXT")
+    if "remix_word_count" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN remix_word_count INTEGER")
+    if "vector_sum" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN vector_sum BLOB")
+    if "token_count" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN token_count INTEGER")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()

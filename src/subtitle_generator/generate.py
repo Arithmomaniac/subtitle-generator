@@ -90,19 +90,175 @@ TONE_TARGETS = {
 # Module-level cache for remix context (lazy-loaded)
 _remix_ctx: dict | None = None
 
+# Sentinel for embedding precompute version checks
+_EMBEDDING_VERSION = "1"
+
+# Slot types that need pre-computed vectors for remix composition
+_REMIX_VECTOR_SLOT_TYPES = frozenset({
+    "of_modifier", "of_head", "of_topic", "of_complement",
+})
+
+
+def precompute_remix_data(conn: sqlite3.Connection) -> dict:
+    """Pre-compute remix classifications and word vectors, storing in DB.
+
+    This runs spaCy en_core_web_md to:
+    1. Classify each of_object strict filler for remix type (type1/type2)
+    2. Compute vector_sum + token_count for remix-relevant fillers
+    3. Compute and store the of_object centroid vector
+
+    After this, runtime code needs only numpy for cosine similarity.
+    Returns stats dict.
+    """
+    import base64
+
+    import numpy as np
+    import spacy
+
+    click.echo("Loading spaCy en_core_web_md for vector precomputation...")
+    nlp = spacy.load("en_core_web_md", disable=["lemmatizer"])
+
+    stats: dict[str, int] = {"classified": 0, "vectorized": 0, "skipped_oov": 0}
+
+    # 1. Classify of_object strict fillers
+    of_obj_rows = conn.execute(
+        "SELECT id, filler FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
+    ).fetchall()
+    click.echo(f"Classifying {len(of_obj_rows)} of_object fillers...")
+    centroid_vectors = []
+    for filler_id, filler in of_obj_rows:
+        doc = nlp(filler)
+        classification = _classify_for_remix(filler, doc)
+
+        remix_type = None
+        remix_prep = None
+        remix_wc = None
+        if classification is not None:
+            remix_type = classification[0]
+            if remix_type == "type2":
+                _, remix_prep, remix_wc = classification
+            else:
+                _, remix_wc = classification
+
+        # Compute vector for this of_object filler
+        tokens = [t for t in doc if not t.is_space]
+        token_vecs = [t.vector for t in tokens if t.has_vector and np.linalg.norm(t.vector) > 0]
+        if token_vecs:
+            vec_sum = np.sum(token_vecs, axis=0).astype(np.float32)
+            tc = len(token_vecs)
+            centroid_vectors.append(vec_sum / tc)  # mean for centroid
+            conn.execute(
+                "UPDATE slot_fillers SET remix_type = ?, remix_prep = ?, remix_word_count = ?, "
+                "vector_sum = ?, token_count = ? WHERE id = ?",
+                (remix_type, remix_prep, remix_wc, vec_sum.tobytes(), tc, filler_id),
+            )
+            stats["classified"] += 1
+        else:
+            conn.execute(
+                "UPDATE slot_fillers SET remix_type = ?, remix_prep = ?, remix_word_count = ? WHERE id = ?",
+                (remix_type, remix_prep, remix_wc, filler_id),
+            )
+            stats["skipped_oov"] += 1
+
+    # 2. Compute vectors for remix sub-part fillers
+    sub_rows = conn.execute(
+        "SELECT id, filler FROM slot_fillers WHERE slot_type IN ('of_modifier', 'of_head', 'of_topic', 'of_complement') AND mode = 'strict'"
+    ).fetchall()
+    click.echo(f"Computing vectors for {len(sub_rows)} remix sub-part fillers...")
+    for filler_id, filler in sub_rows:
+        doc = nlp(filler)
+        tokens = [t for t in doc if not t.is_space]
+        token_vecs = [t.vector for t in tokens if t.has_vector and np.linalg.norm(t.vector) > 0]
+        if token_vecs:
+            vec_sum = np.sum(token_vecs, axis=0).astype(np.float32)
+            tc = len(token_vecs)
+            conn.execute(
+                "UPDATE slot_fillers SET vector_sum = ?, token_count = ? WHERE id = ?",
+                (vec_sum.tobytes(), tc, filler_id),
+            )
+            stats["vectorized"] += 1
+        else:
+            stats["skipped_oov"] += 1
+
+    # 3. Compute and store centroid
+    if centroid_vectors:
+        centroid = np.mean(centroid_vectors, axis=0).astype(np.float32)
+        centroid_b64 = base64.b64encode(centroid.tobytes()).decode("ascii")
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('embedding_centroid', ?)",
+            (centroid_b64,),
+        )
+
+    # Store version marker
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES ('embedding_version', ?)",
+        (_EMBEDDING_VERSION,),
+    )
+    conn.commit()
+
+    # Invalidate cached context
+    global _remix_ctx
+    _remix_ctx = None
+
+    click.echo(
+        f"Precomputed: {stats['classified']} classified, "
+        f"{stats['vectorized']} sub-part vectors, "
+        f"{stats['skipped_oov']} OOV skipped"
+    )
+    return stats
+
 
 def _load_remix_context(conn: sqlite3.Connection) -> dict:
-    """Lazy-load everything needed for remixing: spaCy model, centroid, config."""
+    """Lazy-load remix context from pre-computed vectors in DB.
+
+    Requires precompute_remix_data() to have been run first.
+    Falls back to spaCy if pre-computed data is missing (dev convenience).
+    """
     global _remix_ctx
     if _remix_ctx is not None:
         return _remix_ctx
 
     import numpy as np
+
+    # Check for pre-computed embeddings
+    row = conn.execute("SELECT value FROM config WHERE key = 'embedding_version'").fetchone()
+    if row is not None:
+        # Load pre-computed centroid
+        import base64
+        centroid = None
+        centroid_row = conn.execute("SELECT value FROM config WHERE key = 'embedding_centroid'").fetchone()
+        if centroid_row:
+            centroid = np.frombuffer(base64.b64decode(centroid_row[0]), dtype=np.float32).copy()
+
+        # Build filler→(vector_sum, token_count) lookup for remix sub-parts
+        filler_vectors: dict[tuple[str, str], tuple] = {}
+        vec_rows = conn.execute(
+            "SELECT slot_type, filler, vector_sum, token_count FROM slot_fillers "
+            "WHERE vector_sum IS NOT NULL AND token_count IS NOT NULL"
+        ).fetchall()
+        for slot_type, filler, vec_blob, tc in vec_rows:
+            vec = np.frombuffer(vec_blob, dtype=np.float32).copy()
+            filler_vectors[(slot_type, filler)] = (vec, tc)
+
+        # Load config (remix POS distributions etc.)
+        config = {}
+        for key, value in conn.execute("SELECT key, value FROM config WHERE key LIKE 'remix_%'"):
+            config[key] = json.loads(value)
+
+        _remix_ctx = {
+            "centroid": centroid,
+            "filler_vectors": filler_vectors,
+            "config": config,
+            "precomputed": True,
+        }
+        return _remix_ctx
+
+    # Fallback: live spaCy (for dev when precompute hasn't been run)
     import spacy
 
+    click.echo("Warning: using live spaCy (run 'precompute-vectors' for better performance)", err=True)
     nlp = spacy.load("en_core_web_md", disable=["lemmatizer"])
 
-    # Compute of-object centroid from strict fillers
     rows = conn.execute(
         "SELECT filler FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
     ).fetchall()
@@ -113,12 +269,11 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
             vectors.append(doc.vector)
     centroid = np.mean(vectors, axis=0) if vectors else None
 
-    # Load config
     config = {}
     for key, value in conn.execute("SELECT key, value FROM config WHERE key LIKE 'remix_%'"):
         config[key] = json.loads(value)
 
-    _remix_ctx = {"nlp": nlp, "centroid": centroid, "config": config}
+    _remix_ctx = {"nlp": nlp, "centroid": centroid, "config": config, "precomputed": False}
     return _remix_ctx
 
 
@@ -129,6 +284,62 @@ def _cosine_sim(v1, v2) -> float:
     if norm1 == 0 or norm2 == 0:
         return 0.0
     return float(np.dot(v1, v2) / (norm1 * norm2))
+
+
+def _compute_composed_vector(parts: dict, filler_vectors: dict):
+    """Compute composed vector from pre-computed filler vectors.
+
+    Uses weighted average by token count, exactly matching spaCy's
+    behavior of averaging all token vectors in a phrase.
+
+    parts maps role → filler text (e.g. {"modifier": "Yugoslav", "head": "Kitchen"}).
+    filler_vectors maps (slot_type, filler) → (vector_sum, token_count).
+
+    Returns (mean_vector, has_all_vectors) or (None, False) if no vectors found.
+    """
+    import numpy as np
+
+    _role_to_slot = {
+        "modifier": "of_modifier",
+        "head": "of_head",
+        "topic": "of_topic",
+        "complement": "of_complement",
+    }
+
+    total_sum = None
+    total_count = 0
+    has_all = True
+
+    for role, filler in parts.items():
+        if role == "prep":
+            # Prep tokens need vector too — look up in any slot type
+            # Preps are stored on of_topic/of_complement rows; try finding a vector
+            found = False
+            for st in ("of_topic", "of_complement"):
+                if (st, filler) in filler_vectors:
+                    vec_sum, tc = filler_vectors[(st, filler)]
+                    total_sum = vec_sum if total_sum is None else total_sum + vec_sum
+                    total_count += tc
+                    found = True
+                    break
+            if not found:
+                has_all = False
+            continue
+
+        slot_type = _role_to_slot.get(role)
+        if slot_type is None:
+            continue
+        key = (slot_type, filler)
+        if key in filler_vectors:
+            vec_sum, tc = filler_vectors[key]
+            total_sum = vec_sum if total_sum is None else total_sum + vec_sum
+            total_count += tc
+        else:
+            has_all = False
+
+    if total_sum is not None and total_count > 0:
+        return total_sum / total_count, has_all
+    return None, False
 
 
 def _classify_for_remix(phrase: str, doc) -> tuple[str, int] | tuple[str, str, int] | None:
@@ -431,10 +642,13 @@ def _try_remix(
     Returns (composed_text, parts_dict, similarity_score) or None.
     When locked_parts is provided, locked values are passed through to
     compose functions and coherence-filter behavior is adjusted.
+
+    Supports both pre-computed vectors (precomputed=True in ctx) and
+    live spaCy (precomputed=False, dev fallback).
     """
     ctx = _load_remix_context(conn)
-    nlp = ctx["nlp"]
     centroid = ctx["centroid"]
+    is_precomputed = ctx.get("precomputed", False)
 
     has_locks = bool(locked_parts)
 
@@ -462,7 +676,6 @@ def _try_remix(
             max_retries = 20
 
     # Determine remix classification
-    # Sub-part locks can force the remix type even when classification fails
     force_type = None
     if has_locks:
         if "of_modifier" in locked_parts or "of_head" in locked_parts:
@@ -470,8 +683,24 @@ def _try_remix(
         elif "of_topic" in locked_parts or "of_complement" in locked_parts:
             force_type = "type2"
 
-    doc = nlp(original_of_object)
-    orig_classification = _classify_for_remix(original_of_object, doc)
+    if is_precomputed:
+        # Read pre-computed classification from DB
+        row = conn.execute(
+            "SELECT remix_type, remix_prep, remix_word_count FROM slot_fillers "
+            "WHERE filler = ? AND slot_type = 'of_object' AND mode = 'strict' LIMIT 1",
+            (original_of_object,),
+        ).fetchone()
+        if row and row[0] is not None:
+            if row[0] == "type1":
+                orig_classification = ("type1", row[2])
+            else:
+                orig_classification = ("type2", row[1], row[2])
+        else:
+            orig_classification = None
+    else:
+        nlp = ctx["nlp"]
+        doc = nlp(original_of_object)
+        orig_classification = _classify_for_remix(original_of_object, doc)
 
     if force_type == "type1":
         if "of_modifier" in locked_parts:
@@ -498,7 +727,7 @@ def _try_remix(
                         break
             if prep is None:
                 return None
-            word_count = 0  # bucket check skipped when locks present
+            word_count = 0
         classification = ("type2", prep, word_count)
     else:
         classification = orig_classification
@@ -532,9 +761,16 @@ def _try_remix(
         # Compute similarity when coherence check is active or locks present
         sim = None
         if centroid is not None and (min_sim > 0 or has_locks):
-            composed_doc = nlp(composed)
-            if composed_doc.has_vector and composed_doc.vector_norm > 0:
-                sim = _cosine_sim(centroid, composed_doc.vector)
+            if is_precomputed:
+                filler_vectors = ctx["filler_vectors"]
+                composed_vec, _has_all = _compute_composed_vector(parts, filler_vectors)
+                if composed_vec is not None:
+                    sim = _cosine_sim(centroid, composed_vec)
+            else:
+                nlp = ctx["nlp"]
+                composed_doc = nlp(composed)
+                if composed_doc.has_vector and composed_doc.vector_norm > 0:
+                    sim = _cosine_sim(centroid, composed_doc.vector)
 
         # Coherence check (skipped for custom locked values)
         if not skip_coherence and min_sim > 0 and sim is not None:

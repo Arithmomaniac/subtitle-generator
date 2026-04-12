@@ -1,5 +1,6 @@
 """Export data for deployment and build mini SQLite from exported data."""
 
+import base64
 import csv
 import sqlite3
 from pathlib import Path
@@ -16,16 +17,28 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     output_dir.mkdir(parents=True, exist_ok=True)
     stats: dict[str, int] = {}
 
-    # -- slot_fillers --
+    # -- slot_fillers (with vector and remix columns) --
     rows = source_conn.execute(
-        "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep "
+        "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep, "
+        "remix_type, remix_prep, remix_word_count, vector_sum, token_count "
         "FROM slot_fillers"
     ).fetchall()
     path = output_dir / "slot_fillers.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        w.writerow(["id", "slot_type", "filler", "mode", "source_subtitle_id", "freq", "pos_tag", "prep"])
-        w.writerows(rows)
+        w.writerow([
+            "id", "slot_type", "filler", "mode", "source_subtitle_id", "freq",
+            "pos_tag", "prep", "remix_type", "remix_prep", "remix_word_count",
+            "vector_sum_b64", "token_count",
+        ])
+        for row in rows:
+            row = list(row)
+            # Encode vector BLOB as base64 for CSV transport
+            if row[11] is not None:
+                row[11] = base64.b64encode(row[11]).decode("ascii")
+            else:
+                row[11] = ""
+            w.writerow(row)
     stats["slot_fillers.csv"] = len(rows)
 
     # -- config --
@@ -70,7 +83,7 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
     conn = sqlite3.connect(str(output_path))
     stats: dict[str, int] = {}
 
-    # -- slot_fillers --
+    # -- slot_fillers (with vector + remix columns) --
     conn.execute("""
         CREATE TABLE slot_fillers (
             id INTEGER PRIMARY KEY,
@@ -81,6 +94,11 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
             freq INTEGER NOT NULL DEFAULT 1,
             pos_tag TEXT,
             prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            vector_sum BLOB,
+            token_count INTEGER,
             UNIQUE(slot_type, filler)
         )
     """)
@@ -89,13 +107,21 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
         reader = csv.DictReader(f)
         rows = []
         for row in reader:
+            # Decode base64 vector back to BLOB
+            vec_b64 = row.get("vector_sum_b64", "") or row.get("vector_sum", "")
+            vec_blob = base64.b64decode(vec_b64) if vec_b64 else None
             rows.append((
                 int(row["id"]), row["slot_type"], row["filler"], row["mode"],
                 int(row["source_subtitle_id"]) if row["source_subtitle_id"] else None,
                 int(row["freq"]), row["pos_tag"] or None, row["prep"] or None,
+                row.get("remix_type") or None,
+                row.get("remix_prep") or None,
+                int(row["remix_word_count"]) if row.get("remix_word_count") else None,
+                vec_blob,
+                int(row["token_count"]) if row.get("token_count") else None,
             ))
         conn.executemany(
-            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
         )
         stats["slot_fillers"] = len(rows)
 

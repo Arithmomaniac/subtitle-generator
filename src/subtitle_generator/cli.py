@@ -14,7 +14,7 @@ from subtitle_generator.extract_openlibrary import (
 )
 from subtitle_generator.calibrate import run_calibration
 from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
-from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, slot_stats
+from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, precompute_remix_data, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
     compute_accessibility, generate_jacket, sample_tone,
@@ -208,18 +208,40 @@ def patterns(top: int, min_count: int):
 
 
 @cli.command("build-slots")
-def build_slots_cmd():
+@click.option("--skip-vectors", is_flag=True, help="Skip vector precomputation (useful if en_core_web_md is not installed).")
+def build_slots_cmd(skip_vectors: bool):
     """Extract slot fillers from matched subtitles (regex + NLP validated).
 
-    Runs regex pattern matching, spaCy POS/NER validation, and of-object
-    decomposition. Rebuilds the entire slot_fillers table from scratch.
+    Runs regex pattern matching, spaCy POS/NER validation, of-object
+    decomposition, and vector precomputation. Rebuilds the entire
+    slot_fillers table from scratch.
 
     \b
     Examples:
-      subtitle-gen build-slots   # extract all slot fillers
+      subtitle-gen build-slots              # extract slots + precompute vectors
+      subtitle-gen build-slots --skip-vectors  # extract slots only
     """
     conn = get_db()
     build_slots(conn)
+    if not skip_vectors:
+        precompute_remix_data(conn)
+    conn.close()
+
+
+@cli.command("precompute-vectors")
+def precompute_vectors_cmd():
+    """Pre-compute remix classifications and word vectors.
+
+    Loads spaCy en_core_web_md to compute vector embeddings for remix-relevant
+    fillers and classify of-object fillers for remix type. Stores results in the
+    database so that runtime generation needs only numpy (no spaCy).
+
+    \b
+    Examples:
+      subtitle-gen precompute-vectors   # recompute all vectors
+    """
+    conn = get_db()
+    precompute_remix_data(conn)
     conn.close()
 
 
