@@ -230,12 +230,11 @@ def build_slots_cmd():
 @click.option("--sources", is_flag=True, help="Show which real books each slot filler came from.")
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in jacket output.")
-@click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Filter by accessibility tier: pop, mainstream, niche (comma-separated for multiple, e.g. 'pop,mainstream').")
 @click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
 @click.option("--remix-prob", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
 @click.option("--min-sim", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
-def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None):
+def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None):
     """Generate random subtitles in the "X, Y, and the Z of W" pattern.
 
     Draws slot fillers from the extracted pool, optionally remixing multi-word
@@ -248,7 +247,6 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
       subtitle-gen generate --tone pop              # bias toward accessible
       subtitle-gen generate --no-remix              # original of-objects only
       subtitle-gen generate --jacket                # 1 subtitle + full jacket
-      subtitle-gen generate --jacket --deep-research  # jacket with web search
     """
     tone_set = _parse_tone(tone)
 
@@ -290,7 +288,7 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
+            md = generate_jacket(sub.text, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
             click.echo(md)
             if sources:
                 click.echo(format_sources(conn, sub))
@@ -310,9 +308,8 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
 @click.option("--sources", is_flag=True, help="Show source books for each slot filler (only for random generation).")
 @click.option("--model", default=None, help="LLM model for jacket generation (default: gpt-5.4-mini).")
 @click.option("--show-concept", is_flag=True, help="Include the internal concept section in output.")
-@click.option("--deep-research", is_flag=True, help="Two-phase generation: dedicated web search for concept research before jacket.")
 @click.option("--tone", default=None, help="Override tone tier: pop, mainstream, niche (comma-separated for multiple).")
-def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | None, show_concept: bool, deep_research: bool, tone: str | None):
+def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | None, show_concept: bool, tone: str | None):
     """Generate a full book jacket — title, back cover, reviews, and blurbs.
 
     Pass a subtitle string to jacket a specific text, or omit to generate a random one.
@@ -329,7 +326,7 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
     conn = get_db()
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
-        md = generate_jacket(subtitle, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
+        md = generate_jacket(subtitle, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
         click.echo(md)
     else:
         stats = slot_stats(conn)
@@ -339,7 +336,7 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
         click.echo(f"Slot machine loaded: {stats}\n")
         sub = generate_subtitle(conn, seed=seed)
         click.echo(f"Generating jacket for: {sub.text}\n")
-        md = generate_jacket(sub.text, show_concept=show_concept, deep_research=deep_research, conn=conn, allowed_tiers=tone_set, **kwargs)
+        md = generate_jacket(sub.text, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
         click.echo(md)
         if sources:
             click.echo(format_sources(conn, sub))

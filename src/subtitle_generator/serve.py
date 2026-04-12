@@ -166,7 +166,6 @@ def _handle_jacket(body: dict) -> tuple[int, dict]:
         return 400, {"error": "subtitle is required and must be a non-empty string"}
 
     model = body.get("model", "gpt-5.4-mini")
-    deep_research = bool(body.get("deep_research", False))
     dry_run = bool(body.get("dry_run", True))
 
     conn = _get_db()
@@ -179,7 +178,6 @@ def _handle_jacket(body: dict) -> tuple[int, dict]:
             result_text = generate_jacket(
                 subtitle,
                 model=model,
-                deep_research=deep_research,
                 conn=conn,
             )
 

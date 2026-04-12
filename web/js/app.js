@@ -34,7 +34,6 @@ export function createApp() {
     // Settings
     tone: "",
     model: "gpt-5.4-mini",
-    deepResearch: false,
     settingsOpen: true,
     availableModels: [],
 
@@ -53,7 +52,6 @@ export function createApp() {
       const saved = loadSettings();
       if (saved.tone) this.tone = saved.tone;
       if (saved.model) this.model = saved.model;
-      if (saved.deepResearch) this.deepResearch = true;
 
       const h = await api.health();
       this.mode = h.error ? "azure" : (h.mode || "local");
@@ -77,7 +75,6 @@ export function createApp() {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         tone: this.tone,
         model: this.model,
-        deepResearch: this.deepResearch,
       }));
     },
 
@@ -127,7 +124,6 @@ export function createApp() {
       const result = await api.jacket({
         subtitle: this.subtitle.fullText,
         model: this.model,
-        deepResearch: this.deepResearch,
         dryRun,
       });
 

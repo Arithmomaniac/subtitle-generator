@@ -80,6 +80,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 
 /* Footer */
 .footer{text-align:center;padding:14px 0;font-size:10px;color:#444;border-top:1px solid #222}
+.footer a{color:#6c8ebf;text-decoration:none}
+.footer a:hover{text-decoration:underline}
 
 /* Spinner */
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -128,13 +130,6 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
           </template>
         </select>
       </div>
-      <div class="setting" x-show="settingsVis.showDeepResearch">
-        <label>Deep Research</label>
-        <div class="switch-row">
-          <div class="switch" :class="deepResearch && 'on'" @click="deepResearch = !deepResearch; saveSettings()"><div class="knob"></div></div>
-          <span class="switch-label" x-text="deepResearch ? 'Enabled' : 'Off'"></span>
-        </div>
-      </div>
     </div>
   </div>
 
@@ -158,7 +153,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
       <span x-text="loading ? 'Generating...' : 'Generate'"></span>
     </button>
     <button class="btn btn-secondary" x-ref="copyBtn" @click="copySubtitle()" :disabled="!hasSubtitle">Copy</button>
-    <button class="btn btn-jacket" x-show="mode === 'local'" @click="generateJacket()" :disabled="!hasSubtitle || jacketLoading">
+    <button class="btn btn-jacket" x-show="mode === 'local' && availableModels.length > 0" @click="generateJacket()" :disabled="!hasSubtitle || jacketLoading">
       <span x-show="jacketLoading" class="spinner"></span>
       <span x-text="jacketLoading ? 'Generating...' : 'Generate Jacket'"></span>
     </button>
@@ -210,7 +205,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
     </div>
   </div>
 
-  <div class="footer">subtitle-generator &mdash; data from Library of Congress &amp; Open Library</div>
+  <div class="footer"><a href="https://github.com/Arithmomaniac/subtitle-generator" target="_blank">subtitle-generator</a> &mdash; data from Library of Congress &amp; Open Library</div>
 
 </div>
 </body>

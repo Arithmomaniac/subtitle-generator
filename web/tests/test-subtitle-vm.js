@@ -129,16 +129,14 @@ test("remix sources resolve parts", () => {
 
 // ── buildSettingsVM ──
 
-test("local mode shows model and deep research", () => {
+test("local mode shows model", () => {
   const vm = buildSettingsVM("local");
   assert(vm.showModel === true, "showModel");
-  assert(vm.showDeepResearch === true, "showDeepResearch");
 });
 
-test("azure mode hides model and deep research", () => {
+test("azure mode hides model", () => {
   const vm = buildSettingsVM("azure");
   assert(vm.showModel === false, "hideModel");
-  assert(vm.showDeepResearch === false, "hideDeepResearch");
 });
 
 // ── Summary ──

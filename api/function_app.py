@@ -196,7 +196,6 @@ def jacket(req: func.HttpRequest) -> func.HttpResponse:
             return _error("subtitle is required and must be a non-empty string")
 
         model = body.get("model", "gpt-5.4-mini")
-        deep_research = bool(body.get("deep_research", False))
         dry_run = bool(body.get("dry_run", True))
 
         conn = _get_db()
@@ -209,7 +208,6 @@ def jacket(req: func.HttpRequest) -> func.HttpResponse:
                 result_text = generate_jacket(
                     subtitle,
                     model=model,
-                    deep_research=deep_research,
                     conn=conn,
                 )
 

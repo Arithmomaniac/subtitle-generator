@@ -32,11 +32,10 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
     },
 
     /** Build jacket prompt and optionally run LLM. Returns {prompt, tone_tier, result} or {error}. */
-    async jacket({ subtitle, model, deepResearch, dryRun = true } = {}) {
+    async jacket({ subtitle, model, dryRun = true } = {}) {
       return post("/api/jacket", {
         subtitle,
         model: model || "gpt-5.4-mini",
-        deep_research: !!deepResearch,
         dry_run: dryRun,
       });
     },

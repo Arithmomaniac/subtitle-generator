@@ -91,7 +91,6 @@ await test("jacket sends correct body for dry_run", async () => {
   await api.jacket({ subtitle: "test subtitle", dryRun: true });
   assert(capturedBody.subtitle === "test subtitle", "subtitle sent");
   assert(capturedBody.dry_run === true, "dry_run sent");
-  assert(capturedBody.deep_research === false, "deep_research default false");
 });
 
 await test("jacket sends correct body for full generation", async () => {
@@ -101,9 +100,8 @@ await test("jacket sends correct body for full generation", async () => {
     return { ok: true, json: async () => ({ prompt: "...", result: "## Title" }) };
   };
   const api = createApi("", mockF);
-  await api.jacket({ subtitle: "test", model: "gpt-4.1", deepResearch: true, dryRun: false });
+  await api.jacket({ subtitle: "test", model: "gpt-4.1", dryRun: false });
   assert(capturedBody.model === "gpt-4.1", "model sent");
-  assert(capturedBody.deep_research === true, "deep_research sent");
   assert(capturedBody.dry_run === false, "dry_run false");
 });
 

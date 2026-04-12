@@ -101,6 +101,5 @@ export function buildSettingsVM(mode) {
   const isLocal = mode === "local";
   return {
     showModel: isLocal,
-    showDeepResearch: isLocal,
   };
 }

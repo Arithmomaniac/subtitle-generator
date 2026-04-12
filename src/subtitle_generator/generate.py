@@ -10,6 +10,27 @@ from dataclasses import dataclass, field
 import click
 
 
+# Words that stay lowercase in title case (unless first word).
+_SMALL_WORDS = frozenset({
+    "a", "an", "and", "as", "at", "but", "by", "for", "if", "in",
+    "nor", "of", "on", "or", "so", "the", "to", "up", "yet",
+})
+
+
+def _title_case(text: str) -> str:
+    """Title-case a subtitle, keeping small words lowercase (except first)."""
+    words = text.split()
+    result = []
+    for i, word in enumerate(words):
+        lower = word.lower()
+        if i == 0 or lower not in _SMALL_WORDS:
+            # Capitalize first letter, preserve rest (handles "McGraw", "iPhone")
+            result.append(word[0].upper() + word[1:] if word else word)
+        else:
+            result.append(lower)
+    return " ".join(result)
+
+
 @dataclass
 class GeneratedSubtitle:
     """A generated subtitle with its component fillers."""
@@ -375,8 +396,10 @@ def generate_subtitle(
                     of_object, remix_parts, remix_similarity = result
                     remixed = True
 
+    text = f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}"
+
     return GeneratedSubtitle(
-        text=f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}",
+        text=_title_case(text),
         item1=items[0],
         item2=items[1],
         action_noun=action_noun,
