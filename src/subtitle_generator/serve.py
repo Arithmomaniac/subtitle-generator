@@ -220,7 +220,7 @@ class _Handler(BaseHTTPRequestHandler):
     # -- helpers ----------------------------------------------------------
 
     def _send_json(self, body: dict, status: int = 200) -> None:
-        data = json.dumps(body).encode()
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
