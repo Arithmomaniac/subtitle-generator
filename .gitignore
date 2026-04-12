@@ -5,3 +5,7 @@ __pycache__/
 *.pyc
 .venv/
 *.db
+
+# Allow API data CSVs (deployment data, tracked in Git)
+!api/data/
+!api/data/*.csv

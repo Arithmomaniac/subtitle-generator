@@ -13,7 +13,7 @@ from subtitle_generator.extract_openlibrary import (
     extract_from_ol_dump,
 )
 from subtitle_generator.calibrate import run_calibration
-from subtitle_generator.export_db import export_mini_db
+from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
 from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
@@ -462,6 +462,61 @@ def export_db_cmd(output: str):
         click.echo(f"Output: {output_path} ({size_kb / 1024:.1f} MB)")
     else:
         click.echo(f"Output: {output_path} ({size_kb:.0f} KB)")
+
+
+@cli.command("export-data")
+@click.option("--output-dir", "-o", default="api/data", help="Output directory for CSV files.")
+def export_data_cmd(output_dir: str):
+    """Export slot data as CSV files for version control.
+
+    Writes slot_fillers.csv, config.csv, and sources.csv to the output
+    directory. These text files are committed to the repo and used by
+    'build-db' in CI to construct the SQLite deployment artifact.
+
+    \b
+    Examples:
+      subtitle-gen export-data                  # default: api/data/
+      subtitle-gen export-data -o data/export   # custom directory
+    """
+    out = Path(output_dir)
+    conn = get_db()
+    click.echo(f"Exporting data to {out}/ ...")
+    stats = export_data(conn, out)
+    conn.close()
+
+    for filename, count in stats.items():
+        size_kb = (out / filename).stat().st_size / 1024
+        click.echo(f"  {filename}: {count:,} rows ({size_kb:.0f} KB)")
+
+
+@cli.command("build-db")
+@click.option("--data-dir", "-d", default="api/data", help="Directory containing CSV files.")
+@click.option("--output", "-o", default="api/data/subtitles.mini.db", help="Output SQLite path.")
+def build_db_cmd(data_dir: str, output: str):
+    """Build a mini SQLite database from exported CSV files.
+
+    Reads slot_fillers.csv, config.csv, and sources.csv from the data
+    directory and constructs an indexed SQLite database for deployment.
+
+    \b
+    Examples:
+      subtitle-gen build-db                     # default paths
+      subtitle-gen build-db -d data/export -o deploy/mini.db
+    """
+    data = Path(data_dir)
+    out = Path(output)
+
+    for f in ["slot_fillers.csv", "config.csv", "sources.csv"]:
+        if not (data / f).exists():
+            raise click.ClickException(f"Missing {data / f}. Run 'subtitle-gen export-data' first.")
+
+    click.echo(f"Building mini DB from {data}/ ...")
+    stats = build_mini_db(data, out)
+
+    for table, count in stats.items():
+        click.echo(f"  {table}: {count:,} rows")
+    size_kb = out.stat().st_size / 1024
+    click.echo(f"Output: {out} ({size_kb:.0f} KB)")
 
 
 if __name__ == "__main__":

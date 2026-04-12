@@ -1,15 +1,65 @@
-"""Export a minimal SQLite database for web/API deployment."""
+"""Export data for deployment and build mini SQLite from exported data."""
 
+import csv
 import sqlite3
 from pathlib import Path
 
 
-def export_mini_db(source_conn: sqlite3.Connection, output_path: Path) -> dict:
-    """Create a minimal SQLite DB for web deployment.
+def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
+    """Export slot_fillers, config, and sources as CSV files.
 
-    Copies slot_fillers and config tables verbatim, then builds a
-    pre-joined ``sources`` lookup table so the web app can show source
-    books without shipping the 3 GB subtitles table.
+    These text files are committed to the repo and used by ``build_mini_db``
+    in CI to construct the SQLite deployment artifact.
+
+    Returns stats dict: {filename: row_count, ...}.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stats: dict[str, int] = {}
+
+    # -- slot_fillers --
+    rows = source_conn.execute(
+        "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep "
+        "FROM slot_fillers"
+    ).fetchall()
+    path = output_dir / "slot_fillers.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["id", "slot_type", "filler", "mode", "source_subtitle_id", "freq", "pos_tag", "prep"])
+        w.writerows(rows)
+    stats["slot_fillers.csv"] = len(rows)
+
+    # -- config --
+    rows = source_conn.execute("SELECT key, value FROM config").fetchall()
+    path = output_dir / "config.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["key", "value"])
+        w.writerows(rows)
+    stats["config.csv"] = len(rows)
+
+    # -- sources (pre-joined: slot_filler -> source book) --
+    rows = source_conn.execute(
+        "SELECT sf.id, s.title, s.subtitle, "
+        "CASE WHEN s.source_file = 'openlibrary' THEN 'OL' ELSE 'LOC' END "
+        "FROM slot_fillers sf "
+        "JOIN subtitles s ON s.id = sf.source_subtitle_id "
+        "WHERE sf.source_subtitle_id IS NOT NULL"
+    ).fetchall()
+    path = output_dir / "sources.csv"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["slot_filler_id", "title", "subtitle_text", "source_tag"])
+        w.writerows(rows)
+    stats["sources.csv"] = len(rows)
+
+    return stats
+
+
+def build_mini_db(data_dir: Path, output_path: Path) -> dict:
+    """Build a minimal SQLite DB from exported CSV files.
+
+    Reads slot_fillers.csv, config.csv, and sources.csv from ``data_dir``,
+    creates an indexed SQLite database at ``output_path``.
 
     Returns stats dict: {table: row_count, ...}.
     """
@@ -17,13 +67,13 @@ def export_mini_db(source_conn: sqlite3.Connection, output_path: Path) -> dict:
         output_path.unlink()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    dest = sqlite3.connect(str(output_path))
+    conn = sqlite3.connect(str(output_path))
     stats: dict[str, int] = {}
 
-    # -- slot_fillers (same schema as source) --
-    dest.execute("""
+    # -- slot_fillers --
+    conn.execute("""
         CREATE TABLE slot_fillers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id INTEGER PRIMARY KEY,
             slot_type TEXT NOT NULL,
             filler TEXT NOT NULL,
             mode TEXT NOT NULL DEFAULT 'strict',
@@ -34,27 +84,32 @@ def export_mini_db(source_conn: sqlite3.Connection, output_path: Path) -> dict:
             UNIQUE(slot_type, filler)
         )
     """)
-    rows = source_conn.execute("SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep FROM slot_fillers").fetchall()
-    dest.executemany(
-        "INSERT INTO slot_fillers (id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        rows,
-    )
-    stats["slot_fillers"] = len(rows)
+    sf_path = data_dir / "slot_fillers.csv"
+    with open(sf_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = []
+        for row in reader:
+            rows.append((
+                int(row["id"]), row["slot_type"], row["filler"], row["mode"],
+                int(row["source_subtitle_id"]) if row["source_subtitle_id"] else None,
+                int(row["freq"]), row["pos_tag"] or None, row["prep"] or None,
+            ))
+        conn.executemany(
+            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows
+        )
+        stats["slot_fillers"] = len(rows)
 
     # -- config --
-    dest.execute("""
-        CREATE TABLE config (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-    rows = source_conn.execute("SELECT key, value FROM config").fetchall()
-    dest.executemany("INSERT INTO config (key, value) VALUES (?, ?)", rows)
-    stats["config"] = len(rows)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    cfg_path = data_dir / "config.csv"
+    with open(cfg_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = [(row["key"], row["value"]) for row in reader]
+        conn.executemany("INSERT INTO config VALUES (?, ?)", rows)
+        stats["config"] = len(rows)
 
-    # -- sources (pre-joined lookup: slot_filler → source book) --
-    dest.execute("""
+    # -- sources --
+    conn.execute("""
         CREATE TABLE sources (
             slot_filler_id INTEGER NOT NULL,
             title TEXT,
@@ -63,30 +118,32 @@ def export_mini_db(source_conn: sqlite3.Connection, output_path: Path) -> dict:
             FOREIGN KEY (slot_filler_id) REFERENCES slot_fillers(id)
         )
     """)
-    source_rows = source_conn.execute("""
-        SELECT sf.id,
-               s.title,
-               s.subtitle,
-               CASE WHEN s.source_file = 'openlibrary' THEN 'OL' ELSE 'LOC' END
-        FROM slot_fillers sf
-        JOIN subtitles s ON s.id = sf.source_subtitle_id
-        WHERE sf.source_subtitle_id IS NOT NULL
-    """).fetchall()
-    dest.executemany(
-        "INSERT INTO sources (slot_filler_id, title, subtitle_text, source_tag) VALUES (?, ?, ?, ?)",
-        source_rows,
-    )
-    stats["sources"] = len(source_rows)
+    src_path = data_dir / "sources.csv"
+    with open(src_path, encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        rows = [(int(row["slot_filler_id"]), row["title"], row["subtitle_text"], row["source_tag"]) for row in reader]
+        conn.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", rows)
+        stats["sources"] = len(rows)
 
-    # -- indexes matching the queries in generate.py and jacket.py --
-    dest.execute("CREATE INDEX idx_sf_slot_type ON slot_fillers(slot_type)")
-    dest.execute("CREATE INDEX idx_sf_slot_type_pos ON slot_fillers(slot_type, pos_tag)")
-    dest.execute("CREATE INDEX idx_sf_slot_type_prep ON slot_fillers(slot_type, prep)")
-    dest.execute("CREATE INDEX idx_sf_filler ON slot_fillers(filler)")
-    dest.execute("CREATE INDEX idx_sources_filler ON sources(slot_filler_id)")
+    # -- indexes --
+    conn.execute("CREATE INDEX idx_sf_slot_type ON slot_fillers(slot_type)")
+    conn.execute("CREATE INDEX idx_sf_slot_type_pos ON slot_fillers(slot_type, pos_tag)")
+    conn.execute("CREATE INDEX idx_sf_slot_type_prep ON slot_fillers(slot_type, prep)")
+    conn.execute("CREATE INDEX idx_sf_filler ON slot_fillers(filler)")
+    conn.execute("CREATE INDEX idx_sources_filler ON sources(slot_filler_id)")
 
-    dest.commit()
-    dest.execute("VACUUM")
-    dest.close()
+    conn.commit()
+    conn.execute("VACUUM")
+    conn.close()
 
     return stats
+
+
+# Keep backward compat for existing export-db CLI command
+def export_mini_db(source_conn: sqlite3.Connection, output_path: Path) -> dict:
+    """Create a minimal SQLite DB directly from the full DB (legacy one-step)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        export_data(source_conn, tmp_dir)
+        return build_mini_db(tmp_dir, output_path)
