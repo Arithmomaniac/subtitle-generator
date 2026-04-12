@@ -22,7 +22,8 @@ function loadSettings() {
  * @returns {object} Alpine data object
  */
 export function createApp() {
-  const api = createApi();
+  const apiBase = document.querySelector('meta[name="api-base"]')?.content || "";
+  const api = createApi(apiBase);
 
   return {
     // ── Reactive state ──
@@ -150,7 +151,7 @@ export function createApp() {
           model: this.model,
           dry_run: false,
         });
-        const response = await fetch("/api/jacket", {
+        const response = await fetch(apiBase + "/api/jacket", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body,

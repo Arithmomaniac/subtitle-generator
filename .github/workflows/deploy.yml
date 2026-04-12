@@ -1,0 +1,91 @@
+# Deploy subtitle-generator web app
+# Frontend -> GitHub Pages (web/ directory)
+# Backend  -> Azure Functions (api/ directory + src/)
+#
+# Triggers on push to master when web/, api/, or src/ files change.
+# Manual trigger also available.
+
+name: Deploy
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'web/**'
+      - 'api/**'
+      - 'src/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: deploy
+  cancel-in-progress: true
+
+jobs:
+  # ── Deploy frontend to GitHub Pages ──
+  pages:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set API base URL
+        run: |
+          sed -i 's|<meta name="api-base" content="">|<meta name="api-base" content="${{ vars.AZURE_FUNCTION_APP_URL }}">|' web/index.html
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+  # ── Deploy backend to Azure Functions ──
+  functions:
+    runs-on: ubuntu-latest
+    environment: azure
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Export mini database
+        run: |
+          uv run subtitle-gen export-db -o api/data/subtitles.mini.db
+        env:
+          DB_PATH: data/db/subtitles.db
+
+      - name: Install function app dependencies
+        run: |
+          cd api
+          pip install -r requirements.txt --target .python_packages/lib/site-packages
+
+      - name: Copy src modules into function app
+        run: cp -r src/subtitle_generator api/subtitle_generator
+
+      - name: Deploy to Azure Functions
+        uses: Azure/functions-action@v1
+        with:
+          app-name: ${{ vars.AZURE_FUNCTION_APP_NAME }}
+          package: api
+          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
