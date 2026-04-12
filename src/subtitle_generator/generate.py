@@ -569,7 +569,7 @@ def find_source(conn: sqlite3.Connection, filler: str, slot_type: str = "of_obje
             "SELECT sr.title, sr.subtitle_text, sr.source_tag "
             "FROM slot_fillers sf "
             "JOIN sources sr ON sr.slot_filler_id = sf.id "
-            "WHERE sf.filler = ? AND sf.slot_type = ? "
+            "WHERE sf.filler = ? COLLATE NOCASE AND sf.slot_type = ? "
             "LIMIT 1",
             (filler, slot_type),
         ).fetchone()
@@ -586,7 +586,7 @@ def find_source(conn: sqlite3.Connection, filler: str, slot_type: str = "of_obje
             "SELECT s.title, s.subtitle, s.source_file "
             "FROM slot_fillers sf "
             "JOIN subtitles s ON s.id = sf.source_subtitle_id "
-            "WHERE sf.filler = ? AND sf.slot_type = ? AND sf.source_subtitle_id IS NOT NULL "
+            "WHERE sf.filler = ? COLLATE NOCASE AND sf.slot_type = ? AND sf.source_subtitle_id IS NOT NULL "
             "LIMIT 1",
             (filler, slot_type),
         ).fetchone()

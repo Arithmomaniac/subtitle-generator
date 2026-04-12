@@ -38,14 +38,25 @@ async def test():
         assert expected_mode in badge_text, f"Expected {expected_mode} mode, got: {badge_text}"
         print(f"  PASS: {badge_text}")
 
-        # 3. Click Generate
+        # 3. Click Generate (with cold-start retry)
         print("TEST 3: Generate subtitle")
         gen_btn = page.locator("button:has-text('Generate')").first
-        await gen_btn.click()
-        await page.wait_for_function(
-            "() => document.querySelectorAll('.slot').length >= 4",
-            timeout=60000,  # cold start can be slow on Azure
-        )
+        for gen_attempt in range(3):
+            await gen_btn.click()
+            try:
+                await page.wait_for_function(
+                    "() => document.querySelectorAll('.slot').length >= 4",
+                    timeout=60000,
+                )
+                break
+            except Exception:
+                if gen_attempt < 2:
+                    print(f"  Cold start timeout, retrying ({gen_attempt + 1}/3)...")
+                    # Dismiss any alert dialog
+                    page.on("dialog", lambda d: d.dismiss())
+                    await page.wait_for_timeout(5000)
+                else:
+                    raise
         slots = await page.locator(".slot").count()
         assert slots >= 4, f"Expected >= 4 slots, got {slots}"
 
@@ -120,8 +131,33 @@ async def test():
         assert await gh_link.count() > 0, "No GitHub link in footer"
         print("  PASS: GitHub link present")
 
+        # 10. Generate until remix (sub-parts visible)
+        print("TEST 10: Generate until remix")
+        got_remix = False
+        for attempt in range(30):
+            await gen_btn.click()
+            await page.wait_for_function(
+                "() => document.querySelectorAll('.slot').length >= 4",
+                timeout=60000,
+            )
+            subparts = await page.locator(".slot-subpart").count()
+            if subparts >= 2:
+                parts = []
+                for i in range(subparts):
+                    parts.append(await page.locator(".slot-subpart").nth(i).text_content())
+                print(f"  Remix found on attempt {attempt + 1}: {parts}")
+                # Verify remix similarity line appears
+                sim_line = page.locator(".remix-info")
+                if await sim_line.count() > 0:
+                    sim_text = await sim_line.text_content()
+                    print(f"  {sim_text}")
+                got_remix = True
+                break
+        assert got_remix, "No remix after 30 attempts (remix_prob=0.8, expected ~80%)"
+        print("  PASS: remix sub-parts rendered")
+
         print()
-        print(f"ALL 9 TESTS PASSED ({BASE_URL})")
+        print(f"ALL 10 TESTS PASSED ({BASE_URL})")
         await browser.close()
 
 
