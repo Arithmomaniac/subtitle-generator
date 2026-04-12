@@ -570,7 +570,7 @@ def find_source(conn: sqlite3.Connection, filler: str, slot_type: str = "of_obje
         (filler, slot_type),
     ).fetchone()
 
-    # Fallback: substring search (for loose fillers without source linkage)
+    # Fallback: substring search (for fillers without source linkage)
     if not row:
         escaped = filler.replace("'", "''")
         row = conn.execute(
