@@ -556,34 +556,55 @@ def _try_remix(
 def find_source(conn: sqlite3.Connection, filler: str, slot_type: str = "of_object") -> tuple[str, str] | None:
     """Find the real book a slot filler was extracted from.
 
-    First tries the exact source_subtitle_id linkage from slot_fillers,
-    then falls back to a random LIKE search.
+    Tries the pre-joined sources table first (mini DB), then falls back to
+    the full subtitles table (development DB).
     Returns (description, source_tag) where source_tag is 'LOC' or 'OL'.
     """
-    # Try exact source via slot_fillers → subtitles join (scoped to slot_type)
+    # Try pre-joined sources table (mini DB for deployment)
     row = conn.execute(
-        "SELECT s.title, s.subtitle, s.source_file "
-        "FROM slot_fillers sf "
-        "JOIN subtitles s ON s.id = sf.source_subtitle_id "
-        "WHERE sf.filler = ? AND sf.slot_type = ? AND sf.source_subtitle_id IS NOT NULL "
-        "LIMIT 1",
-        (filler, slot_type),
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='sources'"
     ).fetchone()
-
-    # Fallback: substring search (for fillers without source linkage)
-    if not row:
-        escaped = filler.replace("'", "''")
-        row = conn.execute(
-            "SELECT title, subtitle, source_file FROM subtitles "
-            f"WHERE subtitle LIKE '%{escaped}%' ORDER BY RANDOM() LIMIT 1"
-        ).fetchone()
     if row:
-        title = (row[0] or "").strip().rstrip(" /:")
-        subtitle = (row[1] or "").strip().rstrip(" /:")
-        source_file = row[2] or ""
-        tag = "OL" if source_file == "openlibrary" else "LOC"
-        desc = f"{title}: {subtitle}" if title and subtitle else (title or subtitle)
-        return desc, tag
+        src = conn.execute(
+            "SELECT sr.title, sr.subtitle_text, sr.source_tag "
+            "FROM slot_fillers sf "
+            "JOIN sources sr ON sr.slot_filler_id = sf.id "
+            "WHERE sf.filler = ? AND sf.slot_type = ? "
+            "LIMIT 1",
+            (filler, slot_type),
+        ).fetchone()
+        if src:
+            title = (src[0] or "").strip().rstrip(" /:")
+            subtitle = (src[1] or "").strip().rstrip(" /:")
+            tag = src[2] or "LOC"
+            desc = f"{title}: {subtitle}" if title and subtitle else (title or subtitle)
+            return desc, tag
+
+    # Fallback: full DB with subtitles table
+    try:
+        row = conn.execute(
+            "SELECT s.title, s.subtitle, s.source_file "
+            "FROM slot_fillers sf "
+            "JOIN subtitles s ON s.id = sf.source_subtitle_id "
+            "WHERE sf.filler = ? AND sf.slot_type = ? AND sf.source_subtitle_id IS NOT NULL "
+            "LIMIT 1",
+            (filler, slot_type),
+        ).fetchone()
+        if not row:
+            escaped = filler.replace("'", "''")
+            row = conn.execute(
+                "SELECT title, subtitle, source_file FROM subtitles "
+                f"WHERE subtitle LIKE '%{escaped}%' ORDER BY RANDOM() LIMIT 1"
+            ).fetchone()
+        if row:
+            title = (row[0] or "").strip().rstrip(" /:")
+            subtitle = (row[1] or "").strip().rstrip(" /:")
+            source_file = row[2] or ""
+            tag = "OL" if source_file == "openlibrary" else "LOC"
+            desc = f"{title}: {subtitle}" if title and subtitle else (title or subtitle)
+            return desc, tag
+    except Exception:
+        pass
     return None
 
 

@@ -6,8 +6,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# Add the src directory so subtitle_generator is importable
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Add the src directory so subtitle_generator is importable (local dev)
+# In Azure, subtitle_generator/ is copied alongside function_app.py
+_src_path = Path(__file__).parent.parent / "src"
+if _src_path.is_dir():
+    sys.path.insert(0, str(_src_path))
 
 import azure.functions as func
 

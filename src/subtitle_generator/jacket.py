@@ -8,8 +8,13 @@ import sqlite3
 from collections.abc import Callable
 
 import click
-from copilot import CopilotClient
-from copilot.session import PermissionHandler
+
+try:
+    from copilot import CopilotClient
+    from copilot.session import PermissionHandler
+    _HAS_COPILOT_SDK = True
+except ImportError:
+    _HAS_COPILOT_SDK = False
 
 REQUIRED_SECTIONS = [
     "## Title",
@@ -286,6 +291,9 @@ async def _generate_jacket_async(
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry."""
+    if not _HAS_COPILOT_SDK:
+        raise RuntimeError("Copilot SDK not available. Use dry_run=true for prompt-only mode.")
+
     def _progress(msg: str) -> None:
         click.echo(f"  {msg}")
         if on_progress:
