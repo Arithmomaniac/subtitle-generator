@@ -67,6 +67,8 @@ Run `subtitle-gen <command> --help` for full options on any command.
 
 ### Web app
 
+**Live demo:** [subtitlegenst.z13.web.core.windows.net](https://subtitlegenst.z13.web.core.windows.net/)
+
 ```bash
 uv run subtitle-gen serve                       # start on localhost:8742
 ```
