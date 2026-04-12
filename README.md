@@ -8,15 +8,15 @@ Optionally generate a **full book jacket** with title, back cover copy, trade jo
 
 **Random subtitles:**
 ```
-Jefferson, Repression, and the category of Scripture in Lurianic Kabbala
-UFOs, rising powers, and the bicentennial history of performance
-celebrity culture, theology, and the collapse of New England
+Jefferson, Repression, and the Category of Scripture in Lurianic Kabbala
+UFOs, Rising Powers, and the Bicentennial History of Performance
+Celebrity Culture, Theology, and the Collapse of New England
 ```
 
 **Full book jacket** (with `--jacket`):
 
 > **Holy Nation**
-> *professionals, pagan authors, and the sacramental vision of the nation state*
+> *Professionals, Pagan Authors, and the Sacramental Vision of the Nation State*
 >
 > *Publishers Weekly* — "This compact, argument-driven study contends that modern political life cannot be understood apart from its spiritual assumptions..."
 >
@@ -29,7 +29,7 @@ celebrity culture, theology, and the collapse of New England
 3. **Pattern match** subtitles matching "X, Y, and the Z of W" using regex + spaCy NLP validation
 4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing
 5. **Generate** by randomly drawing one filler per slot — weighted by sqrt(corpus frequency). Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
-6. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with web-search-enriched concept, trade journal reviews, and endorsement blurbs from real people
+6. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with trade journal reviews and endorsement blurbs from real people
 
 ## Setup
 
@@ -53,6 +53,8 @@ uv run subtitle-gen build-slots                 # extract slot fillers
 
 ## Usage
 
+### CLI
+
 ```bash
 uv run subtitle-gen generate                    # 10 random subtitles
 uv run subtitle-gen generate --sources          # show source books
@@ -63,6 +65,37 @@ uv run subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
 
 Run `subtitle-gen <command> --help` for full options on any command.
 
+### Web app
+
+```bash
+uv run subtitle-gen serve                       # start on localhost:8742
+```
+
+The web app provides an interactive UI with:
+- Tone selection and settings panel
+- Color-coded slot display with remix sub-parts
+- Jacket generation with live progress streaming
+- Rendered markdown output with Copy Markdown / Copy HTML buttons
+- Dynamic model picker (queries available Copilot SDK models)
+
+The frontend is a thin Alpine.js client (`web/index.html`) calling the Python API — all generation logic stays server-side.
+
+### Deployment
+
+The web app supports two modes:
+
+| | Local | Deployed |
+|---|---|---|
+| **Frontend** | Served by `subtitle-gen serve` | GitHub Pages |
+| **Backend** | stdlib HTTP server or Azure Functions Core Tools | Azure Functions |
+| **Database** | Full 3 GB SQLite | Mini DB (~1-2 MB) via `subtitle-gen export-db` |
+| **Jacket** | Full LLM generation | Prompt-only (copy to your LLM) |
+| **Settings** | All (tone, model, etc.) | Tone only |
+
+```bash
+uv run subtitle-gen export-db                   # create mini DB for deployment
+```
+
 ### Tone tiers
 
 The jacket prompt auto-adapts based on the subtitle's accessibility score (derived from filler corpus frequency):
@@ -70,7 +103,7 @@ The jacket prompt auto-adapts based on the subtitle's accessibility score (deriv
 | Tier | Score | Voice | Examples |
 |------|-------|-------|----------|
 | **pop** | > 1.0 | Airport bookstore (Gladwell, Pollan, Bryson) | Race, Power, America |
-| **mainstream** | 0.5–1.0 | Indie bookstore (Solnit, Mishra, Sheldrake) | Tolkien, Brooklyn |
+| **mainstream** | 0.5-1.0 | Indie bookstore (Solnit, Mishra, Sheldrake) | Tolkien, Brooklyn |
 | **niche** | < 0.5 | University press crossover (Princeton, Yale) | Helmontian Chymistry |
 
 ### Remixing
@@ -92,8 +125,30 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 | `generate` | Random subtitle generation (+ optional jacket) |
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
+| `serve` | Start the web app locally |
+| `export-db` | Export mini SQLite for deployment |
 | `patterns` | Show discovered subtitle patterns by frequency |
 | `slots` | Show available slot fillers |
+
+## Architecture
+
+```
+src/subtitle_generator/
+  generate.py          # subtitle generation with remix + locked slots
+  jacket.py            # jacket prompt construction + LLM execution
+  slots.py             # slot extraction + decomposition
+  calibrate.py         # LLM-based remix parameter tuning
+  serve.py             # local HTTP server (stdlib)
+  export_db.py         # mini DB export for deployment
+  cli.py               # Click CLI entry point
+api/
+  function_app.py      # Azure Functions v2 (same Python modules)
+web/
+  index.html           # Alpine.js frontend (thin client)
+  js/services.js       # API layer (injectable fetch)
+  js/subtitle-vm.js    # Pure view-model functions
+  js/app.js            # Alpine x-data component
+```
 
 ## Tech stack
 
@@ -102,7 +157,9 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 - **spaCy** (`en_core_web_md`) — NLP (POS tagging, NER, word vectors)
 - **SQLite** — subtitle storage and slot filler tables
 - **click** — CLI framework
-- **GitHub Copilot SDK** — LLM + web search for jacket generation
+- **GitHub Copilot SDK** — LLM for jacket generation
+- **Alpine.js** — reactive frontend (CDN, no build step)
+- **marked.js** — markdown rendering (CDN)
 
 ## Data sources
 
