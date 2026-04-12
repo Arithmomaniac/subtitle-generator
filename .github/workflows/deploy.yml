@@ -63,11 +63,6 @@ jobs:
       - name: Copy src modules into function app
         run: cp -r src/subtitle_generator api/subtitle_generator
 
-      - name: Download spaCy model
-        run: |
-          pip install spacy --target api/.python_packages/lib/site-packages
-          python -m spacy download en_core_web_md --target api/.python_packages/lib/site-packages
-
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
