@@ -19,6 +19,7 @@ on:
       - 'web/**'
       - 'api/**'
       - 'src/**'
+      - '.github/workflows/deploy.yml'
   workflow_dispatch:
 
 permissions:
