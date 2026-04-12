@@ -3,6 +3,16 @@
  * Pure IO — no DOM, no framework. Injectable fetch for testability.
  */
 
+/** Track a custom event to App Insights (no-op if SDK not loaded). */
+export function trackEvent(name, props) {
+  try { if (typeof window !== "undefined" && window.appInsights) window.appInsights.trackEvent({ name, properties: props }); } catch(e) {}
+}
+
+/** Track a custom metric to App Insights. */
+export function trackMetric(name, value, props) {
+  try { if (typeof window !== "undefined" && window.appInsights) window.appInsights.trackMetric({ name, average: value }, props); } catch(e) {}
+}
+
 /**
  * Create an API client.
  * @param {string} baseUrl - API base URL (e.g., "" for same-origin, "http://localhost:8742")
@@ -26,18 +36,29 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
   return {
     /** Generate a subtitle. Returns API response or {error}. */
     async generate({ tone } = {}) {
-      return post("/api/generate", {
-        tone: tone || null,
-      });
+      const t0 = performance.now();
+      const result = await post("/api/generate", { tone: tone || null });
+      const durationMs = Math.round(performance.now() - t0);
+      trackMetric("GenerateDuration", durationMs, { tone: tone || "any", remixed: String(!!result.remixed) });
+      if (result.error) {
+        trackEvent("GenerateError", { error: result.error, durationMs: String(durationMs) });
+      } else {
+        trackEvent("GenerateSuccess", { durationMs: String(durationMs), remixed: String(result.remixed), tone: tone || "any" });
+      }
+      return result;
     },
 
     /** Build jacket prompt and optionally run LLM. Returns {prompt, tone_tier, result} or {error}. */
     async jacket({ subtitle, model, dryRun = true } = {}) {
-      return post("/api/jacket", {
+      const t0 = performance.now();
+      const result = await post("/api/jacket", {
         subtitle,
         model: model || "gpt-5.4-mini",
         dry_run: dryRun,
       });
+      const durationMs = Math.round(performance.now() - t0);
+      trackMetric("JacketDuration", durationMs, { dryRun: String(dryRun), model: model || "gpt-5.4-mini" });
+      return result;
     },
 
     /** Check server health. Returns {ok, mode} or {error}. */

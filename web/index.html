@@ -95,6 +95,25 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 @keyframes spin{to{transform:rotate(360deg)}}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #444;border-top-color:#e07a5f;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
 </style>
+<script src="https://js.monitor.azure.com/scripts/b/ai.3.gbl.min.js"></script>
+<script>
+(function() {
+  try {
+    fetch("./ai-config.json")
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(cfg) {
+        if (!cfg || !cfg.connectionString) return;
+        var ai = new Microsoft.ApplicationInsights.ApplicationInsights({
+          config: { connectionString: cfg.connectionString }
+        });
+        ai.loadAppInsights();
+        ai.trackPageView();
+        window.appInsights = ai;
+      })
+      .catch(function() {});
+  } catch(e) {}
+})();
+</script>
 <script type="module">
   import { createApp } from "./js/app.js";
   document.addEventListener("alpine:init", () => {

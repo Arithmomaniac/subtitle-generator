@@ -142,3 +142,13 @@ jobs:
             --overwrite \
             --content-type "application/json; charset=utf-8" \
             --auth-mode login
+
+          # Upload ai-config.json (App Insights client SDK)
+          az storage blob upload \
+            --account-name "$STORAGE_ACCOUNT" \
+            --container-name '$web' \
+            --file web/ai-config.json \
+            --name ai-config.json \
+            --overwrite \
+            --content-type "application/json; charset=utf-8" \
+            --auth-mode login
