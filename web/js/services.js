@@ -25,11 +25,9 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
 
   return {
     /** Generate a subtitle. Returns API response or {error}. */
-    async generate({ tone, remixProb, minSim } = {}) {
+    async generate({ tone } = {}) {
       return post("/api/generate", {
         tone: tone || null,
-        remix_prob: remixProb ?? null,
-        min_sim: minSim ?? null,
       });
     },
 

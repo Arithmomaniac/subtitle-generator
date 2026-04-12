@@ -119,21 +119,6 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
           <option value="pop,mainstream">Pop + Mainstream</option>
         </select>
       </div>
-      <div class="setting">
-        <label>Remix</label>
-        <div class="switch-row">
-          <div class="switch" :class="remix && 'on'" @click="remix = !remix; saveSettings()"><div class="knob"></div></div>
-          <span class="switch-label" x-text="remix ? 'Enabled' : 'Off'"></span>
-        </div>
-      </div>
-      <div class="setting" x-show="settingsVis.showRemixProb">
-        <label>Remix Prob</label>
-        <input type="number" x-model.number="remixProb" min="0" max="1" step="0.1">
-      </div>
-      <div class="setting" x-show="settingsVis.showMinSim">
-        <label>Min Similarity</label>
-        <input type="number" x-model.number="minSim" min="0" max="1" step="0.05">
-      </div>
       <div class="setting" x-show="settingsVis.showModel">
         <label>Model</label>
         <select x-model="model">

@@ -58,13 +58,11 @@ await test("generate sends correct body", async () => {
     return { ok: true, json: async () => ({ text: "A, B, and the C of D" }) };
   };
   const api = createApi("", mockF);
-  await api.generate({ tone: "pop", remixProb: 0.8, minSim: 0.1 });
+  await api.generate({ tone: "pop" });
   assert(capturedBody.tone === "pop", "tone sent");
-  assert(capturedBody.remix_prob === 0.8, "remix_prob sent");
-  assert(capturedBody.min_sim === 0.1, "min_sim sent");
 });
 
-await test("generate with no options sends nulls", async () => {
+await test("generate with no options sends null tone", async () => {
   let capturedBody;
   const mockF = async (url, opts) => {
     capturedBody = JSON.parse(opts.body);
@@ -73,8 +71,6 @@ await test("generate with no options sends nulls", async () => {
   const api = createApi("", mockF);
   await api.generate();
   assert(capturedBody.tone === null, "tone null");
-  assert(capturedBody.remix_prob === null, "remix_prob null");
-  assert(capturedBody.min_sim === null, "min_sim null");
 });
 
 await test("generate returns error on HTTP failure", async () => {

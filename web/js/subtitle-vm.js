@@ -100,8 +100,6 @@ export function deriveSourcesVM(sub) {
 export function buildSettingsVM(mode) {
   const isLocal = mode === "local";
   return {
-    showRemixProb: isLocal,
-    showMinSim: isLocal,
     showModel: isLocal,
     showDeepResearch: isLocal,
   };

@@ -33,9 +33,6 @@ export function createApp() {
 
     // Settings
     tone: "",
-    remix: true,
-    remixProb: 0.8,
-    minSim: 0.1,
     model: "gpt-5.4-mini",
     deepResearch: false,
     settingsOpen: true,
@@ -54,9 +51,6 @@ export function createApp() {
     async init() {
       const saved = loadSettings();
       if (saved.tone) this.tone = saved.tone;
-      if (saved.remix === false) this.remix = false;
-      if (saved.remixProb != null) this.remixProb = saved.remixProb;
-      if (saved.minSim != null) this.minSim = saved.minSim;
       if (saved.model) this.model = saved.model;
       if (saved.deepResearch) this.deepResearch = true;
 
@@ -69,9 +63,6 @@ export function createApp() {
     saveSettings() {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify({
         tone: this.tone,
-        remix: this.remix,
-        remixProb: this.remixProb,
-        minSim: this.minSim,
         model: this.model,
         deepResearch: this.deepResearch,
       }));
@@ -94,8 +85,6 @@ export function createApp() {
 
       const result = await api.generate({
         tone: this.tone || null,
-        remixProb: this.remix ? this.remixProb : 0,
-        minSim: this.minSim,
       });
 
       if (result.error) {
