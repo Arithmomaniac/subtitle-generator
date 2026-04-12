@@ -86,15 +86,26 @@ The web app supports two modes:
 
 | | Local | Deployed |
 |---|---|---|
-| **Frontend** | Served by `subtitle-gen serve` | GitHub Pages |
-| **Backend** | stdlib HTTP server or Azure Functions Core Tools | Azure Functions |
-| **Database** | Full 3 GB SQLite | Mini DB (~1-2 MB) via `subtitle-gen export-db` |
+| **Frontend** | Served by `subtitle-gen serve` | Azure Blob Storage static website |
+| **Backend** | stdlib HTTP server | Azure Functions (Flex Consumption) |
+| **Database** | Full 3 GB SQLite | Mini DB built from CSVs |
 | **Jacket** | Full LLM generation | Prompt-only (copy to your LLM) |
-| **Settings** | All (tone, model, etc.) | Tone only |
+| **Monitoring** | -- | App Insights + Log Analytics + email alerts |
+
+**Infrastructure as code** (Bicep): `infra/main.bicep` creates all Azure resources (storage, function app, monitoring, alerts).
+
+**Data pipeline**: slot data is exported as CSV files (tracked in Git), and the mini SQLite DB is built from them at deploy time:
 
 ```bash
-uv run subtitle-gen export-db                   # create mini DB for deployment
+uv run subtitle-gen export-data                 # dump CSVs (after rebuilding slots)
+uv run subtitle-gen build-db                    # build SQLite from CSVs (CI does this)
 ```
+
+**Deploy**:
+1. Configure OIDC: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as GitHub secrets
+2. Set `AZURE_FUNCTIONAPP_NAME` as a GitHub variable
+3. Run `deploy-infra.yml` workflow (creates Azure resources)
+4. Run `deploy.yml` workflow (deploys function app + frontend)
 
 ### Tone tiers
 
@@ -126,7 +137,9 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
 | `serve` | Start the web app locally |
-| `export-db` | Export mini SQLite for deployment |
+| `export-db` | Export mini SQLite directly from full DB |
+| `export-data` | Export slot data as CSV files (for Git) |
+| `build-db` | Build mini SQLite from CSV files (for CI) |
 | `patterns` | Show discovered subtitle patterns by frequency |
 | `slots` | Show available slot fillers |
 
