@@ -340,8 +340,13 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
         def send_event(event: str, data: str) -> None:
-            line = f"event: {event}\ndata: {data}\n\n"
-            self.wfile.write(line.encode("utf-8"))
+            # SSE spec: multi-line data needs each line prefixed with "data: "
+            lines = data.split("\n")
+            chunk = f"event: {event}\n"
+            for ln in lines:
+                chunk += f"data: {ln}\n"
+            chunk += "\n"
+            self.wfile.write(chunk.encode("utf-8"))
             self.wfile.flush()
 
         def on_progress(msg: str) -> None:

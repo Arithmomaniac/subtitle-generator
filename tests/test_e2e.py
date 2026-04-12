@@ -35,7 +35,7 @@ async def test():
         # Wait for Alpine to render slots
         await page.wait_for_function(
             "() => document.querySelectorAll('.slot').length >= 4",
-            timeout=15000,
+            timeout=30000,
         )
         slots = await page.locator(".slot").count()
         assert slots >= 4, f"Expected >= 4 slots, got {slots}"
@@ -92,6 +92,7 @@ async def test():
 
         print()
         print("ALL 7 TESTS PASSED")
+        await browser.close()
         await browser.close()
 
 

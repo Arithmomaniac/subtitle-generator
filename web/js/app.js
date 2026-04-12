@@ -167,24 +167,31 @@ export function createApp() {
           buffer += decoder.decode(value, { stream: true });
 
           // Parse SSE events from buffer
-          const lines = buffer.split("\n");
-          buffer = lines.pop(); // keep incomplete line
-          let eventType = null;
-          for (const line of lines) {
-            if (line.startsWith("event: ")) eventType = line.slice(7);
-            else if (line.startsWith("data: ") && eventType) {
-              const data = line.slice(6);
-              if (eventType === "progress") {
-                this.jacketProgress = data;
-              } else if (eventType === "result") {
+          // SSE spec: events are separated by blank lines, data can span multiple "data:" lines
+          const blocks = buffer.split("\n\n");
+          buffer = blocks.pop(); // keep incomplete block
+          for (const block of blocks) {
+            if (!block.trim()) continue;
+            let eventType = null;
+            const dataLines = [];
+            for (const line of block.split("\n")) {
+              if (line.startsWith("event: ")) eventType = line.slice(7);
+              else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+              else if (line.startsWith("data:")) dataLines.push(line.slice(5));
+            }
+            if (!eventType || dataLines.length === 0) continue;
+            const data = dataLines.join("\n");
+            if (eventType === "progress") {
+              this.jacketProgress = data;
+            } else if (eventType === "result") {
+              try {
                 const parsed = JSON.parse(data);
                 this.prompt = parsed.prompt;
                 this.toneTier = parsed.tone_tier;
                 this._setJacket(parsed.result);
-              } else if (eventType === "error") {
-                alert("Error: " + data);
-              }
-              eventType = null;
+              } catch { /* partial JSON, wait for more */ }
+            } else if (eventType === "error") {
+              alert("Error: " + data);
             }
           }
         }
