@@ -396,6 +396,13 @@ def generate_subtitle(
                     of_object, remix_parts, remix_similarity = result
                     remixed = True
 
+    # Title-case all components
+    items = [_title_case(x) for x in items]
+    action_noun = _title_case(action_noun)
+    of_object = _title_case(of_object)
+    if remix_parts:
+        remix_parts = {k: _title_case(v) for k, v in remix_parts.items()}
+
     text = f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}"
 
     return GeneratedSubtitle(
