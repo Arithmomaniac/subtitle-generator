@@ -1,9 +1,14 @@
 # Deploy subtitle-generator web app
-# Frontend -> GitHub Pages (web/ directory)
-# Backend  -> Azure Functions (api/ directory + src/)
+# Frontend -> Azure Blob Storage static website ($web)
+# Backend  -> Azure Functions (Flex Consumption)
 #
 # Triggers on push to master when web/, api/, or src/ files change.
 # Manual trigger also available.
+#
+# Prerequisites:
+#   - Azure infrastructure deployed via deploy-infra.yml
+#   - GitHub OIDC configured (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID)
+#   - GitHub var: AZURE_FUNCTIONAPP_NAME (e.g., subtitlegen-func)
 
 name: Deploy
 
@@ -17,75 +22,127 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
   id-token: write
+  contents: read
 
 concurrency:
   group: deploy
   cancel-in-progress: true
 
+env:
+  AZURE_FUNCTIONAPP_NAME: ${{ vars.AZURE_FUNCTIONAPP_NAME }}
+  PYTHON_VERSION: '3.13'
+
 jobs:
-  # ── Deploy frontend to GitHub Pages ──
-  pages:
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set API base URL
-        run: |
-          sed -i 's|<meta name="api-base" content="">|<meta name="api-base" content="${{ vars.AZURE_FUNCTION_APP_URL }}">|' web/index.html
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v5
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: web
-
-      - name: Deploy to GitHub Pages
-        id: deploy
-        uses: actions/deploy-pages@v4
-
   # ── Deploy backend to Azure Functions ──
-  functions:
+  deploy-function:
     runs-on: ubuntu-latest
-    environment: azure
+    environment: production
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Install dependencies
+      - name: Install project dependencies
         run: uv sync
 
-      - name: Export mini database
-        run: |
-          uv run subtitle-gen export-db -o api/data/subtitles.mini.db
-        env:
-          DB_PATH: data/db/subtitles.db
+      - name: Build mini database from CSVs
+        run: uv run subtitle-gen build-db -d api/data -o api/data/subtitles.mini.db
 
       - name: Install function app dependencies
         run: |
-          cd api
-          pip install -r requirements.txt --target .python_packages/lib/site-packages
+          pip install -r api/requirements.txt --target api/.python_packages/lib/site-packages
 
       - name: Copy src modules into function app
         run: cp -r src/subtitle_generator api/subtitle_generator
 
+      - name: Download spaCy model
+        run: |
+          pip install spacy --target api/.python_packages/lib/site-packages
+          python -m spacy download en_core_web_md --target api/.python_packages/lib/site-packages
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Deploy to Azure Functions
         uses: Azure/functions-action@v1
         with:
-          app-name: ${{ vars.AZURE_FUNCTION_APP_NAME }}
+          app-name: ${{ env.AZURE_FUNCTIONAPP_NAME }}
           package: api
-          publish-profile: ${{ secrets.AZURE_FUNCTIONAPP_PUBLISH_PROFILE }}
+
+      - name: Smoke test
+        run: |
+          FUNC_URL="https://${AZURE_FUNCTIONAPP_NAME}.azurewebsites.net"
+          echo "Testing health..."
+          curl -sf "${FUNC_URL}/api/health" | python -c "import sys,json; d=json.load(sys.stdin); assert d['ok'], 'Health check failed'; print('Health OK:', d)"
+          echo "Testing generate..."
+          curl -sf -X POST "${FUNC_URL}/api/generate" -H "Content-Type: application/json" -d '{}' | python -c "import sys,json; d=json.load(sys.stdin); assert d.get('text'), 'Generate failed'; print('Generate OK:', d['text'])"
+
+  # ── Deploy frontend to Azure Blob Storage static website ──
+  deploy-web:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set API base URL in index.html
+        run: |
+          FUNC_URL="https://${AZURE_FUNCTIONAPP_NAME}.azurewebsites.net"
+          sed -i "s|<meta name=\"api-base\" content=\"\">|<meta name=\"api-base\" content=\"${FUNC_URL}\">|" web/index.html
+
+      - name: Stamp version with git SHA
+        run: echo '{"version":"${{ github.sha }}"}' > web/version.json
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy web to blob storage
+        run: |
+          STORAGE_ACCOUNT="${AZURE_FUNCTIONAPP_NAME/-func/}st"
+          STORAGE_ACCOUNT="${STORAGE_ACCOUNT//-/}"
+
+          # Upload HTML files
+          az storage blob upload-batch \
+            --account-name "$STORAGE_ACCOUNT" \
+            --destination '$web' \
+            --source web/ \
+            --overwrite \
+            --content-type "text/html; charset=utf-8" \
+            --pattern "*.html" \
+            --auth-mode login
+
+          # Upload JS files
+          az storage blob upload-batch \
+            --account-name "$STORAGE_ACCOUNT" \
+            --destination '$web' \
+            --source web/ \
+            --overwrite \
+            --content-type "application/javascript; charset=utf-8" \
+            --pattern "*.js" \
+            --auth-mode login
+
+          # Upload version.json
+          az storage blob upload \
+            --account-name "$STORAGE_ACCOUNT" \
+            --container-name '$web' \
+            --file web/version.json \
+            --name version.json \
+            --overwrite \
+            --content-type "application/json; charset=utf-8" \
+            --auth-mode login
