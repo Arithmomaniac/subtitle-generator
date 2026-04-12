@@ -134,8 +134,10 @@ async def test():
         # 10. Generate until remix (sub-parts visible)
         print("TEST 10: Generate until remix")
         got_remix = False
+        # Use a more specific locator to avoid matching hidden "Generate Jacket"
+        generate_btn = page.locator("button.btn-primary:has-text('Generate')")
         for attempt in range(30):
-            await gen_btn.click()
+            await generate_btn.click()
             await page.wait_for_function(
                 "() => document.querySelectorAll('.slot').length >= 4",
                 timeout=60000,
