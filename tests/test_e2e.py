@@ -18,23 +18,25 @@ async def test():
 
         # 2. Check mode badge appears
         print("TEST 2: Mode detection")
-        badge = page.locator("#modeBadge")
-        # Wait for mode detection to complete (async fetch)
+        # Wait for Alpine to detect mode (async health check)
         await page.wait_for_function(
-            "() => !document.getElementById('modeBadge').textContent.includes('detecting')",
+            "() => document.querySelector('.mode-badge')?.textContent?.includes('Mode')",
             timeout=10000,
         )
-        badge_text = await badge.text_content()
+        badge_text = await page.locator(".mode-badge").text_content()
         print(f"  Badge text: {badge_text}")
         assert "Local" in badge_text, f"Expected Local mode, got: {badge_text}"
         print("  PASS: local mode detected")
 
         # 3. Click Generate
         print("TEST 3: Generate subtitle")
-        gen_btn = page.locator("#generateBtn")
+        gen_btn = page.locator("button:has-text('Generate')").first
         await gen_btn.click()
-        slot = page.locator(".slot").first
-        await slot.wait_for(timeout=15000)
+        # Wait for Alpine to render slots
+        await page.wait_for_function(
+            "() => document.querySelectorAll('.slot').length >= 4",
+            timeout=15000,
+        )
         slots = await page.locator(".slot").count()
         assert slots >= 4, f"Expected >= 4 slots, got {slots}"
 
@@ -47,34 +49,40 @@ async def test():
 
         # 4. Check sources appear
         print("TEST 4: Sources panel")
-        sources = page.locator("#sources")
-        is_visible = await sources.is_visible()
-        assert is_visible, "Sources panel not visible"
+        # Wait for Alpine to render sources (x-show transition)
+        await page.wait_for_function(
+            "() => document.querySelectorAll('.source-line').length >= 4",
+            timeout=10000,
+        )
         source_lines = await page.locator(".source-line").count()
         assert source_lines >= 4, f"Expected >= 4 source lines, got {source_lines}"
         print(f"  PASS: {source_lines} source lines shown")
 
         # 5. Build Prompt (jacket dry_run)
         print("TEST 5: Build Prompt")
-        prompt_btn = page.locator("#promptBtn")
+        prompt_btn = page.locator("button:has-text('Build Prompt')")
         await prompt_btn.click()
-        prompt_section = page.locator("#promptSection")
-        await prompt_section.wait_for(state="visible", timeout=10000)
-        prompt_text = await page.locator("#promptText").text_content()
+        prompt_section = page.locator(".prompt-section")
+        await page.wait_for_function(
+            "() => document.querySelector('.prompt-text')?.textContent?.length > 100",
+            timeout=10000,
+        )
+        prompt_text = await page.locator(".prompt-text").text_content()
         assert len(prompt_text) > 100, f"Prompt too short: {len(prompt_text)} chars"
         print(f"  PASS: prompt built ({len(prompt_text)} chars)")
 
         # 6. Copy button exists
         print("TEST 6: Copy button exists")
-        copy_btn = page.locator("button:has-text('Copy')")
-        assert await copy_btn.first.is_visible(), "No Copy button"
+        copy_btn = page.locator("button:has-text('Copy')").first
+        assert await copy_btn.is_visible(), "No Copy button"
         print("  PASS: Copy button present")
 
         # 7. Settings visibility in local mode
         print("TEST 7: Settings")
-        tone_select = page.locator("#tone")
+        tone_select = page.locator("select").first
         await tone_select.select_option("pop")
-        remix_prob = page.locator("#remixProb")
+        # In local mode, remix prob input should be visible
+        remix_prob = page.locator("input[type='number']").first
         is_visible = await remix_prob.is_visible()
         assert is_visible, "remixProb should be visible in local mode"
         print("  PASS: settings interactive, local-only visible")
