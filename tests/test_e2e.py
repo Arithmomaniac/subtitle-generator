@@ -81,11 +81,14 @@ async def test():
         print("TEST 7: Settings")
         tone_select = page.locator("select").first
         await tone_select.select_option("pop")
-        # In local mode, remix prob input should be visible
-        remix_prob = page.locator("input[type='number']").first
-        is_visible = await remix_prob.is_visible()
-        assert is_visible, "remixProb should be visible in local mode"
-        print("  PASS: settings interactive, local-only visible")
+        # In local mode, model picker should be visible (after models load)
+        await page.wait_for_function(
+            "() => document.querySelectorAll('select').length >= 2",
+            timeout=10000,
+        )
+        model_selects = await page.locator("select").count()
+        assert model_selects >= 2, f"Expected >= 2 selects (tone + model), got {model_selects}"
+        print("  PASS: settings interactive, model picker visible")
 
         print()
         print("ALL 7 TESTS PASSED")
