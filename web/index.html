@@ -155,11 +155,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
     <button class="btn btn-secondary" x-ref="copyBtn" @click="copySubtitle()" :disabled="!hasSubtitle">Copy</button>
     <button class="btn btn-jacket" x-show="mode === 'local' && availableModels.length > 0" @click="generateJacket()" :disabled="!hasSubtitle || jacketLoading">
       <span x-show="jacketLoading" class="spinner"></span>
-      <span x-text="jacketLoading ? 'Generating...' : 'Generate Jacket'"></span>
+      <span x-text="jacketLoading ? (jacketProgress || 'Generating...') : 'Generate Jacket'"></span>
     </button>
     <button class="btn btn-jacket" @click="buildPrompt()" :disabled="!hasSubtitle || jacketLoading">
       <span x-show="jacketLoading" class="spinner"></span>
-      <span x-text="jacketLoading ? 'Building...' : 'Build Prompt'"></span>
+      <span x-text="jacketLoading ? (jacketProgress || 'Building...') : 'Build Prompt'"></span>
     </button>
   </div>
 

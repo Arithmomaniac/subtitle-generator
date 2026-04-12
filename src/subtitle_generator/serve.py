@@ -311,13 +311,62 @@ class _Handler(BaseHTTPRequestHandler):
                 status, resp = 500, {"error": f"Internal error: {exc}"}
             self._send_json(resp, status)
         elif path == "/api/jacket":
-            try:
-                status, resp = _handle_jacket(body)
-            except Exception as exc:
-                status, resp = 500, {"error": f"Internal error: {exc}"}
-            self._send_json(resp, status)
+            dry_run = bool(body.get("dry_run", True))
+            if not dry_run:
+                self._handle_jacket_stream(body)
+            else:
+                try:
+                    status, resp = _handle_jacket(body)
+                except Exception as exc:
+                    status, resp = 500, {"error": f"Internal error: {exc}"}
+                self._send_json(resp, status)
         else:
             self._send_json({"error": "Not found"}, 404)
+
+    def _handle_jacket_stream(self, body: dict) -> None:
+        """Stream jacket generation progress as SSE, then send final result."""
+        subtitle = body.get("subtitle")
+        if not subtitle or not isinstance(subtitle, str):
+            self._send_json({"error": "subtitle is required"}, 400)
+            return
+
+        model = body.get("model", "gpt-5.4-mini")
+
+        # Start SSE response
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self._cors_headers()
+        self.end_headers()
+
+        def send_event(event: str, data: str) -> None:
+            line = f"event: {event}\ndata: {data}\n\n"
+            self.wfile.write(line.encode("utf-8"))
+            self.wfile.flush()
+
+        def on_progress(msg: str) -> None:
+            send_event("progress", msg)
+
+        conn = _get_db()
+        try:
+            system_prompt, user_prompt, tone_tier = build_jacket_prompt(subtitle, conn=conn)
+            prompt_text = f"{system_prompt}\n\n---\n\n{user_prompt}"
+
+            result_text = generate_jacket(
+                subtitle, model=model, conn=conn,
+                on_progress=on_progress,
+            )
+
+            final = json.dumps({
+                "prompt": prompt_text,
+                "tone_tier": tone_tier,
+                "result": result_text,
+            }, ensure_ascii=False)
+            send_event("result", final)
+        except Exception as exc:
+            send_event("error", str(exc))
+        finally:
+            conn.close()
 
     # -- static files -----------------------------------------------------
 

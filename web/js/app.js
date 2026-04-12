@@ -30,6 +30,7 @@ export function createApp() {
     settingsVis: {},
     loading: false,
     jacketLoading: false,
+    jacketProgress: "",
 
     // Settings
     tone: "",
@@ -120,21 +121,75 @@ export function createApp() {
     async _doJacket(dryRun) {
       if (!this.hasSubtitle) { alert("Generate a subtitle first."); return; }
       this.jacketLoading = true;
+      this.jacketProgress = "";
 
-      const result = await api.jacket({
-        subtitle: this.subtitle.fullText,
-        model: this.model,
-        dryRun,
-      });
+      if (dryRun) {
+        // Simple JSON request for prompt-only
+        const result = await api.jacket({
+          subtitle: this.subtitle.fullText,
+          model: this.model,
+          dryRun: true,
+        });
+        if (result.error) {
+          alert("Error: " + result.error);
+        } else {
+          this.prompt = result.prompt;
+          this.toneTier = result.tone_tier;
+          this.jacket = result.result;
+        }
+        this.jacketLoading = false;
+        return;
+      }
 
-      if (result.error) {
-        alert("Error: " + result.error);
-      } else {
-        this.prompt = result.prompt;
-        this.toneTier = result.tone_tier;
-        this.jacket = result.result;
+      // SSE streaming for full jacket generation
+      try {
+        const body = JSON.stringify({
+          subtitle: this.subtitle.fullText,
+          model: this.model,
+          dry_run: false,
+        });
+        const response = await fetch("/api/jacket", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+        });
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          // Parse SSE events from buffer
+          const lines = buffer.split("\n");
+          buffer = lines.pop(); // keep incomplete line
+          let eventType = null;
+          for (const line of lines) {
+            if (line.startsWith("event: ")) eventType = line.slice(7);
+            else if (line.startsWith("data: ") && eventType) {
+              const data = line.slice(6);
+              if (eventType === "progress") {
+                this.jacketProgress = data;
+              } else if (eventType === "result") {
+                const parsed = JSON.parse(data);
+                this.prompt = parsed.prompt;
+                this.toneTier = parsed.tone_tier;
+                this.jacket = parsed.result;
+              } else if (eventType === "error") {
+                alert("Error: " + data);
+              }
+              eventType = null;
+            }
+          }
+        }
+      } catch (e) {
+        alert("Failed: " + e.message);
       }
       this.jacketLoading = false;
+      this.jacketProgress = "";
     },
 
     // ── Clipboard ──

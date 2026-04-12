@@ -5,6 +5,7 @@ import math
 import random
 import re
 import sqlite3
+from collections.abc import Callable
 
 import click
 from copilot import CopilotClient
@@ -282,21 +283,26 @@ async def _generate_jacket_async(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None, allowed_tiers: set[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry."""
+    def _progress(msg: str) -> None:
+        click.echo(f"  {msg}")
+        if on_progress:
+            on_progress(msg)
+
     system_prompt, user_prompt, tone_tier = build_jacket_prompt(
         subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
     )
 
     if tone_override:
-        click.echo(f"  Tone: override")
+        _progress(f"Tone: override")
     else:
         _, score = compute_accessibility(subtitle, conn)
         natural = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
-        if tone_tier != natural:
-            click.echo(f"  Tone: {tone_tier} (natural: {natural}, score: {score:.2f})")
-        else:
-            click.echo(f"  Tone: {tone_tier} (score: {score:.2f})")
+        _progress(f"Tone: {tone_tier} (score: {score:.2f})")
+
+    _progress(f"Connecting to {model}...")
 
     async with CopilotClient() as client:
         async with await client.create_session(
@@ -305,29 +311,31 @@ async def _generate_jacket_async(
             infinite_sessions={"enabled": False},
         ) as session:
             prompt = system_prompt + "\n\n---\n\n" + user_prompt
+            _progress("Generating jacket...")
 
-            for attempt in range(1, MAX_RETRIES + 2):  # 1 initial + MAX_RETRIES retries
+            for attempt in range(1, MAX_RETRIES + 2):
                 result = await session.send_and_wait(prompt, timeout=timeout)
                 content = (result.data.content or "") if result and result.data else ""
 
                 if not content:
-                    click.echo(f"  Attempt {attempt}: empty response, retrying...")
+                    _progress(f"Attempt {attempt}: empty response, retrying...")
                     continue
 
                 missing = _validate_jacket(content)
                 if not missing:
+                    _progress("Complete")
                     return content
 
                 if attempt <= MAX_RETRIES:
                     missing_names = ", ".join(missing)
-                    click.echo(f"  Attempt {attempt}: missing sections: {missing_names} -- retrying...")
+                    _progress(f"Attempt {attempt}: missing {missing_names}, retrying...")
                     prompt = (
                         f"Your previous response was missing these required sections: {missing_names}.\n"
                         f"Please regenerate the COMPLETE book jacket with ALL sections. "
                         f"The subtitle is:\n\n{subtitle}"
                     )
                 else:
-                    click.echo(f"  Returning best effort after {attempt} attempts (missing: {', '.join(missing)})")
+                    _progress(f"Best effort after {attempt} attempts")
                     return content
 
             return "(No valid response after retries)"
@@ -345,11 +353,13 @@ def generate_jacket(
     show_concept: bool = False,
     conn: sqlite3.Connection | None = None, tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
     content = asyncio.run(_generate_jacket_async(
         subtitle, model=model, timeout=timeout,
         conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+        on_progress=on_progress,
     ))
     if not show_concept:
         content = _strip_internal_concept(content)
