@@ -6,6 +6,7 @@
 <title>Subtitle Generator</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+[x-cloak]{display:none!important}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
 .app{max-width:860px;margin:0 auto;padding:20px}
 
@@ -93,7 +94,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
 </head>
 <body>
-<div class="app" x-data="subtitleApp" x-init="init()">
+<div class="app" x-cloak x-data="subtitleApp" x-init="init()">
 
   <!-- Header -->
   <div class="header">
@@ -119,13 +120,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
           <option value="pop,mainstream">Pop + Mainstream</option>
         </select>
       </div>
-      <div class="setting" x-show="settingsVis.showModel">
+      <div class="setting" x-show="settingsVis.showModel && availableModels.length > 0">
         <label>Model</label>
         <select x-model="model">
-          <option value="gpt-5.4-mini">gpt-5.4-mini</option>
-          <option value="gpt-4.1">gpt-4.1</option>
-          <option value="claude-haiku-4.5">claude-haiku-4.5</option>
-          <option value="gpt-5-mini">gpt-5-mini</option>
+          <template x-for="m in availableModels" :key="m.id">
+            <option :value="m.id" x-text="m.name + (m.cost !== 1.0 ? ' (' + m.cost + 'x)' : '')"></option>
+          </template>
         </select>
       </div>
       <div class="setting" x-show="settingsVis.showDeepResearch">

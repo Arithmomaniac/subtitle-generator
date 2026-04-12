@@ -36,6 +36,7 @@ export function createApp() {
     model: "gpt-5.4-mini",
     deepResearch: false,
     settingsOpen: true,
+    availableModels: [],
 
     // Subtitle display
     subtitle: { slots: [], fullText: "", remixed: false, similarity: null },
@@ -57,6 +58,18 @@ export function createApp() {
       const h = await api.health();
       this.mode = h.error ? "azure" : (h.mode || "local");
       this.settingsVis = buildSettingsVM(this.mode);
+
+      // Fetch available models in local mode
+      if (this.mode === "local") {
+        const m = await api.models();
+        if (m.models && m.models.length > 0) {
+          this.availableModels = m.models;
+          // If saved model not in list, fall back to first
+          if (!m.models.some(x => x.id === this.model)) {
+            this.model = m.models[0].id;
+          }
+        }
+      }
     },
 
     // ── Settings persistence ──

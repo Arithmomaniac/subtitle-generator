@@ -51,5 +51,16 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
         return { error: "unreachable" };
       }
     },
+
+    /** List available LLM models (local mode only). Returns {models: [{id, name, cost}]} or {error}. */
+    async models() {
+      try {
+        const r = await fetchFn(baseUrl + "/api/models");
+        if (!r.ok) return { error: r.statusText };
+        return r.json();
+      } catch {
+        return { error: "unreachable" };
+      }
+    },
   };
 }

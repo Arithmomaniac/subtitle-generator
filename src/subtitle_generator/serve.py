@@ -4,6 +4,7 @@ Uses only Python stdlib (http.server + ThreadingHTTPServer).  Importable
 without starting the server — call ``create_server()`` or ``run()``.
 """
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -191,6 +192,39 @@ def _handle_jacket(body: dict) -> tuple[int, dict]:
         conn.close()
 
 
+# -- /api/models (local only) ------------------------------------------------
+
+_models_cache: list[dict] | None = None
+
+
+def _handle_models() -> tuple[int, dict]:
+    """List available Copilot SDK models with pretty names and cost info."""
+    global _models_cache
+    if _models_cache is not None:
+        return 200, {"models": _models_cache}
+
+    try:
+        from copilot import CopilotClient
+
+        async def _fetch():
+            async with CopilotClient() as client:
+                return await client.list_models()
+
+        raw = asyncio.run(_fetch())
+        _models_cache = [
+            {
+                "id": m.id,
+                "name": m.name,
+                "cost": m.billing.multiplier if m.billing else 1.0,
+            }
+            for m in raw
+            if m.policy and m.policy.state == "enabled"
+        ]
+        return 200, {"models": _models_cache}
+    except Exception as exc:
+        return 500, {"error": f"Failed to list models: {exc}"}
+
+
 # ---------------------------------------------------------------------------
 # Request handler
 # ---------------------------------------------------------------------------
@@ -253,6 +287,10 @@ class _Handler(BaseHTTPRequestHandler):
         # API routes
         if path == "/api/health":
             status, body = _handle_health()
+            self._send_json(body, status)
+            return
+        if path == "/api/models":
+            status, body = _handle_models()
             self._send_json(body, status)
             return
 
