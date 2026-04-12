@@ -4,7 +4,7 @@
  */
 
 import { createApi } from "./services.js";
-import { deriveSubtitleVM, deriveSourcesVM, buildSettingsVM } from "./subtitle-vm.js";
+import { deriveSubtitleVM, deriveSourcesVM, buildSettingsVM, cleanJacketMarkdown } from "./subtitle-vm.js";
 
 const SETTINGS_KEY = "subtitle-gen-settings";
 
@@ -45,6 +45,8 @@ export function createApp() {
 
     // Jacket/prompt
     jacket: null,
+    jacketHtml: "",
+    jacketMd: "",
     prompt: null,
     toneTier: null,
 
@@ -91,7 +93,7 @@ export function createApp() {
     // ── Generate ──
     async generate() {
       this.loading = true;
-      this.jacket = null;
+      this._setJacket(null);
       this.prompt = null;
 
       const result = await api.generate({
@@ -135,7 +137,7 @@ export function createApp() {
         } else {
           this.prompt = result.prompt;
           this.toneTier = result.tone_tier;
-          this.jacket = result.result;
+          this._setJacket(result.result);
         }
         this.jacketLoading = false;
         return;
@@ -177,7 +179,7 @@ export function createApp() {
                 const parsed = JSON.parse(data);
                 this.prompt = parsed.prompt;
                 this.toneTier = parsed.tone_tier;
-                this.jacket = parsed.result;
+                this._setJacket(parsed.result);
               } else if (eventType === "error") {
                 alert("Error: " + data);
               }
@@ -203,6 +205,42 @@ export function createApp() {
       if (!this.prompt) return;
       await navigator.clipboard.writeText(this.prompt);
       this._flashCopy("copyPromptBtn", "Copied!");
+    },
+
+    async copyJacketMd() {
+      if (!this.jacketMd) return;
+      await navigator.clipboard.writeText(this.jacketMd);
+      this._flashCopy("copyMdBtn", "Copied!");
+    },
+
+    async copyJacketHtml() {
+      if (!this.jacketHtml) return;
+      // Copy as rich text (HTML) to clipboard
+      try {
+        const blob = new Blob([this.jacketHtml], { type: "text/html" });
+        await navigator.clipboard.write([new ClipboardItem({ "text/html": blob })]);
+      } catch {
+        await navigator.clipboard.writeText(this.jacketHtml);
+      }
+      this._flashCopy("copyHtmlBtn", "Copied!");
+    },
+
+    // ── Helpers ──
+    _setJacket(raw) {
+      if (!raw) {
+        this.jacket = null;
+        this.jacketMd = "";
+        this.jacketHtml = "";
+        return;
+      }
+      this.jacketMd = cleanJacketMarkdown(raw);
+      this.jacket = raw;
+      // Render markdown to HTML via marked.js (loaded from CDN)
+      if (typeof marked !== "undefined" && marked.parse) {
+        this.jacketHtml = marked.parse(this.jacketMd);
+      } else {
+        this.jacketHtml = this.jacketMd;
+      }
     },
 
     _flashCopy(refName, text) {

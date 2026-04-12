@@ -67,7 +67,14 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 
 /* Jacket */
 .jacket-section{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:16px 20px;margin-bottom:18px}
-.jacket-body{font-size:12px;color:#bbb;line-height:1.6;white-space:pre-wrap}
+.jacket-actions{display:flex;gap:6px;margin-bottom:12px}
+.btn-sm{padding:4px 12px;font-size:11px}
+.jacket-body{font-size:13px;color:#ccc;line-height:1.7}
+.jacket-body h2{font-size:16px;color:#f4f1de;margin:16px 0 6px;padding-top:10px;border-top:1px solid #2a2a4a}
+.jacket-body h2:first-child{margin-top:0;padding-top:0;border-top:none}
+.jacket-body p{margin-bottom:10px}
+.jacket-body blockquote{border-left:3px solid #e07a5f;padding-left:12px;margin:8px 0;color:#bbb;font-style:italic}
+.jacket-body strong{color:#f0f0f0}
 
 /* Prompt */
 .prompt-section{background:#1a2a1a;border:1px solid #2d6a4f;border-radius:10px;padding:14px 18px;margin-bottom:18px}
@@ -93,6 +100,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
     Alpine.data("subtitleApp", createApp);
   });
 </script>
+<script defer src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
 </head>
 <body>
@@ -187,7 +195,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 
   <!-- Jacket Output -->
   <div class="jacket-section" x-show="jacket">
-    <div class="jacket-body" x-text="jacket"></div>
+    <div class="jacket-actions">
+      <button class="btn btn-secondary btn-sm" x-ref="copyMdBtn" @click="copyJacketMd()">Copy Markdown</button>
+      <button class="btn btn-secondary btn-sm" x-ref="copyHtmlBtn" @click="copyJacketHtml()">Copy HTML</button>
+    </div>
+    <div class="jacket-body" x-html="jacketHtml"></div>
   </div>
 
   <!-- Prompt Copy -->

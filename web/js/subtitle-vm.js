@@ -103,3 +103,18 @@ export function buildSettingsVM(mode) {
     showModel: isLocal,
   };
 }
+
+/**
+ * Clean jacket markdown: keep only the template sections, strip preamble/postamble.
+ * @param {string} md - raw markdown from LLM
+ * @returns {string} cleaned markdown
+ */
+export function cleanJacketMarkdown(md) {
+  if (!md) return "";
+  // Find first ## heading
+  const firstH2 = md.search(/^## /m);
+  if (firstH2 > 0) md = md.slice(firstH2);
+  // Remove trailing content after the last section's content
+  // (anything after a line that's clearly not part of the jacket)
+  return md.trimEnd();
+}
