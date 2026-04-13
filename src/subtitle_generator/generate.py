@@ -91,7 +91,7 @@ TONE_TARGETS = {
 _remix_ctx: dict | None = None
 
 # Sentinel for embedding precompute version checks
-_EMBEDDING_VERSION = "1"
+_EMBEDDING_VERSION = "2"
 
 # Slot types that need pre-computed vectors for remix composition
 _REMIX_VECTOR_SLOT_TYPES = frozenset({
@@ -105,13 +105,12 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
     This runs spaCy en_core_web_md to:
     1. Classify each of_object strict filler for remix type (type1/type2)
     2. Compute vector_sum + token_count for remix-relevant fillers
-    3. Compute and store the of_object centroid vector
+    3. Compute centroid and derive scalar decomposition for runtime
+       (centroid_dot, norm_sq per filler; centroid_norm, avg_cross_sim constants)
 
-    After this, runtime code needs only numpy for cosine similarity.
+    After this, runtime code needs no numpy or vector math — only scalar arithmetic.
     Returns stats dict.
     """
-    import base64
-
     import numpy as np
     import spacy
 
@@ -120,12 +119,14 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
 
     stats: dict[str, int] = {"classified": 0, "vectorized": 0, "skipped_oov": 0}
 
-    # 1. Classify of_object strict fillers
+    # 1. Classify of_object strict fillers and compute vectors
     of_obj_rows = conn.execute(
         "SELECT id, filler FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
     ).fetchall()
     click.echo(f"Classifying {len(of_obj_rows)} of_object fillers...")
     centroid_vectors = []
+    # Store (filler_id, vec_sum, tc) for later scalar computation
+    obj_vectors: list[tuple[int, object, int]] = []
     for filler_id, filler in of_obj_rows:
         doc = nlp(filler)
         classification = _classify_for_remix(filler, doc)
@@ -147,6 +148,7 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
             vec_sum = np.sum(token_vecs, axis=0).astype(np.float32)
             tc = len(token_vecs)
             centroid_vectors.append(vec_sum / tc)  # mean for centroid
+            obj_vectors.append((filler_id, vec_sum, tc))
             conn.execute(
                 "UPDATE slot_fillers SET remix_type = ?, remix_prep = ?, remix_word_count = ?, "
                 "vector_sum = ?, token_count = ? WHERE id = ?",
@@ -162,10 +164,15 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
 
     # 2. Compute vectors for remix sub-part fillers
     sub_rows = conn.execute(
-        "SELECT id, filler FROM slot_fillers WHERE slot_type IN ('of_modifier', 'of_head', 'of_topic', 'of_complement') AND mode = 'strict'"
+        "SELECT id, slot_type, filler FROM slot_fillers "
+        "WHERE slot_type IN ('of_modifier', 'of_head', 'of_topic', 'of_complement') AND mode = 'strict'"
     ).fetchall()
     click.echo(f"Computing vectors for {len(sub_rows)} remix sub-part fillers...")
-    for filler_id, filler in sub_rows:
+    # Collect vectors by slot_type for cross-sim computation
+    sub_vectors: dict[str, list[tuple[int, object, int]]] = {
+        "of_modifier": [], "of_head": [], "of_topic": [], "of_complement": [],
+    }
+    for filler_id, slot_type, filler in sub_rows:
         doc = nlp(filler)
         tokens = [t for t in doc if not t.is_space]
         token_vecs = [t.vector for t in tokens if t.has_vector and np.linalg.norm(t.vector) > 0]
@@ -176,17 +183,73 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
                 "UPDATE slot_fillers SET vector_sum = ?, token_count = ? WHERE id = ?",
                 (vec_sum.tobytes(), tc, filler_id),
             )
+            sub_vectors[slot_type].append((filler_id, vec_sum, tc))
             stats["vectorized"] += 1
         else:
             stats["skipped_oov"] += 1
 
-    # 3. Compute and store centroid
+    # 3. Compute centroid and scalar decomposition
     if centroid_vectors:
+        import random as _rng
+
         centroid = np.mean(centroid_vectors, axis=0).astype(np.float32)
+        centroid_norm = float(np.linalg.norm(centroid))
+
+        # Compute centroid_dot and norm_sq for all fillers with vectors
+        all_vec_entries = obj_vectors[:]
+        for entries in sub_vectors.values():
+            all_vec_entries.extend(entries)
+
+        for filler_id, vec_sum, tc in all_vec_entries:
+            cd = float(np.dot(vec_sum, centroid))
+            ns = float(np.dot(vec_sum, vec_sum))
+            conn.execute(
+                "UPDATE slot_fillers SET centroid_dot = ?, norm_sq = ? WHERE id = ?",
+                (cd, ns, filler_id),
+            )
+
+        # Compute type-specific average cross-similarity constants
+        def _sample_cross_sim(pool_a, pool_b, n_samples=3000):
+            if not pool_a or not pool_b:
+                return 0.0
+            dots = []
+            for _ in range(min(n_samples, len(pool_a) * len(pool_b))):
+                _, va, _ = _rng.choice(pool_a)
+                _, vb, _ = _rng.choice(pool_b)
+                na = float(np.linalg.norm(va))
+                nb = float(np.linalg.norm(vb))
+                if na > 0 and nb > 0:
+                    dots.append(float(np.dot(va, vb)) / (na * nb))
+            return float(np.mean(dots)) if dots else 0.0
+
+        _rng.seed(42)
+        avg_cross_t1 = _sample_cross_sim(sub_vectors["of_modifier"], sub_vectors["of_head"])
+        avg_cross_t2 = _sample_cross_sim(sub_vectors["of_topic"], sub_vectors["of_complement"])
+
+        # Store scalar constants in config
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('centroid_norm', ?)",
+            (str(centroid_norm),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('avg_cross_sim_t1', ?)",
+            (str(avg_cross_t1),),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES ('avg_cross_sim_t2', ?)",
+            (str(avg_cross_t2),),
+        )
+        # Keep centroid BLOB for dev fallback path
+        import base64
         centroid_b64 = base64.b64encode(centroid.tobytes()).decode("ascii")
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES ('embedding_centroid', ?)",
             (centroid_b64,),
+        )
+
+        click.echo(
+            f"Scalar decomposition: centroid_norm={centroid_norm:.4f}, "
+            f"avg_cross_sim_t1={avg_cross_t1:.4f}, avg_cross_sim_t2={avg_cross_t2:.4f}"
         )
 
     # Store version marker
@@ -209,36 +272,47 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
 
 
 def _load_remix_context(conn: sqlite3.Connection) -> dict:
-    """Lazy-load remix context from pre-computed vectors in DB.
+    """Lazy-load remix context from pre-computed scalar decomposition in DB.
 
-    Requires precompute_remix_data() to have been run first.
-    Falls back to spaCy if pre-computed data is missing (dev convenience).
+    Requires precompute_remix_data() to have been run first (version 2+).
+    Falls back to spaCy if pre-computed data is missing (dev convenience only).
     """
     global _remix_ctx
     if _remix_ctx is not None:
         return _remix_ctx
 
-    import numpy as np
-
     # Check for pre-computed embeddings
     row = conn.execute("SELECT value FROM config WHERE key = 'embedding_version'").fetchone()
-    if row is not None:
-        # Load pre-computed centroid
-        import base64
-        centroid = None
-        centroid_row = conn.execute("SELECT value FROM config WHERE key = 'embedding_centroid'").fetchone()
-        if centroid_row:
-            centroid = np.frombuffer(base64.b64decode(centroid_row[0]), dtype=np.float32).copy()
+    if row is not None and int(row[0]) >= 2:
+        # Version 2+: scalar decomposition (no numpy needed)
+        centroid_norm_row = conn.execute(
+            "SELECT value FROM config WHERE key = 'centroid_norm'"
+        ).fetchone()
+        avg_cross_t1_row = conn.execute(
+            "SELECT value FROM config WHERE key = 'avg_cross_sim_t1'"
+        ).fetchone()
+        avg_cross_t2_row = conn.execute(
+            "SELECT value FROM config WHERE key = 'avg_cross_sim_t2'"
+        ).fetchone()
 
-        # Build filler→(vector_sum, token_count) lookup for remix sub-parts
-        filler_vectors: dict[tuple[str, str], tuple] = {}
-        vec_rows = conn.execute(
-            "SELECT slot_type, filler, vector_sum, token_count FROM slot_fillers "
-            "WHERE vector_sum IS NOT NULL AND token_count IS NOT NULL"
+        if not all([centroid_norm_row, avg_cross_t1_row, avg_cross_t2_row]):
+            raise RuntimeError(
+                "DB has embedding_version >= 2 but missing scalar constants. "
+                "Re-run 'precompute-vectors' to regenerate."
+            )
+
+        centroid_norm = float(centroid_norm_row[0])
+        avg_cross_sim_t1 = float(avg_cross_t1_row[0])
+        avg_cross_sim_t2 = float(avg_cross_t2_row[0])
+
+        # Build filler → (centroid_dot, norm_sq) lookup
+        filler_scalars: dict[tuple[str, str], tuple[float, float]] = {}
+        scalar_rows = conn.execute(
+            "SELECT slot_type, filler, centroid_dot, norm_sq FROM slot_fillers "
+            "WHERE centroid_dot IS NOT NULL AND norm_sq IS NOT NULL"
         ).fetchall()
-        for slot_type, filler, vec_blob, tc in vec_rows:
-            vec = np.frombuffer(vec_blob, dtype=np.float32).copy()
-            filler_vectors[(slot_type, filler)] = (vec, tc)
+        for slot_type, filler, cd, ns in scalar_rows:
+            filler_scalars[(slot_type, filler)] = (cd, ns)
 
         # Load config (remix POS distributions etc.)
         config = {}
@@ -246,14 +320,25 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
             config[key] = json.loads(value)
 
         _remix_ctx = {
-            "centroid": centroid,
-            "filler_vectors": filler_vectors,
+            "centroid_norm": centroid_norm,
+            "avg_cross_sim_t1": avg_cross_sim_t1,
+            "avg_cross_sim_t2": avg_cross_sim_t2,
+            "filler_scalars": filler_scalars,
             "config": config,
             "precomputed": True,
         }
         return _remix_ctx
 
+    if row is not None:
+        # Version 1: old format — can't use without numpy/vectors
+        click.echo(
+            "Warning: DB has embedding_version=1 (old format). "
+            "Re-run 'precompute-vectors' to upgrade to scalar decomposition.",
+            err=True,
+        )
+
     # Fallback: live spaCy (for dev when precompute hasn't been run)
+    import numpy as np
     import spacy
 
     click.echo("Warning: using live spaCy (run 'precompute-vectors' for better performance)", err=True)
@@ -277,27 +362,15 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
     return _remix_ctx
 
 
-def _cosine_sim(v1, v2) -> float:
-    import numpy as np
-    norm1 = float(np.linalg.norm(v1))
-    norm2 = float(np.linalg.norm(v2))
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    return float(np.dot(v1, v2) / (norm1 * norm2))
+def _approx_cosine_sim(parts: dict, ctx: dict, remix_type: str) -> float | None:
+    """Compute approximate cosine similarity using scalar decomposition.
 
+    Uses pre-computed centroid_dot and norm_sq per filler with a cross-term
+    correction to approximate what full vector cosine similarity would give.
 
-def _compute_composed_vector(parts: dict, filler_vectors: dict):
-    """Compute composed vector from pre-computed filler vectors.
-
-    Uses weighted average by token count, exactly matching spaCy's
-    behavior of averaging all token vectors in a phrase.
-
-    parts maps role → filler text (e.g. {"modifier": "Yugoslav", "head": "Kitchen"}).
-    filler_vectors maps (slot_type, filler) → (vector_sum, token_count).
-
-    Returns (mean_vector, has_all_vectors) or (None, False) if no vectors found.
+    Returns similarity score, or None if insufficient data.
     """
-    import numpy as np
+    import math
 
     _role_to_slot = {
         "modifier": "of_modifier",
@@ -306,40 +379,40 @@ def _compute_composed_vector(parts: dict, filler_vectors: dict):
         "complement": "of_complement",
     }
 
-    total_sum = None
-    total_count = 0
-    has_all = True
+    filler_scalars = ctx["filler_scalars"]
+    centroid_norm = ctx["centroid_norm"]
+    avg_cross_sim = ctx["avg_cross_sim_t1"] if remix_type == "type1" else ctx["avg_cross_sim_t2"]
+
+    total_dot = 0.0
+    norms_sq: list[float] = []
 
     for role, filler in parts.items():
         if role == "prep":
-            # Prep tokens need vector too — look up in any slot type
-            # Preps are stored on of_topic/of_complement rows; try finding a vector
-            found = False
-            for st in ("of_topic", "of_complement"):
-                if (st, filler) in filler_vectors:
-                    vec_sum, tc = filler_vectors[(st, filler)]
-                    total_sum = vec_sum if total_sum is None else total_sum + vec_sum
-                    total_count += tc
-                    found = True
-                    break
-            if not found:
-                has_all = False
-            continue
-
+            continue  # Prep vectors are never stored as separate fillers
         slot_type = _role_to_slot.get(role)
         if slot_type is None:
             continue
         key = (slot_type, filler)
-        if key in filler_vectors:
-            vec_sum, tc = filler_vectors[key]
-            total_sum = vec_sum if total_sum is None else total_sum + vec_sum
-            total_count += tc
-        else:
-            has_all = False
+        if key not in filler_scalars:
+            return None  # Missing data — skip coherence check
+        cd, ns = filler_scalars[key]
+        total_dot += cd
+        norms_sq.append(ns)
 
-    if total_sum is not None and total_count > 0:
-        return total_sum / total_count, has_all
-    return None, False
+    if not norms_sq or centroid_norm == 0:
+        return None
+
+    # Cross-term correction: sum of 2 * sqrt(ns_i) * sqrt(ns_j) * avg_cross_sim for all pairs
+    cross_correction = 0.0
+    for i in range(len(norms_sq)):
+        for j in range(i + 1, len(norms_sq)):
+            cross_correction += 2 * math.sqrt(norms_sq[i]) * math.sqrt(norms_sq[j]) * avg_cross_sim
+
+    denom_sq = sum(norms_sq) + cross_correction
+    if denom_sq <= 0:
+        return None
+
+    return total_dot / (math.sqrt(denom_sq) * centroid_norm)
 
 
 def _classify_for_remix(phrase: str, doc) -> tuple[str, int] | tuple[str, str, int] | None:
@@ -643,11 +716,10 @@ def _try_remix(
     When locked_parts is provided, locked values are passed through to
     compose functions and coherence-filter behavior is adjusted.
 
-    Supports both pre-computed vectors (precomputed=True in ctx) and
+    Supports both pre-computed scalar decomposition (precomputed=True) and
     live spaCy (precomputed=False, dev fallback).
     """
     ctx = _load_remix_context(conn)
-    centroid = ctx["centroid"]
     is_precomputed = ctx.get("precomputed", False)
 
     has_locks = bool(locked_parts)
@@ -760,17 +832,20 @@ def _try_remix(
 
         # Compute similarity when coherence check is active or locks present
         sim = None
-        if centroid is not None and (min_sim > 0 or has_locks):
+        if min_sim > 0 or has_locks:
             if is_precomputed:
-                filler_vectors = ctx["filler_vectors"]
-                composed_vec, _has_all = _compute_composed_vector(parts, filler_vectors)
-                if composed_vec is not None:
-                    sim = _cosine_sim(centroid, composed_vec)
+                sim = _approx_cosine_sim(parts, ctx, classification[0])
             else:
                 nlp = ctx["nlp"]
-                composed_doc = nlp(composed)
-                if composed_doc.has_vector and composed_doc.vector_norm > 0:
-                    sim = _cosine_sim(centroid, composed_doc.vector)
+                centroid = ctx["centroid"]
+                if centroid is not None:
+                    composed_doc = nlp(composed)
+                    if composed_doc.has_vector and composed_doc.vector_norm > 0:
+                        import numpy as np
+                        norm1 = float(np.linalg.norm(centroid))
+                        norm2 = float(np.linalg.norm(composed_doc.vector))
+                        if norm1 > 0 and norm2 > 0:
+                            sim = float(np.dot(centroid, composed_doc.vector) / (norm1 * norm2))
 
         # Coherence check (skipped for custom locked values)
         if not skip_coherence and min_sim > 0 and sim is not None:

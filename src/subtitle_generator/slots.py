@@ -405,6 +405,10 @@ def ensure_slot_tables(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN vector_sum BLOB")
     if "token_count" not in cols:
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN token_count INTEGER")
+    if "centroid_dot" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN centroid_dot REAL")
+    if "norm_sq" not in cols:
+        conn.execute("ALTER TABLE slot_fillers ADD COLUMN norm_sq REAL")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()

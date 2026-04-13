@@ -19,7 +19,7 @@ from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
     compute_accessibility, generate_jacket, sample_tone,
 )
-from subtitle_generator.slots import build_slots
+from subtitle_generator.slots import build_slots, ensure_slot_tables
 
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
@@ -233,14 +233,15 @@ def precompute_vectors_cmd():
     """Pre-compute remix classifications and word vectors.
 
     Loads spaCy en_core_web_md to compute vector embeddings for remix-relevant
-    fillers and classify of-object fillers for remix type. Stores results in the
-    database so that runtime generation needs only numpy (no spaCy).
+    fillers and classify of-object fillers for remix type. Stores scalar
+    decomposition in the database so runtime needs no numpy or spaCy.
 
     \b
     Examples:
       subtitle-gen precompute-vectors   # recompute all vectors
     """
     conn = get_db()
+    ensure_slot_tables(conn)
     precompute_remix_data(conn)
     conn.close()
 
