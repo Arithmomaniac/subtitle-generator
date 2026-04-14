@@ -142,7 +142,7 @@ def sample_tone(score: float, allowed_tiers: set[str] | None = None, conn: sqlit
 
 JACKET_PROMPT = """\
 You are a publishing industry expert. I will give you a randomly generated book subtitle
-in the pop-nonfiction pattern "X, Y, and the Z of W". Your job is to imagine the book
+in the pop-nonfiction pattern "X, Y, and [the/a/an] Z of [the/a/an] W". Your job is to imagine the book
 this subtitle belongs to and produce a complete book jacket.
 
 **Output the following sections in markdown, using the exact headers shown:**

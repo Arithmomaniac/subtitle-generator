@@ -25,13 +25,14 @@ export function deriveSubtitleVM(sub) {
     return { slots: [], fullText: "", remixed: false, similarity: null };
   }
 
+  const actionArt = (sub.action_article || "the");
   const slots = [
     { text: sub.item1, cls: SLOT_CLASSES.item1 },
     { text: ",", cls: "", isPunc: true },
     { text: sub.item2, cls: SLOT_CLASSES.item2 },
-    { text: ", and the", cls: "", isPunc: true },
+    { text: `, and ${actionArt}`, cls: "", isPunc: true },
     { text: sub.action_noun, cls: SLOT_CLASSES.action_noun },
-    { text: "of", cls: "", isPunc: true },
+    { text: sub.of_article ? `of ${sub.of_article}` : "of", cls: "", isPunc: true },
   ];
 
   if (sub.remixed && sub.remix_parts) {

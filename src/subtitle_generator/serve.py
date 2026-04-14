@@ -154,6 +154,8 @@ def _handle_generate(body: dict) -> tuple[int, dict]:
             "remixed": sub.remixed,
             "remix_parts": sub.remix_parts,
             "remix_similarity": sub.remix_similarity,
+            "of_article": sub.of_article,
+            "action_article": sub.action_article,
             "sources": sources,
         }
     finally:

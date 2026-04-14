@@ -85,10 +85,10 @@ def run_calibration(
     """
     click.echo("=== Remix Calibration ===\n")
 
-    # Load remix context (spaCy model, of-object centroid)
+    # Load spaCy model for centroid computation (calibrate always needs live spaCy)
     click.echo("Loading spaCy model and computing centroids...")
-    ctx = _load_remix_context(conn)
-    nlp = ctx["nlp"]
+    import spacy
+    nlp = spacy.load("en_core_web_md", disable=["lemmatizer"])
 
     # Compute REAL subtitle centroid (the anchor)
     subtitle_centroid = _compute_subtitle_centroid(conn, nlp)

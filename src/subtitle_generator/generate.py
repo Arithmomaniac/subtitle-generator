@@ -44,6 +44,8 @@ class GeneratedSubtitle:
     remixed: bool = False
     remix_parts: dict = field(default_factory=dict)
     remix_similarity: float | None = None
+    of_article: str = ""
+    action_article: str = "the"
 
 
 def _weighted_sample(
@@ -318,6 +320,18 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
         for key, value in conn.execute("SELECT key, value FROM config WHERE key LIKE 'remix_%'"):
             config[key] = json.loads(value)
 
+        # Load article statistics
+        article_stats_of = {}
+        article_stats_action = {}
+        for key, value in conn.execute(
+            "SELECT key, value FROM config WHERE key LIKE 'article_stats_%'"
+        ):
+            parsed = json.loads(value)
+            if key == "article_stats_of_object":
+                article_stats_of = parsed
+            elif key == "article_stats_action_noun":
+                article_stats_action = parsed
+
         _remix_ctx = {
             "centroid_norm": centroid_norm,
             "avg_cross_sim_t1": avg_cross_sim_t1,
@@ -325,6 +339,8 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
             "filler_scalars": filler_scalars,
             "config": config,
             "precomputed": True,
+            "article_stats_of": article_stats_of,
+            "article_stats_action": article_stats_action,
         }
         return _remix_ctx
 
@@ -357,7 +373,23 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
     for key, value in conn.execute("SELECT key, value FROM config WHERE key LIKE 'remix_%'"):
         config[key] = json.loads(value)
 
-    _remix_ctx = {"nlp": nlp, "centroid": centroid, "config": config, "precomputed": False}
+    # Load article statistics (same as precomputed path)
+    article_stats_of = {}
+    article_stats_action = {}
+    for key, value in conn.execute(
+        "SELECT key, value FROM config WHERE key LIKE 'article_stats_%'"
+    ):
+        parsed = json.loads(value)
+        if key == "article_stats_of_object":
+            article_stats_of = parsed
+        elif key == "article_stats_action_noun":
+            article_stats_action = parsed
+
+    _remix_ctx = {
+        "nlp": nlp, "centroid": centroid, "config": config, "precomputed": False,
+        "article_stats_of": article_stats_of,
+        "article_stats_action": article_stats_action,
+    }
     return _remix_ctx
 
 
@@ -570,6 +602,76 @@ def compose_prepositional(
     return composed, parts
 
 
+def _majority_article(
+    filler: str, article_stats: dict[str, dict[str, int]], min_freq: float,
+) -> str:
+    """Look up the majority article for a filler from corpus stats.
+
+    Returns the most frequent article ("the"/"a"/"an"/"") if total
+    occurrences meet min_freq and majority is clear (>50%), otherwise
+    returns the fallback.
+    """
+    counts = article_stats.get(filler.lower())
+    if not counts:
+        return ""
+    total = sum(counts.values())
+    if total < min_freq:
+        return ""
+    best = max(counts, key=counts.get)
+    # Require clear majority (>50%) to avoid unstable ties
+    if counts[best] * 2 <= total:
+        return ""
+    return best
+
+
+def _infer_of_article(
+    composed: str, article_stats: dict[str, dict[str, int]],
+    min_freq: float, threshold: float,
+    remix_parts: dict | None = None,
+) -> str:
+    """Deterministic head-noun backoff heuristic for remixed of-objects.
+
+    Backoff chain:
+      1. Exact composed phrase in stats → majority article
+      2. Head noun from remix structure → its majority article
+         (Type 1: uses 'head', Type 2: uses 'topic' — the syntactic head)
+      3. Default → "" (no article)
+
+    Only assigns an article if the majority fraction >= threshold.
+    """
+    key = composed.lower()
+    # 1. Exact match
+    counts = article_stats.get(key)
+    if counts:
+        total = sum(counts.values())
+        if total >= min_freq:
+            best = max(counts, key=counts.get)
+            if best and counts[best] / total >= threshold:
+                return best
+
+    # 2. Head noun backoff — use remix structure if available
+    head_word = None
+    if remix_parts:
+        if "head" in remix_parts:
+            head_word = remix_parts["head"]
+        elif "topic" in remix_parts:
+            head_word = remix_parts["topic"]
+    if head_word is None:
+        words = composed.split()
+        head_word = words[-1] if words else None
+
+    if head_word:
+        counts = article_stats.get(head_word.lower())
+        if counts:
+            total = sum(counts.values())
+            if total >= min_freq:
+                best = max(counts, key=counts.get)
+                if best and counts[best] / total >= threshold:
+                    return best
+
+    return ""
+
+
 def generate_subtitle(
     conn: sqlite3.Connection, seed: int | None = None,
     tone_target: dict[str, float] | None = None,
@@ -679,6 +781,29 @@ def generate_subtitle(
                     of_object, remix_parts, remix_similarity = result
                     remixed = True
 
+    # Resolve articles from corpus stats
+    ctx = _load_remix_context(conn)
+    cfg = load_tuning_config(conn)
+    of_min_freq = cfg.get("article_of_min_freq", 3.0)
+    act_min_freq = cfg.get("article_action_min_freq", 3.0)
+    remix_threshold = cfg.get("article_remix_heuristic_threshold", 0.6)
+
+    action_article = _majority_article(
+        action_noun, ctx.get("article_stats_action", {}), act_min_freq,
+    )
+    if not action_article:
+        action_article = "the"
+
+    if remixed:
+        of_article = _infer_of_article(
+            of_object, ctx.get("article_stats_of", {}), of_min_freq, remix_threshold,
+            remix_parts=remix_parts,
+        )
+    else:
+        of_article = _majority_article(
+            of_object, ctx.get("article_stats_of", {}), of_min_freq,
+        )
+
     # Title-case all components
     items = [_title_case(x) for x in items]
     action_noun = _title_case(action_noun)
@@ -686,7 +811,8 @@ def generate_subtitle(
     if remix_parts:
         remix_parts = {k: _title_case(v) for k, v in remix_parts.items()}
 
-    text = f"{items[0]}, {items[1]}, and the {action_noun} of {of_object}"
+    of_prefix = f"{of_article} " if of_article else ""
+    text = f"{items[0]}, {items[1]}, and {action_article} {action_noun} of {of_prefix}{of_object}"
 
     return GeneratedSubtitle(
         text=_title_case(text),
@@ -697,6 +823,8 @@ def generate_subtitle(
         remixed=remixed,
         remix_parts=remix_parts,
         remix_similarity=remix_similarity,
+        of_article=of_article,
+        action_article=action_article,
     )
 
 

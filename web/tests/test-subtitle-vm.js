@@ -83,6 +83,29 @@ test("remixed prepositional (topic + prep + complement)", () => {
   assert(vm.slots[8].text === "America", "complement slot");
 });
 
+test("article fields control slot text", () => {
+  const sub = {
+    text: "A, B, and a C of the D",
+    item1: "A", item2: "B", action_noun: "C", of_object: "D",
+    action_article: "a", of_article: "the",
+    remixed: false, remix_parts: {},
+  };
+  const vm = deriveSubtitleVM(sub);
+  assert(vm.slots[3].text === ", and a", "action article 'a' in punc slot");
+  assert(vm.slots[5].text === "of the", "of-article 'the' in punc slot");
+});
+
+test("missing article fields default correctly", () => {
+  const sub = {
+    text: "A, B, and the C of D",
+    item1: "A", item2: "B", action_noun: "C", of_object: "D",
+    remixed: false, remix_parts: {},
+  };
+  const vm = deriveSubtitleVM(sub);
+  assert(vm.slots[3].text === ", and the", "defaults to 'the' when action_article missing");
+  assert(vm.slots[5].text === "of", "defaults to bare 'of' when of_article missing");
+});
+
 // ── deriveSourcesVM ──
 
 test("null input returns empty array", () => {

@@ -320,7 +320,7 @@ def precompute_vectors_cmd():
 @click.option("--min-sim", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
 @click.option("--review", is_flag=True, help="Interactively rate each subtitle (thumbs, tone override, comment).")
 def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool):
-    """Generate random subtitles in the "X, Y, and the Z of W" pattern.
+    """Generate random subtitles in the "X, Y, and [the/a/an] Z of W" pattern.
 
     Draws slot fillers from the extracted pool, optionally remixing multi-word
     of-objects into novel combinations (enabled by default).

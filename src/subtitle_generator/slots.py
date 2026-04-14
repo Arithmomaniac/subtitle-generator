@@ -11,9 +11,9 @@ import sqlite3
 import click
 import spacy
 
-# Regex to match: "A, B[,] and the C of D"
+# Regex to match: "A, B[,] and the/a/an C of D"
 PATTERN_RE = re.compile(
-    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+the\s+(?P<action>.+?)\s+of\s+(?P<object>.+)$",
+    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+(?P<article>a|an|the)\s+(?P<action>.+?)\s+of\s+(?P<object>.+)$",
     re.IGNORECASE,
 )
 
@@ -312,7 +312,7 @@ def _decompose_prepositional(phrase: str, doc) -> tuple[str, str, str, str, str]
 
 
 def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
-    """Find all subtitles matching X, Y, and the Z of W.
+    """Find all subtitles matching X, Y, and [the/a/an] Z of W.
 
     Open Library records without any institutional identifier (ISBN, LCCN)
     are excluded — they tend to be dissertations, pamphlets, or government
@@ -320,7 +320,11 @@ def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
     """
     rows = conn.execute(
         "SELECT id, title, subtitle FROM subtitles "
-        "WHERE subtitle LIKE '%, % and the % of %' "
+        "WHERE ("
+        "  subtitle LIKE '%, % and the % of %'"
+        "  OR subtitle LIKE '%, % and a % of %'"
+        "  OR subtitle LIKE '%, % and an % of %'"
+        ") "
         "AND NOT ("
         "  source_file = 'openlibrary'"
         "  AND (isbn IS NULL OR isbn = '')"
@@ -337,8 +341,17 @@ def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
             continue
 
         list_part = m.group("list_part")
+        action_article = m.group("article").lower()
         action = m.group("action").strip()
         obj = re.sub(r"[\s]*[/:;,.]\s*$", "", m.group("object")).strip()
+
+        # Strip leading article from of-object
+        of_art_match = re.match(r"^(a|an|the)\s+", obj, re.IGNORECASE)
+        if of_art_match:
+            of_article = of_art_match.group(1).lower()
+            obj = obj[of_art_match.end():]
+        else:
+            of_article = ""
 
         items = _split_list_items(list_part)
         if len(items) < 2:
@@ -351,6 +364,8 @@ def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
             "list_items": items,
             "action_noun": action,
             "of_object": obj,
+            "action_article": action_article,
+            "of_article": of_article,
         })
 
     return matches
@@ -409,6 +424,12 @@ def ensure_slot_tables(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN centroid_dot REAL")
     if "norm_sq" not in cols:
         conn.execute("ALTER TABLE slot_fillers ADD COLUMN norm_sq REAL")
+    # Migration: add article columns to pattern_matches
+    pm_cols = {r[1] for r in conn.execute("PRAGMA table_info(pattern_matches)")}
+    if "of_article" not in pm_cols:
+        conn.execute("ALTER TABLE pattern_matches ADD COLUMN of_article TEXT DEFAULT ''")
+    if "action_article" not in pm_cols:
+        conn.execute("ALTER TABLE pattern_matches ADD COLUMN action_article TEXT DEFAULT ''")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()
@@ -430,11 +451,13 @@ def build_slots(conn: sqlite3.Connection):
 
     conn.executemany(
         "INSERT OR IGNORE INTO pattern_matches "
-        "(subtitle_id, title, subtitle, list_items_json, action_noun, of_object) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "(subtitle_id, title, subtitle, list_items_json, action_noun, of_object, "
+        "action_article, of_article) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (m["subtitle_id"], m["title"], m["subtitle"],
-             json.dumps(m["list_items"]), m["action_noun"], m["of_object"])
+             json.dumps(m["list_items"]), m["action_noun"], m["of_object"],
+             m["action_article"], m["of_article"])
             for m in matches
         ],
     )
@@ -444,6 +467,9 @@ def build_slots(conn: sqlite3.Connection):
     list_items_seen: dict[str, tuple[int, int]] = {}  # filler → (source_subtitle_id, count)
     action_nouns_seen: dict[str, tuple[int, int]] = {}
     of_objects_seen: dict[str, tuple[int, int]] = {}
+    # Article tracking: cleaned filler → {article: count}
+    of_article_counts: dict[str, dict[str, int]] = {}
+    action_article_counts: dict[str, dict[str, int]] = {}
     clean_matches = 0
 
     for i, m in enumerate(matches):
@@ -481,6 +507,14 @@ def build_slots(conn: sqlite3.Connection):
         prev = of_objects_seen.get(obj)
         of_objects_seen[obj] = (prev[0] if prev else sid, (prev[1] if prev else 0) + 1)
 
+        # Track articles for cleaned fillers
+        of_art = m["of_article"]
+        of_article_counts.setdefault(obj, {})
+        of_article_counts[obj][of_art] = of_article_counts[obj].get(of_art, 0) + 1
+        act_art = m["action_article"]
+        action_article_counts.setdefault(action, {})
+        action_article_counts[action][act_art] = action_article_counts[action].get(act_art, 0) + 1
+
         if (i + 1) % 2000 == 0:
             click.echo(f"  ...validated {i + 1:,} / {len(matches):,}")
 
@@ -508,6 +542,54 @@ def build_slots(conn: sqlite3.Connection):
 
     # --- Decompose of-objects into sub-parts for remixing ---
     _decompose_of_objects(conn, nlp, of_objects_seen)
+
+    # --- Build and store article statistics ---
+    _build_article_stats(conn, of_article_counts, action_article_counts)
+
+
+def _build_article_stats(
+    conn: sqlite3.Connection,
+    of_article_counts: dict[str, dict[str, int]],
+    action_article_counts: dict[str, dict[str, int]],
+):
+    """Store per-filler article distributions in config as JSON.
+
+    Keys: article_stats_of_object, article_stats_action_noun.
+    Values are case-insensitive keyed dicts: {filler_lower: {article: count}}.
+    """
+    # Merge case variants
+    of_stats: dict[str, dict[str, int]] = {}
+    for filler, arts in of_article_counts.items():
+        key = filler.lower()
+        if key not in of_stats:
+            of_stats[key] = {}
+        for art, cnt in arts.items():
+            of_stats[key][art] = of_stats[key].get(art, 0) + cnt
+
+    action_stats: dict[str, dict[str, int]] = {}
+    for filler, arts in action_article_counts.items():
+        key = filler.lower()
+        if key not in action_stats:
+            action_stats[key] = {}
+        for art, cnt in arts.items():
+            action_stats[key][art] = action_stats[key].get(art, 0) + cnt
+
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        ("article_stats_of_object", json.dumps(of_stats)),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+        ("article_stats_action_noun", json.dumps(action_stats)),
+    )
+    conn.commit()
+
+    of_with = sum(1 for arts in of_stats.values() if any(a for a in arts if a))
+    act_with = sum(1 for arts in action_stats.values()
+                   if any(a for a in arts if a and a != "the"))
+    click.echo(f"\nBuilding article statistics...")
+    click.echo(f"  of_object: {of_with:,} fillers with articles ({len(of_stats):,} total)")
+    click.echo(f"  action_noun: {act_with:,} fillers with non-\"the\" articles ({len(action_stats):,} total)")
 
 
 def _case_merge_key(filler: str) -> str:

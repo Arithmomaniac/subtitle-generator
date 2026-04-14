@@ -288,12 +288,21 @@ Consider what previous experiments tell you about which direction to move.
 """
 
         click.echo("  proposing parameter change …")
-        proposal = structured_completion(
-            model=proposer_model,
-            messages=[{"role": "user", "content": proposal_prompt}],
-            schema=ParamProposal,
-            timeout=180.0,
-        )
+        try:
+            proposal = structured_completion(
+                model=proposer_model,
+                messages=[{"role": "user", "content": proposal_prompt}],
+                schema=ParamProposal,
+                timeout=180.0,
+            )
+        except RuntimeError as e:
+            click.echo(f"  ⚠ proposal failed: {e} — skipping iteration")
+            _append_result(
+                results_file, i, "(failed)", 0, 0,
+                quality, separation, current_score,
+                "error", str(e),
+            )
+            continue
 
         # Validate the proposed parameter
         if proposal.param not in ALL_TUNABLE_PARAMS:

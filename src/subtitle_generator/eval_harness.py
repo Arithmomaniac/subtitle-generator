@@ -76,6 +76,7 @@ def structured_completion(
     model: str,
     messages: list,
     schema: type[BaseModel],
+    max_retries: int = 2,
     **kwargs,
 ) -> BaseModel:
     """Structured output with auto-dispatch per model type.
@@ -83,59 +84,77 @@ def structured_completion(
     GPT on /chat/completions: response_format=Pydantic (native json_schema)
     GPT 5.4 family on /responses: litellm.aresponses() with text_format (native)
     Claude/Gemini/other: tool_choice (forced function call matching schema)
+
+    Retries up to max_retries times on empty or unparseable responses.
     """
     model_lower = model.lower()
+    last_error = None
 
-    if _needs_responses_api(model):
-        # Responses API — native structured output via text_format
-        user_content = messages[-1]["content"] if messages else ""
-        timeout = kwargs.pop("timeout", 60.0)
-        resp = asyncio.run(litellm.aresponses(
-            model=model,
-            input=user_content,
-            text_format=schema,
-            max_output_tokens=kwargs.pop("max_tokens", 4096),
-            timeout=timeout,
-        ))
-        text = _extract_responses_text(resp.output)
-        return schema.model_validate_json(text)
+    for attempt in range(1 + max_retries):
+        try:
+            if _needs_responses_api(model):
+                # Responses API — native structured output via text_format
+                user_content = messages[-1]["content"] if messages else ""
+                timeout = kwargs.pop("timeout", 60.0) if attempt == 0 else kwargs.get("timeout", 60.0)
+                resp = asyncio.run(litellm.aresponses(
+                    model=model,
+                    input=user_content,
+                    text_format=schema,
+                    max_output_tokens=kwargs.pop("max_tokens", 4096) if attempt == 0 else kwargs.get("max_tokens", 4096),
+                    timeout=timeout,
+                ))
+                text = _extract_responses_text(resp.output)
+                if not text.strip():
+                    raise ValueError("Empty response from LLM")
+                return schema.model_validate_json(text)
 
-    use_native = "gpt" in model_lower or "o3" in model_lower or "o4" in model_lower
+            use_native = "gpt" in model_lower or "o3" in model_lower or "o4" in model_lower
 
-    if use_native:
-        # Native JSON-schema mode (OpenAI-compatible)
-        resp = litellm.completion(
-            model=model,
-            messages=messages,
-            response_format=schema,
-            **kwargs,
-        )
-        content = resp.choices[0].message.content
-        return schema.model_validate_json(content)
-    else:
-        # Tool-call mode (Claude, Gemini, etc.)
-        tool_schema = {
-            "type": "function",
-            "function": {
-                "name": schema.__name__,
-                "description": f"Return a {schema.__name__} object.",
-                "parameters": schema.model_json_schema(),
-            },
-        }
-        resp = litellm.completion(
-            model=model,
-            messages=messages,
-            tools=[tool_schema],
-            tool_choice={
-                "type": "function",
-                "function": {"name": schema.__name__},
-            },
-            **kwargs,
-        )
-        tool_call = resp.choices[0].message.tool_calls[0]
-        raw = tool_call.function.arguments
-        parsed = json.loads(raw) if isinstance(raw, str) else raw
-        return schema.model_validate(parsed)
+            if use_native:
+                resp = litellm.completion(
+                    model=model,
+                    messages=messages,
+                    response_format=schema,
+                    **kwargs,
+                )
+                content = resp.choices[0].message.content
+                if not content or not content.strip():
+                    raise ValueError("Empty response from LLM")
+                return schema.model_validate_json(content)
+            else:
+                tool_schema = {
+                    "type": "function",
+                    "function": {
+                        "name": schema.__name__,
+                        "description": f"Return a {schema.__name__} object.",
+                        "parameters": schema.model_json_schema(),
+                    },
+                }
+                resp = litellm.completion(
+                    model=model,
+                    messages=messages,
+                    tools=[tool_schema],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": schema.__name__},
+                    },
+                    **kwargs,
+                )
+                tool_calls = resp.choices[0].message.tool_calls
+                if not tool_calls:
+                    raise ValueError("No tool calls in LLM response")
+                raw = tool_calls[0].function.arguments
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                return schema.model_validate(parsed)
+
+        except (ValueError, Exception) as e:
+            last_error = e
+            if attempt < max_retries:
+                click.echo(f"  ⚠ LLM response error (attempt {attempt + 1}): {e}, retrying...")
+                continue
+            raise RuntimeError(
+                f"structured_completion failed after {1 + max_retries} attempts: {last_error}"
+            ) from last_error
 
 
 # ---------------------------------------------------------------------------
