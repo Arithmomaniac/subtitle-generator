@@ -1,6 +1,6 @@
 # subtitle-generator
 
-Generate bizarre book subtitles in the pop-nonfiction pattern — *"X, Y, and the Z of W"* — by mining real parts from the Library of Congress MARC database and Open Library, then recombining them slot-machine style.
+Generate bizarre book subtitles in the pop-nonfiction pattern — *"X, Y, and the Z of W"* — by mining real parts from the Library of Congress MARC database and Open Library, then recombining them slot-machine style. Supports article variants (*"and a/an Z"*) and articles before of-objects (*"of the W"*) based on corpus statistics.
 
 Optionally generate a **full book jacket** with title, back cover copy, trade journal reviews, and endorsement blurbs from real people — powered by the GitHub Copilot SDK.
 
@@ -9,7 +9,8 @@ Optionally generate a **full book jacket** with title, back cover copy, trade jo
 **Random subtitles:**
 ```
 Jefferson, Repression, and the Category of Scripture in Lurianic Kabbala
-UFOs, Rising Powers, and the Bicentennial History of Performance
+Greed, Grit, and the Rise of the American Dream
+Faith, Hope, and a Healthy Dose of Laughter
 Celebrity Culture, Theology, and the Collapse of New England
 ```
 
@@ -26,8 +27,8 @@ Celebrity Culture, Theology, and the Collapse of New England
 
 1. **Download** ~25M MARC records from the LOC bulk distribution (43 files, ~9 GB) and/or ~35M edition records from Open Library (~9.2 GB)
 2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication)
-3. **Pattern match** subtitles matching "X, Y, and the Z of W" using regex + spaCy NLP validation
-4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing
+3. **Pattern match** subtitles matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation
+4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing. Articles (a/an/the) are stripped and stored separately for re-insertion at generation time.
 5. **Generate** by randomly drawing one filler per slot — weighted by sqrt(corpus frequency). Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
 6. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with trade journal reviews and endorsement blurbs from real people
 
@@ -125,6 +126,26 @@ Multi-word of-objects (e.g., "Lurianic Kabbala", "Jews in America") are decompos
 
 Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM-based rating.
 
+### Tuning
+
+The system includes an autoresearch-inspired tuning loop that uses LLM evaluation to optimize 20 tunable parameters (tone targets, sampling spread, article thresholds, etc.):
+
+```bash
+uv run subtitle-gen tune                        # full pipeline (remix + tone)
+uv run subtitle-gen tune --phase tone           # tone parameters only
+uv run subtitle-gen tune --spot-check           # with human spot-checks
+uv run subtitle-gen tune --show-results         # view experiment history
+```
+
+Human feedback can also be collected interactively and fed into the tuning loop:
+
+```bash
+uv run subtitle-gen review                      # rate 20 subtitles
+uv run subtitle-gen generate --review           # rate while generating
+```
+
+Tuning goals and parameter bounds are documented in `tuning_goals.md`.
+
 ## Commands
 
 | Command | Description |
@@ -135,9 +156,11 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 | `extract-ol` | Parse Open Library dump (deduplicates against LOC) |
 | `analyze` | POS-tag subtitles, extract structural templates |
 | `build-slots` | Extract slot fillers (regex + NLP validated) + precompute vectors |
-| `generate` | Random subtitle generation (+ optional jacket) |
+| `generate` | Random subtitle generation (+ optional jacket, review) |
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
+| `tune` | Autoresearch tuning loop (remix + tone parameters) |
+| `review` | Interactive subtitle rating session |
 | `precompute-vectors` | Recompute remix vector decomposition (included in `build-slots`) |
 | `serve` | Start the web app locally |
 | `export-db` | Export mini SQLite directly from full DB |
@@ -150,10 +173,14 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 
 ```
 src/subtitle_generator/
-  generate.py          # subtitle generation with remix + locked slots
+  generate.py          # subtitle generation with remix + locked slots + article logic
   jacket.py            # jacket prompt construction + LLM execution
-  slots.py             # slot extraction + decomposition
+  slots.py             # slot extraction + decomposition + article stats
+  config.py            # centralized tuning parameters (20 params, DB-overridable)
   calibrate.py         # LLM-based remix parameter tuning
+  tune.py              # autoresearch tuning loop (Karpathy-inspired)
+  eval_harness.py      # evaluation infrastructure (rating, tone separation, composite)
+  feedback.py          # human feedback collection + summarization for tuning
   serve.py             # local HTTP server (stdlib)
   export_db.py         # mini DB export for deployment
   cli.py               # Click CLI entry point
@@ -174,6 +201,7 @@ web/
 - **SQLite** — subtitle storage and slot filler tables
 - **click** — CLI framework
 - **GitHub Copilot SDK** — LLM for jacket generation
+- **litellm** + **pydantic** — structured LLM output for tuning and calibration (optional, lazy-imported)
 - **Alpine.js** — reactive frontend (CDN, no build step)
 - **marked.js** — markdown rendering (CDN)
 
