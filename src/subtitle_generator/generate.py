@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 
 import click
 
+from subtitle_generator.config import DEFAULT_TONE_TARGETS, load_tuning_config
+
 
 # Words that stay lowercase in title case (unless first word).
 _SMALL_WORDS = frozenset({
@@ -44,36 +46,6 @@ class GeneratedSubtitle:
     remix_similarity: float | None = None
 
 
-_DEFAULT_WEIGHTED_SAMPLE_SPREAD = 0.4
-_DEFAULT_WEIGHTED_SAMPLE_BIAS_FLOOR = 0.05
-
-
-def _load_generate_config(conn: sqlite3.Connection) -> dict:
-    """Load tuning parameters from DB config table, falling back to defaults."""
-    config: dict[str, float] = {}
-    rows = conn.execute(
-        "SELECT key, value FROM config WHERE key LIKE 'tone_target_%' "
-        "OR key IN ('weighted_sample_spread', 'weighted_sample_bias_floor')"
-    ).fetchall()
-    for key, value in rows:
-        config[key] = float(value)
-    return config
-
-
-def _get_spread(conn: sqlite3.Connection | None = None) -> float:
-    if conn is None:
-        return _DEFAULT_WEIGHTED_SAMPLE_SPREAD
-    config = _load_generate_config(conn)
-    return config.get("weighted_sample_spread", _DEFAULT_WEIGHTED_SAMPLE_SPREAD)
-
-
-def _get_bias_floor(conn: sqlite3.Connection | None = None) -> float:
-    if conn is None:
-        return _DEFAULT_WEIGHTED_SAMPLE_BIAS_FLOOR
-    config = _load_generate_config(conn)
-    return config.get("weighted_sample_bias_floor", _DEFAULT_WEIGHTED_SAMPLE_BIAS_FLOOR)
-
-
 def _weighted_sample(
     rows: list[tuple[str, int]], k: int,
     rng: random.Random | None = None,
@@ -90,8 +62,9 @@ def _weighted_sample(
     weights = [math.sqrt(r[1]) for r in rows]
 
     if tone_target is not None:
-        spread = _get_spread(conn)
-        bias_floor = _get_bias_floor(conn)
+        cfg = load_tuning_config(conn)
+        spread = cfg["weighted_sample_spread"]
+        bias_floor = cfg["weighted_sample_bias_floor"]
         for i, (_, freq) in enumerate(rows):
             filler_score = math.log10(1 + freq)
             bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
@@ -108,30 +81,8 @@ def _weighted_sample(
     return chosen
 
 
-# Tone target scores for filler biasing (log10 scale), per slot type.
-# of_object has a much thinner pop tail, so its targets are lower.
-_DEFAULT_TONE_TARGETS = {
-    "pop": {"list_item": 1.5, "action_noun": 1.5, "of_object": 1.0},
-    "mainstream": {"list_item": 1.0, "action_noun": 1.0, "of_object": 0.8},
-    "niche": {"list_item": 0.25, "action_noun": 0.25, "of_object": 0.25},
-}
-
 # Module-level for import compatibility — uses defaults when no DB connection
-TONE_TARGETS = _DEFAULT_TONE_TARGETS
-
-
-def _get_tone_targets(conn: sqlite3.Connection | None = None) -> dict:
-    """Get TONE_TARGETS from DB config or defaults."""
-    if conn is None:
-        return _DEFAULT_TONE_TARGETS
-    config = _load_generate_config(conn)
-    targets: dict[str, dict[str, float]] = {}
-    for tier in ("pop", "mainstream", "niche"):
-        targets[tier] = {}
-        for slot in ("list_item", "action_noun", "of_object"):
-            key = f"tone_target_{tier}_{slot}"
-            targets[tier][slot] = config.get(key, _DEFAULT_TONE_TARGETS[tier][slot])
-    return targets
+TONE_TARGETS = DEFAULT_TONE_TARGETS
 
 # --- Remix infrastructure ---
 

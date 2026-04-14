@@ -17,7 +17,8 @@ import click
 import litellm
 from pydantic import BaseModel
 
-from subtitle_generator.generate import TONE_TARGETS, generate_subtitle
+from subtitle_generator.config import get_tone_targets
+from subtitle_generator.generate import generate_subtitle
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -163,8 +164,9 @@ def generate_sample_set(
     """Generate *n* subtitles with the given parameters."""
     tone_target: dict[str, float] | None = None
     if tone:
+        targets = get_tone_targets(conn)
         tone_target = {
-            slot: TONE_TARGETS[tone][slot]
+            slot: targets[tone][slot]
             for slot in ["list_item", "action_noun", "of_object"]
         }
 
@@ -201,15 +203,12 @@ Subtitles:
 {subtitle_list}"""
 
 
-def rate_quality(
+def rate_batch_raw(
     subtitles: list[str],
     model: str = DEFAULT_RATER_MODEL,
     timeout: float = 60.0,
-) -> float:
-    """Rate a batch of subtitles via LLM.  Returns normalised average (0-1)."""
-    if not subtitles:
-        return 0.0
-
+) -> list[SubtitleRating]:
+    """Rate subtitles and return raw SubtitleRating objects (not normalized)."""
     chunk_size = 25
     all_ratings: list[SubtitleRating] = []
 
@@ -231,10 +230,23 @@ def rate_quality(
         )
         all_ratings.extend(batch.ratings)
 
+    return all_ratings
+
+
+def rate_quality(
+    subtitles: list[str],
+    model: str = DEFAULT_RATER_MODEL,
+    timeout: float = 60.0,
+) -> float:
+    """Rate a batch of subtitles via LLM.  Returns normalised average (0-1)."""
+    if not subtitles:
+        return 0.0
+
+    ratings = rate_batch_raw(subtitles, model, timeout)
     total = sum(
-        r.coherence + r.evocativeness + r.surprise for r in all_ratings
+        r.coherence + r.evocativeness + r.surprise for r in ratings
     )
-    return total / (30.0 * len(all_ratings))
+    return total / (30.0 * len(ratings))
 
 
 # ---------------------------------------------------------------------------

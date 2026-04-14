@@ -17,6 +17,7 @@ import sqlite3
 
 import click
 
+from subtitle_generator.config import ALL_TUNABLE_PARAMS, load_tuning_config
 from subtitle_generator.eval_harness import (
     DEFAULT_PROPOSER_MODEL,
     DEFAULT_RATER_MODEL,
@@ -29,44 +30,8 @@ from subtitle_generator.eval_harness import (
 )
 
 # ---------------------------------------------------------------------------
-# Tunable parameter registry with defaults
-# ---------------------------------------------------------------------------
-
-ALL_TUNABLE_PARAMS: dict[str, float] = {
-    "weighted_sample_spread": 0.4,
-    "weighted_sample_bias_floor": 0.05,
-    "tone_target_pop_list_item": 1.5,
-    "tone_target_pop_action_noun": 1.5,
-    "tone_target_pop_of_object": 1.0,
-    "tone_target_mainstream_list_item": 1.0,
-    "tone_target_mainstream_action_noun": 1.0,
-    "tone_target_mainstream_of_object": 0.8,
-    "tone_target_niche_list_item": 0.25,
-    "tone_target_niche_action_noun": 0.25,
-    "tone_target_niche_of_object": 0.25,
-    "sample_tone_spread": 0.6,
-    "tier_center_pop": 1.5,
-    "tier_center_mainstream": 0.75,
-    "tier_center_niche": 0.25,
-    "accessibility_threshold_pop": 1.0,
-    "accessibility_threshold_mainstream": 0.5,
-}
-
-# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _load_current_params(conn: sqlite3.Connection) -> dict[str, float]:
-    """Load current params from DB, falling back to defaults."""
-    params = dict(ALL_TUNABLE_PARAMS)
-    for key in ALL_TUNABLE_PARAMS:
-        row = conn.execute(
-            "SELECT value FROM config WHERE key = ?", (key,)
-        ).fetchone()
-        if row:
-            params[key] = float(row[0])
-    return params
 
 
 def _load_goals() -> str:
@@ -206,7 +171,7 @@ def run_tone_tuning(
 
     # Baseline evaluation
     click.echo("Computing baseline scores …")
-    current_params = _load_current_params(conn)
+    current_params = load_tuning_config(conn)
     quality, separation, current_score = _evaluate(conn, rater_model)
     click.echo(
         f"Baseline — Quality: {quality:.3f}  "
@@ -218,7 +183,7 @@ def run_tone_tuning(
         click.echo(f"--- Iteration {i}/{iterations} ---")
 
         # Reload state each iteration
-        current_params = _load_current_params(conn)
+        current_params = load_tuning_config(conn)
         results_history = _load_results_history(results_file)
 
         # Propose a parameter change
@@ -345,7 +310,7 @@ Consider what previous experiments tell you about which direction to move.
             status, proposal.reasoning,
         )
 
-    final_params = _load_current_params(conn)
+    final_params = load_tuning_config(conn)
     click.echo(f"=== Tuning complete ({iterations} iterations) ===")
     click.echo(f"Final composite: {current_score:.3f}")
     return final_params

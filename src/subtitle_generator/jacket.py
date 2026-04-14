@@ -9,6 +9,8 @@ from collections.abc import Callable
 
 import click
 
+from subtitle_generator.config import load_tuning_config
+
 try:
     from copilot import CopilotClient
     from copilot.session import PermissionHandler
@@ -75,27 +77,6 @@ def _lookup_freq(conn: sqlite3.Connection, filler: str) -> int:
     return row[0] if row else 1
 
 
-_DEFAULT_ACCESSIBILITY_THRESHOLD_POP = 1.0
-_DEFAULT_ACCESSIBILITY_THRESHOLD_MAINSTREAM = 0.5
-_DEFAULT_TIER_CENTER_POP = 1.5
-_DEFAULT_TIER_CENTER_MAINSTREAM = 0.75
-_DEFAULT_TIER_CENTER_NICHE = 0.25
-_DEFAULT_SAMPLE_TONE_SPREAD = 0.6
-
-
-def _load_jacket_config(conn: sqlite3.Connection) -> dict:
-    """Load jacket tuning parameters from DB config table."""
-    config: dict[str, float] = {}
-    rows = conn.execute(
-        "SELECT key, value FROM config WHERE key LIKE 'tier_center_%' "
-        "OR key LIKE 'accessibility_threshold_%' "
-        "OR key = 'sample_tone_spread'"
-    ).fetchall()
-    for key, value in rows:
-        config[key] = float(value)
-    return config
-
-
 def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None) -> tuple[str, float]:
     """Compute an accessibility tier for a subtitle based on filler frequencies.
 
@@ -109,9 +90,9 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
     freqs = [_lookup_freq(conn, f) for f in fillers]
     score = sum(math.log10(1 + f) for f in freqs) / len(freqs)
 
-    config = _load_jacket_config(conn) if conn else {}
-    pop_thresh = config.get("accessibility_threshold_pop", _DEFAULT_ACCESSIBILITY_THRESHOLD_POP)
-    main_thresh = config.get("accessibility_threshold_mainstream", _DEFAULT_ACCESSIBILITY_THRESHOLD_MAINSTREAM)
+    cfg = load_tuning_config(conn)
+    pop_thresh = cfg["accessibility_threshold_pop"]
+    main_thresh = cfg["accessibility_threshold_mainstream"]
 
     # Thresholds tuned to the distribution:
     # score > pop_thresh → fillers avg freq ~10+ (pop staples like Race, Power, America)
@@ -135,13 +116,13 @@ def sample_tone(score: float, allowed_tiers: set[str] | None = None, conn: sqlit
     by distance from each tier's center score. allowed_tiers clamps the
     selection to a subset (zeroing out disallowed tiers and renormalizing).
     """
-    config = _load_jacket_config(conn) if conn else {}
-    spread = config.get("sample_tone_spread", _DEFAULT_SAMPLE_TONE_SPREAD)
+    cfg = load_tuning_config(conn)
+    spread = cfg["sample_tone_spread"]
 
     tiers_def = [
-        ("pop", TONE_HIGH, config.get("tier_center_pop", _DEFAULT_TIER_CENTER_POP)),
-        ("mainstream", TONE_MEDIUM, config.get("tier_center_mainstream", _DEFAULT_TIER_CENTER_MAINSTREAM)),
-        ("niche", TONE_LOW, config.get("tier_center_niche", _DEFAULT_TIER_CENTER_NICHE)),
+        ("pop", TONE_HIGH, cfg["tier_center_pop"]),
+        ("mainstream", TONE_MEDIUM, cfg["tier_center_mainstream"]),
+        ("niche", TONE_LOW, cfg["tier_center_niche"]),
     ]
     weights = []
     tiers = []
@@ -332,9 +313,9 @@ async def _generate_jacket_async(
         _progress(f"Tone: override")
     else:
         _, score = compute_accessibility(subtitle, conn)
-        config = _load_jacket_config(conn) if conn else {}
-        pop_thresh = config.get("accessibility_threshold_pop", _DEFAULT_ACCESSIBILITY_THRESHOLD_POP)
-        main_thresh = config.get("accessibility_threshold_mainstream", _DEFAULT_ACCESSIBILITY_THRESHOLD_MAINSTREAM)
+        cfg = load_tuning_config(conn)
+        pop_thresh = cfg["accessibility_threshold_pop"]
+        main_thresh = cfg["accessibility_threshold_mainstream"]
         natural = "pop" if score > pop_thresh else ("mainstream" if score >= main_thresh else "niche")
         _progress(f"Tone: {tone_tier} (score: {score:.2f})")
 

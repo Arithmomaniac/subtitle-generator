@@ -16,11 +16,8 @@ import click
 import numpy as np
 
 from subtitle_generator.eval_harness import (
-    RATING_PROMPT,
     DEFAULT_RATER_MODEL,
-    RatingBatch,
-    SubtitleRating,
-    structured_completion,
+    rate_batch_raw,
 )
 from subtitle_generator.generate import generate_subtitle, _load_remix_context
 
@@ -76,26 +73,6 @@ def _compute_baseline_stats(
     }
 
 
-def _rate_batch_raw(
-    subtitles: list[str], model: str, timeout: float = 60.0,
-) -> list[SubtitleRating]:
-    """Rate subtitles via structured_completion, chunking at 25."""
-    chunk_size = 25
-    all_ratings: list[SubtitleRating] = []
-    for start in range(0, len(subtitles), chunk_size):
-        chunk = subtitles[start : start + chunk_size]
-        numbered = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(chunk))
-        prompt = RATING_PROMPT.format(subtitle_list=numbered)
-        batch = structured_completion(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            schema=RatingBatch,
-            timeout=timeout,
-        )
-        all_ratings.extend(batch.ratings)
-    return all_ratings
-
-
 def run_calibration(
     conn: sqlite3.Connection,
     samples: int = 50,
@@ -147,7 +124,7 @@ def run_calibration(
         click.echo(f"  min_sim={min_sim:.2f}: generated {samples}, "
                     f"remixed={remix_count} ({remix_rate:.0%}), rating...")
 
-        ratings = _rate_batch_raw(subtitles, model)
+        ratings = rate_batch_raw(subtitles, model)
         avg = sum(r.coherence + r.evocativeness + r.surprise for r in ratings) / (3 * len(ratings))
         dims = {
             "coherence": sum(r.coherence for r in ratings) / len(ratings),
@@ -186,7 +163,7 @@ def run_calibration(
         click.echo(f"  remix_prob={remix_prob:.1f}: generated {samples}, "
                     f"remixed={remix_count} ({remix_rate:.0%}), rating...")
 
-        ratings = _rate_batch_raw(subtitles, model)
+        ratings = rate_batch_raw(subtitles, model)
         avg = sum(r.coherence + r.evocativeness + r.surprise for r in ratings) / (3 * len(ratings))
         dims = {
             "coherence": sum(r.coherence for r in ratings) / len(ratings),
