@@ -13,7 +13,7 @@ from subtitle_generator.extract_openlibrary import (
     extract_from_ol_dump,
 )
 from subtitle_generator.calibrate import run_calibration
-from subtitle_generator.eval_harness import DEFAULT_RATER_MODEL
+from subtitle_generator.eval_harness import DEFAULT_RATER_MODEL, DEFAULT_PROPOSER_MODEL
 from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
 from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, precompute_remix_data, slot_stats
 from subtitle_generator.jacket import (
@@ -417,6 +417,59 @@ def calibrate_remix_cmd(samples: int, model: str):
     """
     conn = get_db()
     run_calibration(conn, samples=samples, model=model)
+    conn.close()
+
+
+@cli.command()
+@click.option("--phase", type=click.Choice(["remix", "tone", "all"]), default="all", help="Which phase to run (default: all).")
+@click.option("--iterations", default=30, type=click.IntRange(min=1), help="Autoresearch iterations for tone phase (default: 30).")
+@click.option("--samples", default=50, type=click.IntRange(min=1), help="Subtitles per level for remix phase (default: 50).")
+@click.option("--rater-model", default=DEFAULT_RATER_MODEL, help=f"Model for rating subtitles (default: {DEFAULT_RATER_MODEL}).")
+@click.option("--proposer-model", default=DEFAULT_PROPOSER_MODEL, help=f"Model for proposing param changes (default: {DEFAULT_PROPOSER_MODEL}).")
+@click.option("--results-file", default="results.tsv", help="TSV file for experiment log (default: results.tsv).")
+@click.option("--dry-run", is_flag=True, help="Show proposals without evaluating or applying.")
+@click.option("--show-results", is_flag=True, help="Display past tuning results and exit.")
+def tune(phase: str, iterations: int, samples: int, rater_model: str, proposer_model: str, results_file: str, dry_run: bool, show_results: bool):
+    """Unified tuning pipeline (autoresearch-inspired).
+
+    Runs two phases:
+      Phase 1 (remix): Grid sweep over min_sim and remix_prob
+      Phase 2 (tone): LLM-proposed single-parameter hill-climbing
+
+    \b
+    Examples:
+      subtitle-gen tune                              # full pipeline
+      subtitle-gen tune --phase tone --iterations 10 # tone only, quick
+      subtitle-gen tune --phase remix --samples 100  # remix only, high confidence
+      subtitle-gen tune --dry-run                    # show proposals only
+      subtitle-gen tune --show-results               # view experiment history
+    """
+    if show_results:
+        from pathlib import Path
+        path = Path(results_file)
+        if not path.exists():
+            click.echo(f"No results file found at {results_file}")
+            return
+        content = path.read_text()
+        lines = content.strip().split("\n")
+        click.echo(f"=== Tuning Results ({len(lines) - 1} experiments) ===\n")
+        # Format as aligned table
+        for line in lines:
+            click.echo(line)
+        return
+
+    from subtitle_generator.tune import run_full_tuning
+    conn = get_db()
+    run_full_tuning(
+        conn,
+        phase=phase,
+        iterations=iterations,
+        samples=samples,
+        rater_model=rater_model,
+        proposer_model=proposer_model,
+        results_file=results_file,
+        dry_run=dry_run,
+    )
     conn.close()
 
 
