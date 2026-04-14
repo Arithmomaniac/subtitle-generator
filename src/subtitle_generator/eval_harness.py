@@ -1,0 +1,294 @@
+"""Evaluation harness for the unified tuning pipeline.
+
+Immutable evaluation infrastructure (the "prepare.py" equivalent from
+Karpathy's autoresearch pattern).  Provides structured-output LLM rating,
+sample generation, tone-separation measurement, and composite scoring.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import sqlite3
+
+import click
+import litellm
+from pydantic import BaseModel
+
+from subtitle_generator.generate import TONE_TARGETS, generate_subtitle
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+DEFAULT_RATER_MODEL = "github_copilot/gpt-5.4-mini"
+DEFAULT_PROPOSER_MODEL = "github_copilot/gpt-5.4"
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas
+# ---------------------------------------------------------------------------
+
+
+class SubtitleRating(BaseModel):
+    coherence: int  # 1-10
+    evocativeness: int  # 1-10
+    surprise: int  # 1-10
+
+
+class RatingBatch(BaseModel):
+    ratings: list[SubtitleRating]
+
+
+class ParamProposal(BaseModel):
+    param: str  # config key to change
+    new_value: float  # proposed value
+    reasoning: str  # why this change
+
+
+# ---------------------------------------------------------------------------
+# structured_completion — auto-dispatch structured output
+# ---------------------------------------------------------------------------
+
+
+def structured_completion(
+    model: str,
+    messages: list,
+    schema: type[BaseModel],
+    **kwargs,
+) -> BaseModel:
+    """Structured output with auto-dispatch per model type.
+
+    GPT on /chat/completions: response_format=Pydantic (native json_schema)
+    Claude/Gemini/other: tool_choice (forced function call matching schema)
+    """
+    model_lower = model.lower()
+    use_native = "gpt" in model_lower and "5.4" not in model_lower
+
+    if use_native:
+        # Native JSON-schema mode (OpenAI-compatible)
+        resp = litellm.completion(
+            model=model,
+            messages=messages,
+            response_format=schema,
+            **kwargs,
+        )
+        content = resp.choices[0].message.content
+        return schema.model_validate_json(content)
+    else:
+        # Tool-call mode (Claude, Gemini, gpt-5.4 variants)
+        tool_schema = {
+            "type": "function",
+            "function": {
+                "name": schema.__name__,
+                "description": f"Return a {schema.__name__} object.",
+                "parameters": schema.model_json_schema(),
+            },
+        }
+        resp = litellm.completion(
+            model=model,
+            messages=messages,
+            tools=[tool_schema],
+            tool_choice={
+                "type": "function",
+                "function": {"name": schema.__name__},
+            },
+            **kwargs,
+        )
+        tool_call = resp.choices[0].message.tool_calls[0]
+        raw = tool_call.function.arguments
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return schema.model_validate(parsed)
+
+
+# ---------------------------------------------------------------------------
+# generate_sample_set
+# ---------------------------------------------------------------------------
+
+
+def generate_sample_set(
+    conn: sqlite3.Connection,
+    n: int = 50,
+    tone: str | None = None,  # "pop", "mainstream", "niche", or None
+    remix_prob: float = 0.0,
+    min_sim: float = 0.0,
+    seed_base: int = 1000,
+) -> list:
+    """Generate *n* subtitles with the given parameters."""
+    tone_target: dict[str, float] | None = None
+    if tone:
+        tone_target = {
+            slot: TONE_TARGETS[tone][slot]
+            for slot in ["list_item", "action_noun", "of_object"]
+        }
+
+    results = []
+    for i in range(n):
+        sub = generate_subtitle(
+            conn,
+            seed=seed_base + i,
+            tone_target=tone_target,
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+        results.append(sub)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# rate_quality
+# ---------------------------------------------------------------------------
+
+RATING_PROMPT = """\
+You are rating generated book subtitles for quality. Each subtitle follows \
+the pattern "X, Y, and the Z of W".
+
+Rate EACH subtitle on three dimensions (1-10 each):
+- **Coherence**: Does it make grammatical and semantic sense? \
+(10 = perfectly natural, 1 = word salad)
+- **Evocativeness**: Does it evoke curiosity — would you pick up this book? \
+(10 = instantly compelling, 1 = completely boring)
+- **Surprise**: Does it pair unexpected concepts in an interesting way? \
+(10 = delightfully unexpected, 1 = completely predictable)
+
+Subtitles:
+{subtitle_list}"""
+
+
+def rate_quality(
+    subtitles: list[str],
+    model: str = DEFAULT_RATER_MODEL,
+    timeout: float = 60.0,
+) -> float:
+    """Rate a batch of subtitles via LLM.  Returns normalised average (0-1)."""
+    if not subtitles:
+        return 0.0
+
+    chunk_size = 25
+    all_ratings: list[SubtitleRating] = []
+
+    for start in range(0, len(subtitles), chunk_size):
+        chunk = subtitles[start : start + chunk_size]
+        numbered = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(chunk))
+        prompt = RATING_PROMPT.format(subtitle_list=numbered)
+
+        click.echo(
+            f"  rating chunk {start // chunk_size + 1} "
+            f"({len(chunk)} subtitles) …"
+        )
+
+        batch = structured_completion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            schema=RatingBatch,
+            timeout=timeout,
+        )
+        all_ratings.extend(batch.ratings)
+
+    total = sum(
+        r.coherence + r.evocativeness + r.surprise for r in all_ratings
+    )
+    return total / (30.0 * len(all_ratings))
+
+
+# ---------------------------------------------------------------------------
+# measure_tone_separation
+# ---------------------------------------------------------------------------
+
+_SLOT_MAP = {
+    "item1": "list_item",
+    "item2": "list_item",
+    "action_noun": "action_noun",
+    "of_object": "of_object",
+}
+
+
+def _filler_log_freqs(
+    conn: sqlite3.Connection,
+    subtitles: list,
+) -> list[float]:
+    """Return log10(1+freq) for every filler in the subtitle list."""
+    scores: list[float] = []
+    for sub in subtitles:
+        for attr, slot_type in _SLOT_MAP.items():
+            filler = getattr(sub, attr)
+            row = conn.execute(
+                "SELECT freq FROM slot_fillers WHERE filler = ? AND slot_type = ?",
+                (filler, slot_type),
+            ).fetchone()
+            freq = row[0] if row else 0
+            scores.append(math.log10(1 + freq))
+    return scores
+
+
+def _histogram_overlap(a: list[float], b: list[float], bins: int = 10) -> float:
+    """Compute histogram overlap coefficient between two distributions."""
+    lo, hi = 0.0, 3.0
+    bin_width = (hi - lo) / bins
+
+    def _bin_counts(vals: list[float]) -> list[float]:
+        counts = [0.0] * bins
+        for v in vals:
+            idx = int((v - lo) / bin_width)
+            idx = max(0, min(bins - 1, idx))
+            counts[idx] += 1
+        total = sum(counts) or 1.0
+        return [c / total for c in counts]
+
+    ha = _bin_counts(a)
+    hb = _bin_counts(b)
+    return sum(min(x, y) for x, y in zip(ha, hb))
+
+
+def measure_tone_separation(
+    conn: sqlite3.Connection,
+    n: int = 30,
+    seed_base: int = 5000,
+) -> float:
+    """Distributional separation between pop and niche subtitles (0-1).
+
+    1.0 = perfect separation, 0.0 = identical distributions.
+    """
+    click.echo(f"  generating {n} pop + {n} niche subtitles …")
+    pop_subs = generate_sample_set(conn, n=n, tone="pop", seed_base=seed_base)
+    niche_subs = generate_sample_set(
+        conn, n=n, tone="niche", seed_base=seed_base + n
+    )
+
+    pop_scores = _filler_log_freqs(conn, pop_subs)
+    niche_scores = _filler_log_freqs(conn, niche_subs)
+
+    overlap = _histogram_overlap(pop_scores, niche_scores)
+    return 1.0 - overlap
+
+
+# ---------------------------------------------------------------------------
+# composite_score
+# ---------------------------------------------------------------------------
+
+
+def composite_score(
+    quality: float,
+    separation: float,
+    quality_weight: float = 0.5,
+) -> float:
+    """Weighted average of quality and tone-separation scores."""
+    return quality_weight * quality + (1.0 - quality_weight) * separation
+
+
+# ---------------------------------------------------------------------------
+# Smoke test
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    click.echo("=== eval_harness smoke test ===")
+
+    # Quick schema round-trip
+    r = SubtitleRating(coherence=7, evocativeness=8, surprise=6)
+    b = RatingBatch(ratings=[r])
+    click.echo(f"RatingBatch JSON: {b.model_dump_json()}")
+
+    p = ParamProposal(param="remix_prob", new_value=0.5, reasoning="test")
+    click.echo(f"ParamProposal JSON: {p.model_dump_json()}")
+
+    click.echo(f"composite_score(0.8, 0.6) = {composite_score(0.8, 0.6)}")
+    click.echo("smoke test passed ✓")
