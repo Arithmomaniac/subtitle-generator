@@ -7,8 +7,10 @@ sample generation, tone-separation measurement, and composite scoring.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import re
 import sqlite3
 
 import click
@@ -49,6 +51,26 @@ class ParamProposal(BaseModel):
 # structured_completion — auto-dispatch structured output
 # ---------------------------------------------------------------------------
 
+# Models that require the /responses API (not /chat/completions)
+_RESPONSES_ONLY_MODELS = {"gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"}
+
+
+def _needs_responses_api(model: str) -> bool:
+    """Check if this model needs the /responses API."""
+    # Strip provider prefix (e.g. "github_copilot/gpt-5.4-mini" → "gpt-5.4-mini")
+    short = model.rsplit("/", 1)[-1] if "/" in model else model
+    return short in _RESPONSES_ONLY_MODELS
+
+
+def _extract_responses_text(output: list) -> str:
+    """Extract text content from a Responses API output list."""
+    for item in output:
+        if hasattr(item, "content") and item.content:
+            for c in item.content:
+                if hasattr(c, "text"):
+                    return c.text
+    return ""
+
 
 def structured_completion(
     model: str,
@@ -59,10 +81,35 @@ def structured_completion(
     """Structured output with auto-dispatch per model type.
 
     GPT on /chat/completions: response_format=Pydantic (native json_schema)
+    GPT 5.4 family on /responses: litellm.aresponses() with prompt-based JSON
     Claude/Gemini/other: tool_choice (forced function call matching schema)
     """
     model_lower = model.lower()
-    use_native = "gpt" in model_lower and "5.4" not in model_lower
+
+    if _needs_responses_api(model):
+        # Responses API — prompt for JSON, parse from output
+        user_content = messages[-1]["content"] if messages else ""
+        schema_hint = json.dumps(schema.model_json_schema(), indent=2)
+        prompt = (
+            f"{user_content}\n\n"
+            f"Respond with ONLY valid JSON matching this schema:\n{schema_hint}"
+        )
+        timeout = kwargs.pop("timeout", 60.0)
+        resp = asyncio.run(litellm.aresponses(
+            model=model,
+            input=prompt,
+            max_output_tokens=kwargs.pop("max_tokens", 4096),
+            timeout=timeout,
+        ))
+        text = _extract_responses_text(resp.output)
+        # Strip markdown fences if present
+        text = text.strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+        return schema.model_validate_json(text)
+
+    use_native = "gpt" in model_lower or "o3" in model_lower or "o4" in model_lower
 
     if use_native:
         # Native JSON-schema mode (OpenAI-compatible)
@@ -75,7 +122,7 @@ def structured_completion(
         content = resp.choices[0].message.content
         return schema.model_validate_json(content)
     else:
-        # Tool-call mode (Claude, Gemini, gpt-5.4 variants)
+        # Tool-call mode (Claude, Gemini, etc.)
         tool_schema = {
             "type": "function",
             "function": {

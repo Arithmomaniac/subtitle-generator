@@ -126,7 +126,8 @@ def _ensure_results_header(results_file: str) -> None:
     if not path.exists():
         path.write_text(
             "iteration\tparam\told_value\tnew_value\t"
-            "quality\tseparation\tcomposite\tstatus\tdescription\n"
+            "quality\tseparation\tcomposite\tstatus\tdescription\n",
+            encoding="utf-8",
         )
 
 
@@ -143,7 +144,7 @@ def _append_result(
     description: str,
 ) -> None:
     """Append one line to the results TSV."""
-    with open(results_file, "a") as f:
+    with open(results_file, "a", encoding="utf-8") as f:
         f.write(
             f"{iteration}\t{param}\t{old_value}\t{new_value}\t"
             f"{quality:.4f}\t{separation:.4f}\t{comp:.4f}\t"
@@ -250,6 +251,7 @@ Consider what previous experiments tell you about which direction to move.
             model=proposer_model,
             messages=[{"role": "user", "content": proposal_prompt}],
             schema=ParamProposal,
+            timeout=180.0,
         )
 
         # Validate the proposed parameter
@@ -308,15 +310,15 @@ Consider what previous experiments tell you about which direction to move.
 
         if new_score > current_score:
             status = "keep"
-            quality, separation, current_score = (
-                new_quality, new_separation, new_score,
-            )
             click.echo(
                 f"  Quality: {quality:.3f} → {new_quality:.3f}  "
                 f"Separation: {separation:.3f} → {new_separation:.3f}  "
-                f"Composite: {current_score - delta:.3f} → {new_score:.3f}"
+                f"Composite: {current_score:.3f} → {new_score:.3f}"
             )
             click.echo(f"  → KEEP (+{delta:.3f})\n")
+            quality, separation, current_score = (
+                new_quality, new_separation, new_score,
+            )
         else:
             status = "discard"
             # Revert: restore old value or remove if it was a default
