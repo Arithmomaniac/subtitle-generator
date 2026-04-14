@@ -90,7 +90,7 @@ The web app supports two modes:
 |---|---|---|
 | **Frontend** | Served by `subtitle-gen serve` | Azure Blob Storage static website |
 | **Backend** | stdlib HTTP server | Azure Functions (Flex Consumption) |
-| **Database** | Full 3 GB SQLite | Mini DB built from CSVs |
+| **Database** | Full 3 GB SQLite | Mini DB built from CSVs (no vectors) |
 | **Jacket** | Full LLM generation | Prompt-only (copy to your LLM) |
 | **Monitoring** | -- | App Insights + Log Analytics + email alerts |
 
@@ -134,10 +134,11 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 | `extract` | Parse MARC files into SQLite |
 | `extract-ol` | Parse Open Library dump (deduplicates against LOC) |
 | `analyze` | POS-tag subtitles, extract structural templates |
-| `build-slots` | Extract slot fillers (regex + NLP validated) |
+| `build-slots` | Extract slot fillers (regex + NLP validated) + precompute vectors |
 | `generate` | Random subtitle generation (+ optional jacket) |
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
+| `precompute-vectors` | Recompute remix vector decomposition (included in `build-slots`) |
 | `serve` | Start the web app locally |
 | `export-db` | Export mini SQLite directly from full DB |
 | `export-data` | Export slot data as CSV files (for Git) |
@@ -169,7 +170,7 @@ web/
 
 - **Python 3.13** with [uv](https://docs.astral.sh/uv/)
 - **pymarc** — MARC record parsing
-- **spaCy** (`en_core_web_md`) — NLP (POS tagging, NER, word vectors)
+- **spaCy** (`en_core_web_md`) — NLP at build time (POS tagging, NER, word vectors for remix precomputation)
 - **SQLite** — subtitle storage and slot filler tables
 - **click** — CLI framework
 - **GitHub Copilot SDK** — LLM for jacket generation
