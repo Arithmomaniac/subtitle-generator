@@ -23,6 +23,68 @@ from subtitle_generator.slots import build_slots, ensure_slot_tables
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
 _VALID_TONES = set(_TONE_CHOICES.keys())
+_TONE_OVERRIDE_MAP = {"p": "pop", "m": "mainstream", "n": "niche"}
+
+
+def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
+    """Compute system tone tier and score for a subtitle."""
+    from subtitle_generator.config import load_tuning_config
+    _, score = compute_accessibility(subtitle, conn)
+    cfg = load_tuning_config(conn)
+    if score > cfg["accessibility_threshold_pop"]:
+        return "pop", score
+    elif score >= cfg["accessibility_threshold_mainstream"]:
+        return "mainstream", score
+    return "niche", score
+
+
+def _prompt_review(conn, subtitle_text: str) -> int | None:
+    """Interactive review prompt. Returns 1 (thumbs up), -1 (down), or None (skipped)."""
+    from subtitle_generator.feedback import store_rating
+
+    # Thumbs
+    thumbs_input = click.prompt(
+        click.style("     Good subtitle? [y/n/Enter to skip]", fg="green"),
+        default="", show_default=False,
+    ).strip().lower()
+
+    if not thumbs_input:
+        return None
+
+    thumbs = 1 if thumbs_input in ("y", "yes") else -1
+
+    # Tone override
+    tone_input = click.prompt(
+        click.style("     Tone? [p=pop / m=mainstream / n=niche / Enter to skip]", fg="blue"),
+        default="", show_default=False,
+    ).strip().lower()
+    tone_override = _TONE_OVERRIDE_MAP.get(tone_input)
+
+    # Comment
+    comment = click.prompt(
+        click.style("     Comment [Enter to skip]", fg="magenta"),
+        default="", show_default=False,
+    ).strip() or None
+
+    # Store
+    system_tone, score = _get_system_tone(subtitle_text, conn)
+    store_rating(
+        conn,
+        subtitle_text,
+        system_tone=system_tone,
+        thumbs=thumbs,
+        tone_override=tone_override,
+        free_text=comment,
+    )
+
+    # Feedback line
+    if tone_override:
+        match_sym = "✓" if tone_override == system_tone else "✗"
+        click.echo(f"     ✓ saved (system: {system_tone}, you: {tone_override} {match_sym}, score: {score:.2f})")
+    else:
+        click.echo(f"     ✓ saved (system: {system_tone}, score: {score:.2f})")
+
+    return thumbs
 
 
 def _parse_tone(tone_str: str | None) -> set[str] | None:
@@ -256,7 +318,8 @@ def precompute_vectors_cmd():
 @click.option("--remix/--no-remix", default=True, help="Enable/disable of-object remixing (default: enabled).")
 @click.option("--remix-prob", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
 @click.option("--min-sim", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
-def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None):
+@click.option("--review", is_flag=True, help="Interactively rate each subtitle (thumbs, tone override, comment).")
+def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool):
     """Generate random subtitles in the "X, Y, and the Z of W" pattern.
 
     Draws slot fillers from the extracted pool, optionally remixing multi-word
@@ -269,6 +332,7 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
       subtitle-gen generate --tone pop              # bias toward accessible
       subtitle-gen generate --no-remix              # original of-objects only
       subtitle-gen generate --jacket                # 1 subtitle + full jacket
+      subtitle-gen generate --review                # rate each subtitle
     """
     tone_set = _parse_tone(tone)
 
@@ -303,6 +367,10 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
             merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
         tone_target = merged
 
+    reviewed_count = 0
+    thumbs_up = 0
+    thumbs_down = 0
+
     for i in range(count):
         s = seed + i if seed is not None else None
         sub = generate_subtitle(conn, seed=s, tone_target=tone_target, remix_prob=effective_remix_prob, min_sim=min_sim)
@@ -321,6 +389,78 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
             if sources:
                 click.echo(format_sources(conn, sub))
                 click.echo()
+
+        if review:
+            result = _prompt_review(conn, sub.text)
+            if result:
+                reviewed_count += 1
+                if result == 1:
+                    thumbs_up += 1
+                elif result == -1:
+                    thumbs_down += 1
+
+    if review and reviewed_count > 0:
+        click.echo(f"\nReviewed {reviewed_count}/{count} subtitles ({thumbs_up} 👍, {thumbs_down} 👎). Ratings saved.")
+
+    conn.close()
+
+
+@cli.command()
+@click.option("--count", "-n", default=20, type=click.IntRange(min=1), help="Number of subtitles to review (default: 20).")
+@click.option("--tone", default=None, help="Filter by tone tier: pop, mainstream, niche.")
+def review(count: int, tone: str | None):
+    """Rate subtitles interactively in a dedicated review session.
+
+    Generates subtitles one at a time and prompts for thumbs up/down,
+    tone override, and optional comments. Ratings are stored in the DB
+    and used by the tuning pipeline.
+
+    \b
+    Examples:
+      subtitle-gen review                  # review 20 random subtitles
+      subtitle-gen review -n 10 --tone pop # review 10 pop subtitles
+    """
+    tone_set = _parse_tone(tone)
+
+    conn = get_db()
+    stats = slot_stats(conn)
+    if not stats:
+        raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
+
+    # Load calibrated remix settings
+    row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'").fetchone()
+    remix_prob = float(row[0]) if row else 0.8
+    row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'").fetchone()
+    min_sim = float(row[0]) if row else 0.1
+
+    tone_target = None
+    if tone_set:
+        merged = {}
+        for slot in ["list_item", "action_noun", "of_object"]:
+            merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
+        tone_target = merged
+
+    click.echo(f"Review session: {count} subtitles" + (f" (tone: {tone})" if tone else ""))
+    click.echo("Rate each subtitle — all prompts are skippable with Enter.\n")
+
+    reviewed = 0
+    thumbs_up = 0
+    thumbs_down = 0
+
+    for i in range(count):
+        sub = generate_subtitle(conn, tone_target=tone_target, remix_prob=remix_prob, min_sim=min_sim)
+        click.echo(f"  {i + 1:2d}. {sub.text}")
+
+        result = _prompt_review(conn, sub.text)
+        if result is not None:
+            reviewed += 1
+            if result == 1:
+                thumbs_up += 1
+            elif result == -1:
+                thumbs_down += 1
+        click.echo()
+
+    click.echo(f"Reviewed {reviewed}/{count} subtitles ({thumbs_up} 👍, {thumbs_down} 👎). Ratings saved.")
     conn.close()
 
 
@@ -429,7 +569,8 @@ def calibrate_remix_cmd(samples: int, model: str | None):
 @click.option("--results-file", default="results.tsv", help="TSV file for experiment log (default: results.tsv).")
 @click.option("--dry-run", is_flag=True, help="Show proposals without evaluating or applying.")
 @click.option("--show-results", is_flag=True, help="Display past tuning results and exit.")
-def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool):
+@click.option("--spot-check", is_flag=True, help="Pause for human spot-checks at exponentially-spaced iterations (1, 2, 4, 8…).")
+def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool, spot_check: bool):
     """Unified tuning pipeline (autoresearch-inspired).
 
     Runs two phases:
@@ -443,6 +584,7 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
       subtitle-gen tune --phase remix --samples 100  # remix only, high confidence
       subtitle-gen tune --dry-run                    # show proposals only
       subtitle-gen tune --show-results               # view experiment history
+      subtitle-gen tune --spot-check                 # with human spot-checks
     """
     if show_results:
         from pathlib import Path
@@ -469,6 +611,7 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
         proposer_model=proposer_model or DEFAULT_PROPOSER_MODEL,
         results_file=results_file,
         dry_run=dry_run,
+        spot_check=spot_check,
     )
     conn.close()
 

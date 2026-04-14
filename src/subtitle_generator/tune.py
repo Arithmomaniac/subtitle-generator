@@ -28,6 +28,7 @@ from subtitle_generator.eval_harness import (
     rate_quality,
     structured_completion,
 )
+from subtitle_generator.feedback import format_summary_for_proposer, get_summary, store_rating
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -145,6 +146,73 @@ def _evaluate(
 
 
 # ---------------------------------------------------------------------------
+# Spot-check helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_spot_check_iteration(i: int) -> bool:
+    """Exponential backoff: check at iterations 1, 2, 4, 8, 16, 32…"""
+    return i > 0 and (i & (i - 1)) == 0  # power of 2
+
+
+def _run_spot_check(
+    conn: sqlite3.Connection,
+    iteration: int,
+    total_iterations: int,
+    n_samples: int = 3,
+    seed_base: int = 1000,
+) -> float | None:
+    """Show sample subtitles and collect quick human ratings.
+
+    Returns human approval rate (0.0-1.0) or None if all skipped.
+    """
+    next_check = iteration * 2
+    if next_check > total_iterations:
+        next_check_str = "no more checks"
+    else:
+        next_check_str = f"next at iter {next_check}"
+    click.echo(click.style(
+        f"  ⏸ Spot check (iter {iteration} — {next_check_str}):",
+        fg="green", bold=True,
+    ))
+
+    samples = generate_sample_set(conn, n=n_samples, seed_base=seed_base + 500)
+    labels = "abcdefghij"
+    thumbs_count = 0
+    thumbs_up = 0
+
+    for j, sub in enumerate(samples):
+        label = labels[j] if j < len(labels) else str(j + 1)
+        click.echo(f"    {label}) {sub.text}")
+        response = click.prompt(
+            click.style("       Good? [y/n/Enter]", fg="green"),
+            default="", show_default=False,
+        ).strip().lower()
+        if response in ("y", "yes"):
+            thumbs = 1
+            thumbs_count += 1
+            thumbs_up += 1
+            store_rating(conn, sub.text, system_tone=None, thumbs=thumbs)
+        elif response in ("n", "no"):
+            thumbs = -1
+            thumbs_count += 1
+            store_rating(conn, sub.text, system_tone=None, thumbs=thumbs)
+
+    # Optional batch comment
+    comment = click.prompt(
+        click.style("  Batch comment [Enter to skip]", fg="magenta"),
+        default="", show_default=False,
+    ).strip()
+    if comment and thumbs_count > 0:
+        # Attach comment to the last rated subtitle
+        store_rating(conn, samples[-1].text, system_tone=None, free_text=comment)
+
+    if thumbs_count == 0:
+        return None
+    return thumbs_up / thumbs_count
+
+
+# ---------------------------------------------------------------------------
 # Main tuning loop
 # ---------------------------------------------------------------------------
 
@@ -156,6 +224,7 @@ def run_tone_tuning(
     proposer_model: str = DEFAULT_PROPOSER_MODEL,
     results_file: str = "results.tsv",
     dry_run: bool = False,
+    spot_check: bool = False,
 ) -> dict:
     """Autoresearch loop for tone parameters.
 
@@ -187,6 +256,12 @@ def run_tone_tuning(
         results_history = _load_results_history(results_file)
 
         # Propose a parameter change
+        # Include human feedback summary if enough ratings exist
+        human_feedback_section = ""
+        feedback_summary = get_summary(conn)
+        if feedback_summary:
+            human_feedback_section = "\n" + format_summary_for_proposer(feedback_summary) + "\n"
+
         proposal_prompt = f"""You are tuning parameters for a subtitle generator.
 
 ## Current parameter values:
@@ -205,10 +280,11 @@ def run_tone_tuning(
 
 ## Parameter bounds:
 {bounds_text}
-
+{human_feedback_section}
 Propose ONE parameter change that you think will improve the composite score.
 Focus on parameters with the biggest potential impact (bias_floor and spread have historically had the largest effect).
 Consider what previous experiments tell you about which direction to move.
+{f"Also consider the human feedback above — tone mismatches suggest the accessibility thresholds or tier centers may need adjustment." if human_feedback_section else ""}
 """
 
         click.echo("  proposing parameter change …")
@@ -272,6 +348,14 @@ Consider what previous experiments tell you about which direction to move.
             conn, rater_model, seed_base=1000 + i * 100,
         )
 
+        # Spot-check: exponential backoff (check at 1, 2, 4, 8, 16…)
+        human_approval = None
+        if spot_check and _is_spot_check_iteration(i):
+            human_approval = _run_spot_check(conn, i, iterations, seed_base=1000 + i * 100)
+            if human_approval is not None:
+                # Blend: 40% quality + 40% separation + 20% human
+                new_score = 0.4 * new_quality + 0.4 * new_separation + 0.2 * human_approval
+
         delta = new_score - current_score
 
         if new_score > current_score:
@@ -332,6 +416,7 @@ def run_full_tuning(
     proposer_model: str = DEFAULT_PROPOSER_MODEL,
     results_file: str = "results.tsv",
     dry_run: bool = False,
+    spot_check: bool = False,
 ) -> None:
     """Run both tuning phases.
 
@@ -353,4 +438,5 @@ def run_full_tuning(
             proposer_model=proposer_model,
             results_file=results_file,
             dry_run=dry_run,
+            spot_check=spot_check,
         )

@@ -82,5 +82,12 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
         return { error: "unreachable" };
       }
     },
+
+    /** Submit a human rating for a subtitle. */
+    async rate({ subtitle, thumbs, tone_override, system_tone, free_text } = {}) {
+      const result = await post("/api/rate", { subtitle, thumbs, tone_override, system_tone, free_text });
+      trackEvent("RateSubtitle", { thumbs: String(thumbs), tone_override: tone_override || "none" });
+      return result;
+    },
   };
 }

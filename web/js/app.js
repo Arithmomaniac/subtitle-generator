@@ -108,8 +108,35 @@ export function createApp() {
         this.subtitle = deriveSubtitleVM(result);
         this.sources = deriveSourcesVM(result);
         this.hasSubtitle = true;
+        this.ratingSubmitted = false;
+        this.ratingToneRevealed = false;
+        this.selectedTone = null;
       }
       this.loading = false;
+    },
+
+    // ── Rating ──
+    ratingSubmitted: false,
+    ratingToneRevealed: false,
+    selectedTone: null,
+    ratingSystemTone: null,
+    ratingScore: null,
+
+    async submitRating(thumbs) {
+      if (!this.hasSubtitle || this.ratingSubmitted) return;
+      const body = {
+        subtitle: this.subtitle.fullText,
+        thumbs,
+        tone_override: this.selectedTone,
+        system_tone: this.tone || null,
+      };
+      await api.rate(body);
+      this.ratingSubmitted = true;
+      this.ratingToneRevealed = true;
+    },
+
+    selectTone(tone) {
+      this.selectedTone = this.selectedTone === tone ? null : tone;
     },
 
     // ── Jacket ──

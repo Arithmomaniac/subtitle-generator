@@ -91,6 +91,20 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 .footer a{color:#6c8ebf;text-decoration:none}
 .footer a:hover{text-decoration:underline}
 
+/* Rating */
+.rating-section{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:10px 14px;margin-bottom:16px}
+.rating-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.rating-label{font-size:12px;color:#aaa;min-width:160px}
+.btn-thumb{width:40px;height:34px;border-radius:7px;border:1px solid #444;background:#2a2a4a;font-size:18px;cursor:pointer;transition:all .12s}
+.btn-thumb:hover:not(:disabled){transform:translateY(-1px)}
+.btn-thumb:disabled{opacity:.5;cursor:not-allowed}
+.btn-thumb-up:hover:not(:disabled),.btn-thumb-up.active{background:#2d6a4f;border-color:#3fb950}
+.btn-thumb-down:hover:not(:disabled),.btn-thumb-down.active{background:#4a2028;border-color:#f85149}
+.btn-tone{padding:4px 14px;border-radius:14px;border:1px solid #3a6b8c;background:#1a2a3a;color:#a8c8dc;font-size:11px;cursor:pointer;transition:all .12s}
+.btn-tone:hover{border-color:#58a6ff}
+.btn-tone.active{background:#e07a5f;border-color:#e07a5f;color:#fff}
+.rating-reveal{font-size:11px;color:#81b29a;padding:4px 0}
+
 /* Spinner */
 @keyframes spin{to{transform:rotate(360deg)}}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #444;border-top-color:#e07a5f;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
@@ -171,6 +185,24 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
       <template x-for="(slot, i) in subtitle.slots" :key="i">
         <span :class="slot.isPunc ? 'punc' : 'slot ' + slot.cls" x-text="slot.text"></span>
       </template>
+    </div>
+  </div>
+
+  <!-- Rating -->
+  <div class="rating-section" x-show="hasSubtitle" x-cloak>
+    <div class="rating-row">
+      <span class="rating-label">Good subtitle?</span>
+      <button class="btn-thumb btn-thumb-up" :class="{ active: ratingSubmitted && ratingSubmitted === 1 }" @click="submitRating(1)" :disabled="ratingSubmitted">👍</button>
+      <button class="btn-thumb btn-thumb-down" :class="{ active: ratingSubmitted && ratingSubmitted === -1 }" @click="submitRating(-1)" :disabled="ratingSubmitted">👎</button>
+    </div>
+    <div class="rating-row" x-show="!ratingSubmitted">
+      <span class="rating-label">Where does this belong?</span>
+      <button class="btn-tone" :class="{ active: selectedTone === 'pop' }" @click="selectTone('pop')">Pop</button>
+      <button class="btn-tone" :class="{ active: selectedTone === 'mainstream' }" @click="selectTone('mainstream')">Mainstream</button>
+      <button class="btn-tone" :class="{ active: selectedTone === 'niche' }" @click="selectTone('niche')">Niche</button>
+    </div>
+    <div class="rating-reveal" x-show="ratingToneRevealed" x-cloak>
+      ✓ Rating saved<template x-if="selectedTone"> — you said: <strong x-text="selectedTone"></strong></template>
     </div>
   </div>
 

@@ -190,6 +190,44 @@ def _handle_jacket(body: dict) -> tuple[int, dict]:
         conn.close()
 
 
+# -- /api/rate ---------------------------------------------------------------
+
+
+def _handle_rate(body: dict) -> tuple[int, dict]:
+    """Store a human rating for a subtitle."""
+    subtitle = body.get("subtitle")
+    if not subtitle or not isinstance(subtitle, str):
+        return 400, {"error": "subtitle is required and must be a non-empty string"}
+
+    thumbs = body.get("thumbs")
+    if thumbs is not None:
+        if thumbs not in (1, -1):
+            return 400, {"error": "thumbs must be 1 (up) or -1 (down)"}
+
+    tone_override = body.get("tone_override")
+    if tone_override and tone_override not in ("pop", "mainstream", "niche"):
+        return 400, {"error": "tone_override must be pop, mainstream, or niche"}
+
+    free_text = body.get("free_text")
+    system_tone = body.get("system_tone")
+
+    from subtitle_generator.feedback import store_rating
+
+    conn = _get_db()
+    try:
+        row_id = store_rating(
+            conn,
+            subtitle,
+            system_tone=system_tone,
+            thumbs=thumbs,
+            tone_override=tone_override,
+            free_text=free_text if free_text else None,
+        )
+        return 200, {"id": row_id, "status": "saved"}
+    finally:
+        conn.close()
+
+
 # -- /api/models (local only) ------------------------------------------------
 
 _models_cache: list[dict] | None = None
@@ -307,6 +345,12 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/generate":
             try:
                 status, resp = _handle_generate(body)
+            except Exception as exc:
+                status, resp = 500, {"error": f"Internal error: {exc}"}
+            self._send_json(resp, status)
+        elif path == "/api/rate":
+            try:
+                status, resp = _handle_rate(body)
             except Exception as exc:
                 status, resp = 500, {"error": f"Internal error: {exc}"}
             self._send_json(resp, status)
