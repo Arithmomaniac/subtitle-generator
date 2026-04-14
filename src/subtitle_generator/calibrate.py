@@ -9,55 +9,20 @@ Two-phase calibration:
   Phase 2: Sweep remix_prob at the optimal min_sim from Phase 1
 """
 
-import asyncio
 import json
-import re
 import sqlite3
 
 import click
 import numpy as np
 
+from subtitle_generator.eval_harness import (
+    RATING_PROMPT,
+    DEFAULT_RATER_MODEL,
+    RatingBatch,
+    SubtitleRating,
+    structured_completion,
+)
 from subtitle_generator.generate import generate_subtitle, _load_remix_context
-
-
-RATING_PROMPT = """\
-You are rating generated book subtitles for quality. Each subtitle follows \
-the pattern "X, Y, and the Z of W" where W is the of-object.
-
-Rate EACH subtitle on three dimensions (1-10 each):
-- **Coherence**: Does the of-object make grammatical and semantic sense? \
-(10 = perfectly natural, 1 = word salad)
-- **Evocativeness**: Does it evoke curiosity — would you pick up this book? \
-(10 = instantly compelling, 1 = completely boring)
-- **Surprise**: Does it pair unexpected concepts in an interesting way? \
-(10 = delightfully unexpected, 1 = completely predictable)
-
-Subtitles to rate:
-{subtitle_list}
-
-Respond with ONLY a JSON array, one object per subtitle in the same order:
-[{{"coherence": <1-10>, "evocativeness": <1-10>, "surprise": <1-10>}}, ...]"""
-
-
-def _parse_batch_ratings(text: str, expected_count: int) -> list[dict[str, int]]:
-    """Extract rating JSON array from LLM response."""
-    # Find JSON array in response
-    match = re.search(r"\[[\s\S]*\]", text)
-    if not match:
-        return []
-    try:
-        data = json.loads(match.group())
-        if isinstance(data, list):
-            results = []
-            for item in data:
-                if isinstance(item, dict) and all(k in item for k in ("coherence", "evocativeness", "surprise")):
-                    results.append({k: int(item[k]) for k in ("coherence", "evocativeness", "surprise")})
-                else:
-                    results.append({"coherence": 0, "evocativeness": 0, "surprise": 0})
-            return results
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return []
 
 
 def _compute_subtitle_centroid(conn: sqlite3.Connection, nlp) -> np.ndarray | None:
@@ -111,78 +76,30 @@ def _compute_baseline_stats(
     }
 
 
-async def _rate_batch(subtitles: list[str], model: str) -> list[dict]:
-    """Rate a batch of subtitles via LLM. Splits into chunks if needed."""
-    # With 50 subtitles the JSON array can get truncated; chunk to ~25
+def _rate_batch_raw(
+    subtitles: list[str], model: str, timeout: float = 60.0,
+) -> list[SubtitleRating]:
+    """Rate subtitles via structured_completion, chunking at 25."""
     chunk_size = 25
-    all_ratings = []
+    all_ratings: list[SubtitleRating] = []
     for start in range(0, len(subtitles), chunk_size):
-        chunk = subtitles[start:start + chunk_size]
-        ratings = await _rate_chunk(chunk, model, retries=2)
-        all_ratings.extend(ratings)
+        chunk = subtitles[start : start + chunk_size]
+        numbered = "\n".join(f"{i + 1}. {s}" for i, s in enumerate(chunk))
+        prompt = RATING_PROMPT.format(subtitle_list=numbered)
+        batch = structured_completion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            schema=RatingBatch,
+            timeout=timeout,
+        )
+        all_ratings.extend(batch.ratings)
     return all_ratings
-
-
-async def _rate_chunk(subtitles: list[str], model: str, retries: int = 2) -> list[dict]:
-    """Rate a chunk of subtitles in a single LLM call, with retry."""
-    from copilot import CopilotClient
-    from copilot.session import PermissionHandler
-
-    subtitle_list = "\n".join(f"{i+1}. {s}" for i, s in enumerate(subtitles))
-    prompt = RATING_PROMPT.format(subtitle_list=subtitle_list)
-
-    for attempt in range(retries + 1):
-        try:
-            async with CopilotClient() as client:
-                async with await client.create_session(
-                    on_permission_request=PermissionHandler.approve_all,
-                    model=model,
-                    infinite_sessions={"enabled": False},
-                ) as session:
-                    result = await session.send_and_wait(prompt, timeout=60.0)
-                    if result and result.data and result.data.content:
-                        ratings = _parse_batch_ratings(result.data.content, len(subtitles))
-                        if len(ratings) == len(subtitles):
-                            return ratings
-                        if attempt < retries:
-                            click.echo(f"    (got {len(ratings)}/{len(subtitles)} ratings, retrying...)")
-        except Exception as e:
-            if attempt < retries:
-                click.echo(f"    (attempt {attempt+1} failed: {e}, retrying...)")
-
-    # All retries failed
-    click.echo(f"    (batch rating failed after {retries+1} attempts)")
-    return [{"coherence": 0, "evocativeness": 0, "surprise": 0}] * len(subtitles)
-
-
-def _avg_score(ratings: list[dict]) -> float:
-    """Compute average across all three dimensions."""
-    if not ratings:
-        return 0.0
-    total = sum(
-        r["coherence"] + r["evocativeness"] + r["surprise"]
-        for r in ratings if r["coherence"] > 0
-    )
-    valid = sum(1 for r in ratings if r["coherence"] > 0)
-    return total / (valid * 3) if valid > 0 else 0.0
-
-
-def _dimension_avgs(ratings: list[dict]) -> dict[str, float]:
-    """Compute per-dimension averages."""
-    valid = [r for r in ratings if r["coherence"] > 0]
-    if not valid:
-        return {"coherence": 0, "evocativeness": 0, "surprise": 0}
-    return {
-        "coherence": sum(r["coherence"] for r in valid) / len(valid),
-        "evocativeness": sum(r["evocativeness"] for r in valid) / len(valid),
-        "surprise": sum(r["surprise"] for r in valid) / len(valid),
-    }
 
 
 def run_calibration(
     conn: sqlite3.Connection,
     samples: int = 50,
-    model: str = "gpt-5.4-mini",
+    model: str = DEFAULT_RATER_MODEL,
 ):
     """Two-phase LLM calibration of remix_prob and min_sim.
     
@@ -230,9 +147,13 @@ def run_calibration(
         click.echo(f"  min_sim={min_sim:.2f}: generated {samples}, "
                     f"remixed={remix_count} ({remix_rate:.0%}), rating...")
 
-        ratings = asyncio.run(_rate_batch(subtitles, model))
-        avg = _avg_score(ratings)
-        dims = _dimension_avgs(ratings)
+        ratings = _rate_batch_raw(subtitles, model)
+        avg = sum(r.coherence + r.evocativeness + r.surprise for r in ratings) / (3 * len(ratings))
+        dims = {
+            "coherence": sum(r.coherence for r in ratings) / len(ratings),
+            "evocativeness": sum(r.evocativeness for r in ratings) / len(ratings),
+            "surprise": sum(r.surprise for r in ratings) / len(ratings),
+        }
         phase1_results[min_sim] = {
             "avg": avg, "dims": dims, "remix_rate": remix_rate,
         }
@@ -265,9 +186,13 @@ def run_calibration(
         click.echo(f"  remix_prob={remix_prob:.1f}: generated {samples}, "
                     f"remixed={remix_count} ({remix_rate:.0%}), rating...")
 
-        ratings = asyncio.run(_rate_batch(subtitles, model))
-        avg = _avg_score(ratings)
-        dims = _dimension_avgs(ratings)
+        ratings = _rate_batch_raw(subtitles, model)
+        avg = sum(r.coherence + r.evocativeness + r.surprise for r in ratings) / (3 * len(ratings))
+        dims = {
+            "coherence": sum(r.coherence for r in ratings) / len(ratings),
+            "evocativeness": sum(r.evocativeness for r in ratings) / len(ratings),
+            "surprise": sum(r.surprise for r in ratings) / len(ratings),
+        }
         phase2_results[remix_prob] = {
             "avg": avg, "dims": dims, "remix_rate": remix_rate,
         }

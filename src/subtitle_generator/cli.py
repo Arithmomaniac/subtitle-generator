@@ -13,6 +13,7 @@ from subtitle_generator.extract_openlibrary import (
     extract_from_ol_dump,
 )
 from subtitle_generator.calibrate import run_calibration
+from subtitle_generator.eval_harness import DEFAULT_RATER_MODEL
 from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
 from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, precompute_remix_data, slot_stats
 from subtitle_generator.jacket import (
@@ -401,7 +402,7 @@ def slots(slot_type: str | None, sample: int):
 
 @cli.command("calibrate-remix")
 @click.option("--samples", default=50, type=click.IntRange(min=1), help="Subtitles per parameter level (default: 50). Rated in a single LLM call per level.")
-@click.option("--model", default="gpt-5.4-mini", help="LLM model for rating (default: gpt-5.4-mini).")
+@click.option("--model", default=DEFAULT_RATER_MODEL, help=f"LLM model for rating (default: {DEFAULT_RATER_MODEL}).")
 def calibrate_remix_cmd(samples: int, model: str):
     """Auto-tune remix parameters using LLM-based rating.
 
