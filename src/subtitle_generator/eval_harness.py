@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import re
 import sqlite3
 
 import click
@@ -82,32 +81,23 @@ def structured_completion(
     """Structured output with auto-dispatch per model type.
 
     GPT on /chat/completions: response_format=Pydantic (native json_schema)
-    GPT 5.4 family on /responses: litellm.aresponses() with prompt-based JSON
+    GPT 5.4 family on /responses: litellm.aresponses() with text_format (native)
     Claude/Gemini/other: tool_choice (forced function call matching schema)
     """
     model_lower = model.lower()
 
     if _needs_responses_api(model):
-        # Responses API — prompt for JSON, parse from output
+        # Responses API — native structured output via text_format
         user_content = messages[-1]["content"] if messages else ""
-        schema_hint = json.dumps(schema.model_json_schema(), indent=2)
-        prompt = (
-            f"{user_content}\n\n"
-            f"Respond with ONLY valid JSON matching this schema:\n{schema_hint}"
-        )
         timeout = kwargs.pop("timeout", 60.0)
         resp = asyncio.run(litellm.aresponses(
             model=model,
-            input=prompt,
+            input=user_content,
+            text_format=schema,
             max_output_tokens=kwargs.pop("max_tokens", 4096),
             timeout=timeout,
         ))
         text = _extract_responses_text(resp.output)
-        # Strip markdown fences if present
-        text = text.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
         return schema.model_validate_json(text)
 
     use_native = "gpt" in model_lower or "o3" in model_lower or "o4" in model_lower

@@ -1,6 +1,7 @@
 """Single source of truth for all tunable parameters and DB config loading."""
 
 import sqlite3
+from functools import lru_cache
 
 # All tunable parameters with their default values.
 # These are used as fallback when the DB config table has no tuned value.
@@ -25,23 +26,40 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
 }
 
 
-def load_tuning_config(conn: sqlite3.Connection | None = None) -> dict[str, float]:
-    """Load all tuning parameters from DB, falling back to defaults.
-
-    Returns a dict with all keys from ALL_TUNABLE_PARAMS, using DB values
-    where present and defaults otherwise. Single DB query.
-    """
-    config = dict(ALL_TUNABLE_PARAMS)  # start with defaults
-    if conn is None:
-        return config
+# Cache keyed by connection id — avoids repeated DB queries within a request.
+# The cache is small (one entry per unique connection) and auto-evicts.
+@lru_cache(maxsize=4)
+def _load_from_db(conn_id: int, conn: sqlite3.Connection) -> dict[str, float]:
+    """Internal: load config rows from DB (cached by connection identity)."""
+    overrides: dict[str, float] = {}
     try:
         rows = conn.execute("SELECT key, value FROM config").fetchall()
         for key, value in rows:
             if key in ALL_TUNABLE_PARAMS:
-                config[key] = float(value)
+                overrides[key] = float(value)
     except Exception:
         pass  # table might not exist yet
+    return overrides
+
+
+def load_tuning_config(conn: sqlite3.Connection | None = None) -> dict[str, float]:
+    """Load all tuning parameters from DB, falling back to defaults.
+
+    Returns a dict with all keys from ALL_TUNABLE_PARAMS, using DB values
+    where present and defaults otherwise. Results are cached per connection
+    to avoid repeated DB queries within a single request.
+    """
+    config = dict(ALL_TUNABLE_PARAMS)  # start with defaults
+    if conn is None:
+        return config
+    overrides = _load_from_db(id(conn), conn)
+    config.update(overrides)
     return config
+
+
+def invalidate_config_cache() -> None:
+    """Clear the config cache. Call after writing to the config table."""
+    _load_from_db.cache_clear()
 
 
 def get_tone_targets(conn: sqlite3.Connection | None = None) -> dict[str, dict[str, float]]:

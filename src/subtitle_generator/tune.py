@@ -17,7 +17,7 @@ import sqlite3
 
 import click
 
-from subtitle_generator.config import ALL_TUNABLE_PARAMS, load_tuning_config
+from subtitle_generator.config import ALL_TUNABLE_PARAMS, invalidate_config_cache, load_tuning_config
 from subtitle_generator.eval_harness import (
     DEFAULT_PROPOSER_MODEL,
     DEFAULT_RATER_MODEL,
@@ -265,6 +265,7 @@ Consider what previous experiments tell you about which direction to move.
             (proposal.param, str(new_value)),
         )
         conn.commit()
+        invalidate_config_cache()
 
         # Evaluate with new value
         new_quality, new_separation, new_score = _evaluate(
@@ -297,6 +298,7 @@ Consider what previous experiments tell you about which direction to move.
                     (proposal.param, str(old_value)),
                 )
             conn.commit()
+            invalidate_config_cache()
             click.echo(
                 f"  Quality: {quality:.3f} → {new_quality:.3f}  "
                 f"Separation: {separation:.3f} → {new_separation:.3f}  "
