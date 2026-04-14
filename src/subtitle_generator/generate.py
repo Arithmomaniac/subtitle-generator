@@ -44,10 +44,41 @@ class GeneratedSubtitle:
     remix_similarity: float | None = None
 
 
+_DEFAULT_WEIGHTED_SAMPLE_SPREAD = 0.4
+_DEFAULT_WEIGHTED_SAMPLE_BIAS_FLOOR = 0.05
+
+
+def _load_generate_config(conn: sqlite3.Connection) -> dict:
+    """Load tuning parameters from DB config table, falling back to defaults."""
+    config: dict[str, float] = {}
+    rows = conn.execute(
+        "SELECT key, value FROM config WHERE key LIKE 'tone_target_%' "
+        "OR key IN ('weighted_sample_spread', 'weighted_sample_bias_floor')"
+    ).fetchall()
+    for key, value in rows:
+        config[key] = float(value)
+    return config
+
+
+def _get_spread(conn: sqlite3.Connection | None = None) -> float:
+    if conn is None:
+        return _DEFAULT_WEIGHTED_SAMPLE_SPREAD
+    config = _load_generate_config(conn)
+    return config.get("weighted_sample_spread", _DEFAULT_WEIGHTED_SAMPLE_SPREAD)
+
+
+def _get_bias_floor(conn: sqlite3.Connection | None = None) -> float:
+    if conn is None:
+        return _DEFAULT_WEIGHTED_SAMPLE_BIAS_FLOOR
+    config = _load_generate_config(conn)
+    return config.get("weighted_sample_bias_floor", _DEFAULT_WEIGHTED_SAMPLE_BIAS_FLOOR)
+
+
 def _weighted_sample(
     rows: list[tuple[str, int]], k: int,
     rng: random.Random | None = None,
     tone_target: float | None = None,
+    conn: sqlite3.Connection | None = None,
 ) -> list[str]:
     """Pick k unique fillers weighted by sqrt(freq), optionally biased by tone.
 
@@ -59,12 +90,12 @@ def _weighted_sample(
     weights = [math.sqrt(r[1]) for r in rows]
 
     if tone_target is not None:
-        spread = 0.4
+        spread = _get_spread(conn)
+        bias_floor = _get_bias_floor(conn)
         for i, (_, freq) in enumerate(rows):
             filler_score = math.log10(1 + freq)
             bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
-            # Aggressive blend: near-zero floor so distant fillers are strongly suppressed
-            weights[i] *= (0.05 + 0.95 * bias)
+            weights[i] *= (bias_floor + (1 - bias_floor) * bias)
 
     chosen = []
     # Weighted sampling without replacement
@@ -79,11 +110,28 @@ def _weighted_sample(
 
 # Tone target scores for filler biasing (log10 scale), per slot type.
 # of_object has a much thinner pop tail, so its targets are lower.
-TONE_TARGETS = {
+_DEFAULT_TONE_TARGETS = {
     "pop": {"list_item": 1.5, "action_noun": 1.5, "of_object": 1.0},
     "mainstream": {"list_item": 1.0, "action_noun": 1.0, "of_object": 0.8},
     "niche": {"list_item": 0.25, "action_noun": 0.25, "of_object": 0.25},
 }
+
+# Module-level for import compatibility — uses defaults when no DB connection
+TONE_TARGETS = _DEFAULT_TONE_TARGETS
+
+
+def _get_tone_targets(conn: sqlite3.Connection | None = None) -> dict:
+    """Get TONE_TARGETS from DB config or defaults."""
+    if conn is None:
+        return _DEFAULT_TONE_TARGETS
+    config = _load_generate_config(conn)
+    targets: dict[str, dict[str, float]] = {}
+    for tier in ("pop", "mainstream", "niche"):
+        targets[tier] = {}
+        for slot in ("list_item", "action_noun", "of_object"):
+            key = f"tone_target_{tier}_{slot}"
+            targets[tier][slot] = config.get(key, _DEFAULT_TONE_TARGETS[tier][slot])
+    return targets
 
 # --- Remix infrastructure ---
 
@@ -501,7 +549,7 @@ def compose_compound(
         ).fetchall()
         if not mod_rows:
             return None
-        modifier = _weighted_sample(mod_rows, 1, rng, mod_target)[0]
+        modifier = _weighted_sample(mod_rows, 1, rng, mod_target, conn)[0]
 
     if locked_head is not None:
         head = locked_head
@@ -512,7 +560,7 @@ def compose_compound(
         ).fetchall()
         if not head_rows:
             return None
-        head = _weighted_sample(head_rows, 1, rng, mod_target)[0]
+        head = _weighted_sample(head_rows, 1, rng, mod_target, conn)[0]
 
     composed = f"{modifier} {head}"
     parts = {"modifier": modifier, "head": head}
@@ -546,7 +594,7 @@ def compose_prepositional(
         ).fetchall()
         if not topic_rows:
             return None
-        topic = _weighted_sample(topic_rows, 1, rng, obj_target)[0]
+        topic = _weighted_sample(topic_rows, 1, rng, obj_target, conn)[0]
 
     if locked_complement is not None:
         complement = locked_complement
@@ -558,7 +606,7 @@ def compose_prepositional(
         ).fetchall()
         if not comp_rows:
             return None
-        complement = _weighted_sample(comp_rows, 1, rng, obj_target)[0]
+        complement = _weighted_sample(comp_rows, 1, rng, obj_target, conn)[0]
 
     composed = f"{topic} {prep} {complement}"
 
@@ -636,20 +684,20 @@ def generate_subtitle(
         pool = [(f, w) for f, w in list_rows if f != locks["item1"]]
         if not pool:
             pool = list_rows
-        items = [locks["item1"], _weighted_sample(pool, 1, rng, list_target)[0]]
+        items = [locks["item1"], _weighted_sample(pool, 1, rng, list_target, conn)[0]]
     elif locks and "item2" in locks:
         pool = [(f, w) for f, w in list_rows if f != locks["item2"]]
         if not pool:
             pool = list_rows
-        items = [_weighted_sample(pool, 1, rng, list_target)[0], locks["item2"]]
+        items = [_weighted_sample(pool, 1, rng, list_target, conn)[0], locks["item2"]]
     else:
-        items = _weighted_sample(list_rows, 2, rng, list_target)
+        items = _weighted_sample(list_rows, 2, rng, list_target, conn)
 
     # Draw or lock action noun
     if locks and "action_noun" in locks:
         action_noun = locks["action_noun"]
     else:
-        action_noun = _weighted_sample(action_rows, 1, rng, action_target)[0]
+        action_noun = _weighted_sample(action_rows, 1, rng, action_target, conn)[0]
 
     # Draw or lock of-object
     remix_similarity = None
@@ -658,7 +706,7 @@ def generate_subtitle(
         remixed = False
         remix_parts = {}
     else:
-        of_object = _weighted_sample(obj_rows, 1, rng, obj_target)[0]
+        of_object = _weighted_sample(obj_rows, 1, rng, obj_target, conn)[0]
         remixed = False
         remix_parts = {}
 

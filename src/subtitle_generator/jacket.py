@@ -75,6 +75,27 @@ def _lookup_freq(conn: sqlite3.Connection, filler: str) -> int:
     return row[0] if row else 1
 
 
+_DEFAULT_ACCESSIBILITY_THRESHOLD_POP = 1.0
+_DEFAULT_ACCESSIBILITY_THRESHOLD_MAINSTREAM = 0.5
+_DEFAULT_TIER_CENTER_POP = 1.5
+_DEFAULT_TIER_CENTER_MAINSTREAM = 0.75
+_DEFAULT_TIER_CENTER_NICHE = 0.25
+_DEFAULT_SAMPLE_TONE_SPREAD = 0.6
+
+
+def _load_jacket_config(conn: sqlite3.Connection) -> dict:
+    """Load jacket tuning parameters from DB config table."""
+    config: dict[str, float] = {}
+    rows = conn.execute(
+        "SELECT key, value FROM config WHERE key LIKE 'tier_center_%' "
+        "OR key LIKE 'accessibility_threshold_%' "
+        "OR key = 'sample_tone_spread'"
+    ).fetchall()
+    for key, value in rows:
+        config[key] = float(value)
+    return config
+
+
 def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None) -> tuple[str, float]:
     """Compute an accessibility tier for a subtitle based on filler frequencies.
 
@@ -88,13 +109,17 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
     freqs = [_lookup_freq(conn, f) for f in fillers]
     score = sum(math.log10(1 + f) for f in freqs) / len(freqs)
 
+    config = _load_jacket_config(conn) if conn else {}
+    pop_thresh = config.get("accessibility_threshold_pop", _DEFAULT_ACCESSIBILITY_THRESHOLD_POP)
+    main_thresh = config.get("accessibility_threshold_mainstream", _DEFAULT_ACCESSIBILITY_THRESHOLD_MAINSTREAM)
+
     # Thresholds tuned to the distribution:
-    # score > 1.0 → fillers avg freq ~10+ (pop staples like Race, Power, America)
-    # score 0.5-1.0 → fillers avg freq ~2-10 (mainstream nonfiction)
-    # score < 0.5 → fillers avg freq ~1-2 (niche/academic)
-    if score > 1.0:
+    # score > pop_thresh → fillers avg freq ~10+ (pop staples like Race, Power, America)
+    # score main_thresh-pop_thresh → fillers avg freq ~2-10 (mainstream nonfiction)
+    # score < main_thresh → fillers avg freq ~1-2 (niche/academic)
+    if score > pop_thresh:
         tone = TONE_HIGH
-    elif score >= 0.5:
+    elif score >= main_thresh:
         tone = TONE_MEDIUM
     else:
         tone = TONE_LOW
@@ -102,25 +127,25 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
     return tone, score
 
 
-# Tier indices for probabilistic sampling
-_TIERS = [
-    ("pop", TONE_HIGH, 1.5),       # center score for pop
-    ("mainstream", TONE_MEDIUM, 0.75),  # center score for mainstream
-    ("niche", TONE_LOW, 0.25),     # center score for niche
-]
 
-
-def sample_tone(score: float, allowed_tiers: set[str] | None = None) -> tuple[str, str]:
+def sample_tone(score: float, allowed_tiers: set[str] | None = None, conn: sqlite3.Connection | None = None) -> tuple[str, str]:
     """Randomly sample a tone tier with probabilities centered on the score.
 
     Returns (tier_name, tone_text). Probabilities are Gaussian-weighted
     by distance from each tier's center score. allowed_tiers clamps the
     selection to a subset (zeroing out disallowed tiers and renormalizing).
     """
-    spread = 0.6  # controls how peaked the distribution is
+    config = _load_jacket_config(conn) if conn else {}
+    spread = config.get("sample_tone_spread", _DEFAULT_SAMPLE_TONE_SPREAD)
+
+    tiers_def = [
+        ("pop", TONE_HIGH, config.get("tier_center_pop", _DEFAULT_TIER_CENTER_POP)),
+        ("mainstream", TONE_MEDIUM, config.get("tier_center_mainstream", _DEFAULT_TIER_CENTER_MAINSTREAM)),
+        ("niche", TONE_LOW, config.get("tier_center_niche", _DEFAULT_TIER_CENTER_NICHE)),
+    ]
     weights = []
     tiers = []
-    for name, text, center in _TIERS:
+    for name, text, center in tiers_def:
         if allowed_tiers and name not in allowed_tiers:
             continue
         w = math.exp(-((score - center) / spread) ** 2)
@@ -253,7 +278,7 @@ def build_jacket_prompt(
         tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
     else:
         _, score = compute_accessibility(subtitle, conn)
-        tone_tier, tone = sample_tone(score, allowed_tiers)
+        tone_tier, tone = sample_tone(score, allowed_tiers, conn)
 
     full_prompt = JACKET_PROMPT.format(subtitle=subtitle, tone=tone)
 
@@ -307,7 +332,10 @@ async def _generate_jacket_async(
         _progress(f"Tone: override")
     else:
         _, score = compute_accessibility(subtitle, conn)
-        natural = "pop" if score > 1.0 else ("mainstream" if score >= 0.5 else "niche")
+        config = _load_jacket_config(conn) if conn else {}
+        pop_thresh = config.get("accessibility_threshold_pop", _DEFAULT_ACCESSIBILITY_THRESHOLD_POP)
+        main_thresh = config.get("accessibility_threshold_mainstream", _DEFAULT_ACCESSIBILITY_THRESHOLD_MAINSTREAM)
+        natural = "pop" if score > pop_thresh else ("mainstream" if score >= main_thresh else "niche")
         _progress(f"Tone: {tone_tier} (score: {score:.2f})")
 
     _progress(f"Connecting to {model}...")
