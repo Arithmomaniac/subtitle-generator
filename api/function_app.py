@@ -14,8 +14,8 @@ if _src_path.is_dir():
 
 import azure.functions as func
 
+from subtitle_generator.config import get_tone_targets
 from subtitle_generator.generate import (
-    TONE_TARGETS,
     GeneratedSubtitle,
     find_source,
     generate_subtitle,
@@ -147,9 +147,10 @@ def generate(req: func.HttpRequest) -> func.HttpResponse:
             # Build tone target
             tone_target = None
             if tone_set:
+                targets = get_tone_targets(conn)
                 merged: dict[str, float] = {}
                 for slot in ("list_item", "action_noun", "of_object"):
-                    merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
+                    merged[slot] = sum(targets[t][slot] for t in tone_set) / len(tone_set)
                 tone_target = merged
 
             sub = generate_subtitle(

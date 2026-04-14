@@ -9,11 +9,12 @@ dependencies = [
     "en-core-web-md",
     "en-core-web-sm",
     "github-copilot-sdk>=0.2.1",
-    "litellm>=1.72.0",
-    "pydantic>=2.0",
     "pymarc>=5.3.1",
     "spacy>=3.8.14",
 ]
+
+[project.optional-dependencies]
+tune = ["litellm>=1.72.0", "pydantic>=2.0"]
 
 [project.scripts]
 subtitle-gen = "subtitle_generator.cli:cli"

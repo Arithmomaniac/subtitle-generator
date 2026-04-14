@@ -1542,10 +1542,14 @@ dependencies = [
     { name = "en-core-web-md" },
     { name = "en-core-web-sm" },
     { name = "github-copilot-sdk" },
-    { name = "litellm" },
-    { name = "pydantic" },
     { name = "pymarc" },
     { name = "spacy" },
+]
+
+[package.optional-dependencies]
+tune = [
+    { name = "litellm" },
+    { name = "pydantic" },
 ]
 
 [package.metadata]
@@ -1554,11 +1558,12 @@ requires-dist = [
     { name = "en-core-web-md", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" },
     { name = "en-core-web-sm", url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" },
     { name = "github-copilot-sdk", specifier = ">=0.2.1" },
-    { name = "litellm", specifier = ">=1.72.0" },
-    { name = "pydantic", specifier = ">=2.0" },
+    { name = "litellm", marker = "extra == 'tune'", specifier = ">=1.72.0" },
+    { name = "pydantic", marker = "extra == 'tune'", specifier = ">=2.0" },
     { name = "pymarc", specifier = ">=5.3.1" },
     { name = "spacy", specifier = ">=3.8.14" },
 ]
+provides-extras = ["tune"]
 
 [[package]]
 name = "thinc"
