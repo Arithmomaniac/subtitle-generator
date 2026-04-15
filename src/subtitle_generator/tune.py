@@ -188,15 +188,23 @@ def _run_spot_check(
             click.style("       Good? [y/n/Enter]", fg="green"),
             default="", show_default=False,
         ).strip().lower()
+        tags_input = ""
+        if response in ("y", "yes", "n", "no"):
+            tags_input = click.prompt(
+                click.style("       Tags? [f/g/c/b / Enter]", fg="cyan"),
+                default="", show_default=False,
+            ).strip().lower()
+        tag_map = {"f": "funny", "g": "grammar", "c": "contradiction", "b": "boring"}
+        tags = [tag_map[c] for c in tags_input if c in tag_map] or None
         if response in ("y", "yes"):
             thumbs = 1
             thumbs_count += 1
             thumbs_up += 1
-            store_rating(conn, sub.text, system_tone=None, thumbs=thumbs)
+            store_rating(conn, sub.text, system_tone=None, thumbs=thumbs, tags=tags)
         elif response in ("n", "no"):
             thumbs = -1
             thumbs_count += 1
-            store_rating(conn, sub.text, system_tone=None, thumbs=thumbs)
+            store_rating(conn, sub.text, system_tone=None, thumbs=thumbs, tags=tags)
 
     # Optional batch comment
     comment = click.prompt(

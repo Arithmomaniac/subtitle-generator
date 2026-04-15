@@ -23,9 +23,10 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "tier_center_niche": 0.25,
     "accessibility_threshold_pop": 1.0,
     "accessibility_threshold_mainstream": 0.5,
-    "article_of_min_freq": 3.0,
-    "article_action_min_freq": 3.0,
+    "article_of_min_freq": 1.0,
+    "article_action_min_freq": 1.0,
     "article_remix_heuristic_threshold": 0.6,
+    "remix_reject_double_of": 1.0,
 }
 
 

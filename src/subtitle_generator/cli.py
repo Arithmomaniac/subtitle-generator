@@ -38,6 +38,9 @@ def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
     return "niche", score
 
 
+_TAG_MAP = {"f": "funny", "g": "grammar", "c": "contradiction", "b": "boring"}
+
+
 def _prompt_review(conn, subtitle_text: str) -> int | None:
     """Interactive review prompt. Returns 1 (thumbs up), -1 (down), or None (skipped)."""
     from subtitle_generator.feedback import store_rating
@@ -66,6 +69,13 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
         default="", show_default=False,
     ).strip() or None
 
+    # Tags
+    tags_input = click.prompt(
+        click.style("     Tags? [f=funny / g=grammar / c=contradiction / b=boring / Enter]", fg="cyan"),
+        default="", show_default=False,
+    ).strip().lower()
+    tags = [_TAG_MAP[c] for c in tags_input if c in _TAG_MAP] or None
+
     # Store
     system_tone, score = _get_system_tone(subtitle_text, conn)
     store_rating(
@@ -75,6 +85,7 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
         thumbs=thumbs,
         tone_override=tone_override,
         free_text=comment,
+        tags=tags,
     )
 
     # Feedback line
@@ -737,6 +748,107 @@ def build_db_cmd(data_dir: str, output: str):
         click.echo(f"  {table}: {count:,} rows")
     size_kb = out.stat().st_size / 1024
     click.echo(f"Output: {out} ({size_kb:.0f} KB)")
+
+
+@cli.command("pull-ratings")
+@click.option("--since", default=None, help="ISO date to sync from (default: all).")
+@click.option("--account", default=None, help="Storage account name (default: $STORAGE_ACCOUNT_NAME).")
+@click.pass_context
+def pull_ratings_cmd(ctx, since: str | None, account: str | None):
+    """Sync ratings from Azure Table Storage to local SQLite.
+
+    Pulls ratings from the deployed Azure Table Storage 'ratings' table
+    into the local human_ratings SQLite table, deduplicating by RowKey.
+
+    Examples:
+      subtitle-gen pull-ratings                    # sync all
+      subtitle-gen pull-ratings --since 2026-04-01 # sync from date
+    """
+    import os
+
+    account_name = account or os.environ.get("STORAGE_ACCOUNT_NAME")
+    if not account_name:
+        raise click.ClickException(
+            "No storage account. Set STORAGE_ACCOUNT_NAME or use --account."
+        )
+
+    try:
+        from azure.data.tables import TableServiceClient
+        from azure.identity import DefaultAzureCredential
+    except ImportError:
+        raise click.ClickException(
+            "azure-data-tables not installed. Run: uv pip install azure-data-tables azure-identity"
+        )
+
+    conn = ctx.obj["conn"]
+    from subtitle_generator.feedback import ensure_ratings_table, store_rating
+    ensure_ratings_table(conn)
+
+    # Get existing RowKeys to deduplicate
+    existing = set()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT config_snapshot FROM human_ratings WHERE config_snapshot LIKE '%RowKey%'"
+        ).fetchall()
+        import json as _json
+        for (snap,) in rows:
+            try:
+                d = _json.loads(snap)
+                if "RowKey" in d:
+                    existing.add(d["RowKey"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    credential = DefaultAzureCredential()
+    service = TableServiceClient(
+        endpoint=f"https://{account_name}.table.core.windows.net",
+        credential=credential,
+    )
+    table = service.get_table_client("ratings")
+
+    import json as _json
+    query_filter = None
+    if since:
+        query_filter = f"RowKey ge '{since}'"
+
+    synced = 0
+    skipped = 0
+    for entity in table.list_entities(filter=query_filter):
+        row_key = entity["RowKey"]
+        if row_key in existing:
+            skipped += 1
+            continue
+
+        tags_raw = entity.get("tags", "[]")
+        try:
+            tags = _json.loads(tags_raw)
+        except Exception:
+            tags = None
+
+        thumbs_val = entity.get("thumbs")
+        if thumbs_val is not None:
+            thumbs_val = int(thumbs_val)
+
+        store_rating(
+            conn,
+            entity.get("subtitle", ""),
+            system_tone=entity.get("system_tone") or None,
+            thumbs=thumbs_val,
+            tone_override=entity.get("tone_override") or None,
+            free_text=entity.get("free_text") or None,
+            tags=tags,
+        )
+        # Store RowKey in config_snapshot for dedup on next sync
+        conn.execute(
+            "UPDATE human_ratings SET config_snapshot = ? WHERE id = last_insert_rowid()",
+            (_json.dumps({"RowKey": row_key}),),
+        )
+        conn.commit()
+        synced += 1
+
+    click.echo(f"Synced {synced} ratings ({skipped} duplicates skipped).")
 
 
 if __name__ == "__main__":

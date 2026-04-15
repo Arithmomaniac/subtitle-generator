@@ -213,6 +213,15 @@ def _handle_rate(body: dict) -> tuple[int, dict]:
     free_text = body.get("free_text")
     system_tone = body.get("system_tone")
 
+    tags = body.get("tags")
+    if tags is not None:
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            return 400, {"error": "tags must be an array of strings"}
+        valid_tags = {"funny", "grammar", "contradiction", "boring"}
+        invalid_tags = set(tags) - valid_tags
+        if invalid_tags:
+            return 400, {"error": f"Invalid tags: {', '.join(invalid_tags)}"}
+
     from subtitle_generator.feedback import store_rating
 
     conn = _get_db()
@@ -224,10 +233,53 @@ def _handle_rate(body: dict) -> tuple[int, dict]:
             thumbs=thumbs,
             tone_override=tone_override,
             free_text=free_text if free_text else None,
+            tags=tags,
         )
+
+        # Dual-write to Azure Table Storage when deployed
+        _write_to_table_storage(subtitle, thumbs, tone_override, free_text, system_tone, tags)
+
         return 200, {"id": row_id, "status": "saved"}
     finally:
         conn.close()
+
+
+def _write_to_table_storage(
+    subtitle: str, thumbs: int | None, tone_override: str | None,
+    free_text: str | None, system_tone: str | None, tags: list[str] | None,
+) -> None:
+    """Write rating to Azure Table Storage if STORAGE_ACCOUNT_NAME is set."""
+    account_name = os.environ.get("STORAGE_ACCOUNT_NAME")
+    if not account_name:
+        return
+
+    try:
+        from azure.data.tables import TableServiceClient
+        from azure.identity import DefaultAzureCredential
+        from datetime import datetime, timezone
+        import uuid
+
+        credential = DefaultAzureCredential()
+        service = TableServiceClient(
+            endpoint=f"https://{account_name}.table.core.windows.net",
+            credential=credential,
+        )
+        table = service.get_table_client("ratings")
+
+        now = datetime.now(timezone.utc)
+        entity = {
+            "PartitionKey": now.strftime("%Y-%m"),
+            "RowKey": f"{now.isoformat()}-{uuid.uuid4().hex[:8]}",
+            "subtitle": subtitle,
+            "thumbs": thumbs,
+            "tone_override": tone_override or "",
+            "free_text": free_text or "",
+            "system_tone": system_tone or "",
+            "tags": json.dumps(tags or []),
+        }
+        table.create_entity(entity)
+    except Exception:
+        pass  # Non-critical — local SQLite is the primary store
 
 
 # -- /api/models (local only) ------------------------------------------------

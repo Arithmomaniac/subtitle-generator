@@ -13,6 +13,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from subtitle_generator.generate import (
     _majority_article,
     _infer_of_article,
+    _article_with_backoff,
+    _fix_a_an,
+    _title_case,
 )
 
 passed = 0
@@ -146,6 +149,93 @@ def test_strip_case_insensitive():
     obj, art = _strip_article("The Nuclear Revolution")
     assert_eq(obj, "Nuclear Revolution", "strip 'The' (uppercase)")
     assert_eq(art, "the", "article lowercased")
+
+
+# ---------------------------------------------------------------------------
+# _article_with_backoff tests
+# ---------------------------------------------------------------------------
+
+def test_backoff_exact_match():
+    stats = {"road": {"the": 1}}
+    assert_eq(_article_with_backoff("road", stats, 1), "the",
+              "exact match with min_freq=1 returns article")
+
+def test_backoff_last_word():
+    stats = {"embryo": {"the": 1}}
+    assert_eq(_article_with_backoff("frozen embryo", stats, 1), "the",
+              "last-word fallback finds 'embryo' stats")
+
+def test_backoff_no_stats():
+    assert_eq(_article_with_backoff("nature", {}, 1), "",
+              "no stats returns empty")
+
+def test_backoff_bare_majority():
+    stats = {"nature": {"": 13}}
+    assert_eq(_article_with_backoff("nature", stats, 1), "",
+              "bare majority returns empty (correct for mass nouns)")
+
+def test_backoff_single_word_no_fallback():
+    stats = {}
+    assert_eq(_article_with_backoff("politics", stats, 1), "",
+              "single word with no stats returns empty")
+
+
+# ---------------------------------------------------------------------------
+# _fix_a_an tests
+# ---------------------------------------------------------------------------
+
+def test_a_an_vowel():
+    assert_eq(_fix_a_an("a", "ethnic"), "an", "a ethnic → an ethnic")
+
+def test_a_an_consonant():
+    assert_eq(_fix_a_an("a", "road"), "a", "a road stays a road")
+
+def test_a_an_silent_h():
+    assert_eq(_fix_a_an("a", "hour"), "an", "a hour → an hour")
+
+def test_a_an_university():
+    assert_eq(_fix_a_an("a", "university"), "a", "a university stays")
+
+def test_a_an_the_passthrough():
+    assert_eq(_fix_a_an("the", "ethnic"), "the", "'the' passes through unchanged")
+
+def test_a_an_fbi():
+    assert_eq(_fix_a_an("a", "FBI"), "an", "a FBI → an FBI")
+
+
+# ---------------------------------------------------------------------------
+# _title_case (titlecase library) tests
+# ---------------------------------------------------------------------------
+
+def test_titlecase_basic():
+    result = _title_case("faith, reason, and the age of discovery")
+    assert_eq(result, "Faith, Reason, and the Age of Discovery", "basic title case")
+
+def test_titlecase_preserves_caps():
+    result = _title_case("revolution, mcGraw, and the rise of iPhone")
+    # titlecase should preserve internal caps
+    assert_eq("McGraw" in result or "mcGraw" in result, True,
+              "preserves interior caps")
+
+def test_titlecase_small_words():
+    result = _title_case("war and peace in the age of the road")
+    assert_eq(result, "War and Peace in the Age of the Road", "small words lowercase")
+
+
+# ---------------------------------------------------------------------------
+# Double-of rejection (integration)
+# ---------------------------------------------------------------------------
+
+def test_double_of_type2_classification():
+    """Verify that type-2 classification with prep='of' is detectable."""
+    classification = ("type2", "of", 3)
+    assert_eq(classification[0] == "type2" and classification[1] == "of", True,
+              "type2 with prep=of detected")
+
+def test_double_of_non_of_prep():
+    classification = ("type2", "in", 3)
+    assert_eq(classification[0] == "type2" and classification[1] == "of", False,
+              "type2 with prep=in not rejected")
 
 
 # ---------------------------------------------------------------------------

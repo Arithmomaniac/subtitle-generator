@@ -53,9 +53,10 @@ propose values outside these bounds.
 | `tier_center_niche` | 0.0 | 0.5 | 0.25 | Center score for niche tier |
 | `accessibility_threshold_pop` | 0.7 | 1.5 | 1.0 | Score above which subtitle is classified as pop |
 | `accessibility_threshold_mainstream` | 0.2 | 0.8 | 0.5 | Score above which subtitle is classified as mainstream |
-| `article_of_min_freq` | 1 | 10 | 3 | Min corpus occurrences before trusting of-object article |
-| `article_action_min_freq` | 1 | 10 | 3 | Min corpus occurrences before trusting action article |
+| `article_of_min_freq` | 1 | 10 | 1 | Min corpus occurrences before trusting of-object article |
+| `article_action_min_freq` | 1 | 10 | 1 | Min corpus occurrences before trusting action article |
 | `article_remix_heuristic_threshold` | 0.5 | 1.0 | 0.6 | Min majority fraction for remix head-noun article backoff |
+| `remix_reject_double_of` | 0 | 1 | 1 | Reject type-2 remixes where inner prep is "of" (avoids double-of) |
 
 ## Priority Order
 

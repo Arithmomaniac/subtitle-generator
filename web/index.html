@@ -103,6 +103,10 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 .btn-tone{padding:4px 14px;border-radius:14px;border:1px solid #3a6b8c;background:#1a2a3a;color:#a8c8dc;font-size:11px;cursor:pointer;transition:all .12s}
 .btn-tone:hover{border-color:#58a6ff}
 .btn-tone.active{background:#e07a5f;border-color:#e07a5f;color:#fff}
+.btn-tag{padding:4px 10px;border-radius:14px;border:1px solid #3a5b4c;background:#1a2a2a;color:#a8dcb8;font-size:11px;cursor:pointer;transition:all .12s}
+.btn-tag:hover{border-color:#58ff8a}
+.btn-tag.active{background:#5f9fe0;border-color:#5f9fe0;color:#fff}
+.tag-row{gap:6px}
 .rating-reveal{font-size:11px;color:#81b29a;padding:4px 0}
 
 /* Spinner */
@@ -200,6 +204,16 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
       <button class="btn-tone" :class="{ active: selectedTone === 'pop' }" @click="selectTone('pop')">Pop</button>
       <button class="btn-tone" :class="{ active: selectedTone === 'mainstream' }" @click="selectTone('mainstream')">Mainstream</button>
       <button class="btn-tone" :class="{ active: selectedTone === 'niche' }" @click="selectTone('niche')">Niche</button>
+    </div>
+    <!-- Collapsible quality tags pane -->
+    <div class="rating-row" x-show="!ratingSubmitted">
+      <button class="btn-toggle-tags" @click="tagsExpanded = !tagsExpanded; if(tagsExpanded) sessionStorage.setItem('tagsExpanded','1')" x-text="tagsExpanded ? '▾ Tags' : '▸ Tags'" style="font-size:11px;color:#81b29a;background:none;border:none;cursor:pointer;padding:0"></button>
+    </div>
+    <div class="rating-row tag-row" x-show="!ratingSubmitted && tagsExpanded" x-cloak>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('funny') }" @click="toggleTag('funny')">😄 Funny</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('grammar') }" @click="toggleTag('grammar')">🤔 Grammar</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('contradiction') }" @click="toggleTag('contradiction')">🔄 Contradictory</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('boring') }" @click="toggleTag('boring')">😴 Boring</button>
     </div>
     <div class="rating-reveal" x-show="ratingToneRevealed" x-cloak>
       ✓ Rating saved<template x-if="selectedTone"> — you said: <strong x-text="selectedTone"></strong></template>

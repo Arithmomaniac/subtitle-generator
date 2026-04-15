@@ -50,6 +50,10 @@ CREATE TABLE IF NOT EXISTS human_ratings (
 def ensure_ratings_table(conn: sqlite3.Connection) -> None:
     """Create the human_ratings table if it doesn't exist."""
     conn.execute(_CREATE_TABLE_SQL)
+    # Migrate: add tags column if missing
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(human_ratings)")}
+    if "tags" not in cols:
+        conn.execute("ALTER TABLE human_ratings ADD COLUMN tags TEXT DEFAULT '[]'")
     conn.commit()
 
 
@@ -66,6 +70,7 @@ def store_rating(
     thumbs: int | None = None,
     tone_override: str | None = None,
     free_text: str | None = None,
+    tags: list[str] | None = None,
 ) -> int:
     """Store a human rating. Returns the row id.
 
@@ -75,6 +80,7 @@ def store_rating(
         thumbs: 1 = good, -1 = bad, None = skipped.
         tone_override: What the human thinks the tone should be (p/m/n).
         free_text: Optional free-text comment.
+        tags: Quality tags like ["funny", "grammar", "contradiction", "boring"].
     """
     ensure_ratings_table(conn)
 
@@ -90,13 +96,15 @@ def store_rating(
         except Exception:
             pass  # non-critical — store the raw text anyway
 
+    tags_json = json.dumps(tags or [])
+
     cur = conn.execute(
         """INSERT INTO human_ratings
            (subtitle, system_tone, thumbs, tone_override, free_text,
-            interpreted, config_snapshot)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            interpreted, config_snapshot, tags)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
         (subtitle, system_tone, thumbs, tone_override, free_text,
-         interpreted, config_snapshot),
+         interpreted, config_snapshot, tags_json),
     )
     conn.commit()
     return cur.lastrowid
@@ -150,7 +158,7 @@ def get_summary(
     ensure_ratings_table(conn)
 
     rows = conn.execute(
-        """SELECT thumbs, system_tone, tone_override, free_text, interpreted
+        """SELECT thumbs, system_tone, tone_override, free_text, interpreted, tags
            FROM human_ratings
            ORDER BY created_at DESC
            LIMIT ?""",
@@ -195,6 +203,17 @@ def get_summary(
             except (json.JSONDecodeError, TypeError):
                 pass
 
+    # Tag counts
+    tag_counter: Counter = Counter()
+    for r in rows:
+        tags_str = r[5] if len(r) > 5 and r[5] else "[]"
+        try:
+            tags = json.loads(tags_str)
+            for tag in tags:
+                tag_counter[tag] += 1
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return {
         "total_ratings": len(rows),
         "thumbs_rated": len(thumbs_rated),
@@ -204,6 +223,7 @@ def get_summary(
         "tone_mismatches": dict(mismatch_counter.most_common(5)),
         "recent_comments": recent_comments[:5],
         "interpreted_insights": interpreted_insights[:5],
+        "tag_counts": dict(tag_counter.most_common()),
     }
 
 
@@ -232,5 +252,9 @@ def format_summary_for_proposer(summary: dict) -> str:
     if summary["interpreted_insights"]:
         for insight in summary["interpreted_insights"][:3]:
             lines.append(f"- Insight: {insight}")
+
+    if summary.get("tag_counts"):
+        tag_strs = ", ".join(f"{count}× {tag}" for tag, count in summary["tag_counts"].items())
+        lines.append(f"- Quality tags: {tag_strs}")
 
     return "\n".join(lines)

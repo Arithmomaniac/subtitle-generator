@@ -84,9 +84,9 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
     },
 
     /** Submit a human rating for a subtitle. */
-    async rate({ subtitle, thumbs, tone_override, system_tone, free_text } = {}) {
-      const result = await post("/api/rate", { subtitle, thumbs, tone_override, system_tone, free_text });
-      trackEvent("RateSubtitle", { thumbs: String(thumbs), tone_override: tone_override || "none" });
+    async rate({ subtitle, thumbs, tone_override, system_tone, free_text, tags } = {}) {
+      const result = await post("/api/rate", { subtitle, thumbs, tone_override, system_tone, free_text, tags });
+      trackEvent("RateSubtitle", { thumbs: String(thumbs), tone_override: tone_override || "none", tags: (tags || []).join(",") });
       return result;
     },
   };

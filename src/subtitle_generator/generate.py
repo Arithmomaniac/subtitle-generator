@@ -8,29 +8,25 @@ import sqlite3
 from dataclasses import dataclass, field
 
 import click
+import inflect
+from titlecase import titlecase as _lib_titlecase
 
 from subtitle_generator.config import DEFAULT_TONE_TARGETS, load_tuning_config
 
-
-# Words that stay lowercase in title case (unless first word).
-_SMALL_WORDS = frozenset({
-    "a", "an", "and", "as", "at", "but", "by", "for", "if", "in",
-    "nor", "of", "on", "or", "so", "the", "to", "up", "yet",
-})
+_inflect_engine = inflect.engine()
 
 
 def _title_case(text: str) -> str:
-    """Title-case a subtitle, keeping small words lowercase (except first)."""
-    words = text.split()
-    result = []
-    for i, word in enumerate(words):
-        lower = word.lower()
-        if i == 0 or lower not in _SMALL_WORDS:
-            # Capitalize first letter, preserve rest (handles "McGraw", "iPhone")
-            result.append(word[0].upper() + word[1:] if word else word)
-        else:
-            result.append(lower)
-    return " ".join(result)
+    """Title-case a subtitle using the titlecase library."""
+    return _lib_titlecase(text)
+
+
+def _fix_a_an(article: str, next_word: str) -> str:
+    """Correct a/an using inflect's phonetic analysis."""
+    if article not in ("a", "an") or not next_word:
+        return article
+    result = _inflect_engine.a(next_word)
+    return result.split()[0]
 
 
 @dataclass
@@ -624,6 +620,29 @@ def _majority_article(
     return best
 
 
+def _article_with_backoff(
+    filler: str, article_stats: dict[str, dict[str, int]], min_freq: float,
+) -> str:
+    """Article lookup with last-word fallback for non-remixed of_objects.
+
+    Backoff chain:
+      1. Exact filler match → majority article
+      2. Last word of multi-word filler → its majority article
+      3. Default → "" (no article)
+    """
+    result = _majority_article(filler, article_stats, min_freq)
+    if result:
+        return result
+
+    words = filler.split()
+    if len(words) > 1:
+        result = _majority_article(words[-1], article_stats, min_freq)
+        if result:
+            return result
+
+    return ""
+
+
 def _infer_of_article(
     composed: str, article_stats: dict[str, dict[str, int]],
     min_freq: float, threshold: float,
@@ -800,22 +819,26 @@ def generate_subtitle(
             remix_parts=remix_parts,
         )
     else:
-        of_article = _majority_article(
+        of_article = _article_with_backoff(
             of_object, ctx.get("article_stats_of", {}), of_min_freq,
         )
 
-    # Title-case all components
-    items = [_title_case(x) for x in items]
-    action_noun = _title_case(action_noun)
-    of_object = _title_case(of_object)
+    # Correct a/an using phonetic analysis
+    action_article = _fix_a_an(action_article, action_noun)
+    if of_article:
+        of_article = _fix_a_an(of_article, of_object)
+
+    # Assemble raw text, then title-case once
+    of_prefix = f"{of_article} " if of_article else ""
+    text = f"{items[0]}, {items[1]}, and {action_article} {action_noun} of {of_prefix}{of_object}"
+    text = _title_case(text)
+
+    # Title-case remix_parts for display
     if remix_parts:
         remix_parts = {k: _title_case(v) for k, v in remix_parts.items()}
 
-    of_prefix = f"{of_article} " if of_article else ""
-    text = f"{items[0]}, {items[1]}, and {action_article} {action_noun} of {of_prefix}{of_object}"
-
     return GeneratedSubtitle(
-        text=_title_case(text),
+        text=text,
         item1=items[0],
         item2=items[1],
         action_noun=action_noun,
@@ -931,6 +954,12 @@ def _try_remix(
     else:
         classification = orig_classification
         if classification is None:
+            return None
+
+    # Reject type-2 remixes where inner prep is "of" (produces double-of)
+    cfg = load_tuning_config(conn)
+    if cfg.get("remix_reject_double_of", 1.0) > 0:
+        if classification[0] == "type2" and classification[1] == "of":
             return None
 
     best_attempt = None

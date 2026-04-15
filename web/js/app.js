@@ -111,6 +111,7 @@ export function createApp() {
         this.ratingSubmitted = false;
         this.ratingToneRevealed = false;
         this.selectedTone = null;
+        this.selectedTags = [];
       }
       this.loading = false;
     },
@@ -121,6 +122,14 @@ export function createApp() {
     selectedTone: null,
     ratingSystemTone: null,
     ratingScore: null,
+    selectedTags: [],
+    tagsExpanded: sessionStorage.getItem('tagsExpanded') === '1',
+
+    toggleTag(tag) {
+      const idx = this.selectedTags.indexOf(tag);
+      if (idx >= 0) this.selectedTags.splice(idx, 1);
+      else this.selectedTags.push(tag);
+    },
 
     async submitRating(thumbs) {
       if (!this.hasSubtitle || this.ratingSubmitted) return;
@@ -129,10 +138,15 @@ export function createApp() {
         thumbs,
         tone_override: this.selectedTone,
         system_tone: this.tone || null,
+        tags: this.selectedTags.length ? this.selectedTags : undefined,
       };
       await api.rate(body);
       this.ratingSubmitted = true;
       this.ratingToneRevealed = true;
+      if (this.selectedTags.length) {
+        this.tagsExpanded = true;
+        sessionStorage.setItem('tagsExpanded', '1');
+      }
     },
 
     selectTone(tone) {
