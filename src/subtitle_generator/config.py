@@ -35,6 +35,10 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "pop_base_weight_blend": 0.0,
     "pop_tone_blend": 0.0,
     "pop_missing_default": 0.1,
+    # Per-slot popularity multipliers (applied to tone_target before Gaussian bias)
+    "pop_slot_mult_list_item": 1.0,
+    "pop_slot_mult_action_noun": 1.0,
+    "pop_slot_mult_of_object": 1.0,
 }
 
 

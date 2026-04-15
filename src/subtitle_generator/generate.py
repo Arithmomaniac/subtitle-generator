@@ -771,6 +771,16 @@ def generate_subtitle(
     action_target = tone_target.get("action_noun") if tone_target else None
     obj_target = tone_target.get("of_object") if tone_target else None
 
+    # Apply per-slot popularity multipliers to tone targets
+    if tone_target is not None:
+        cfg = load_tuning_config(conn)
+        if list_target is not None:
+            list_target *= cfg.get("pop_slot_mult_list_item", 1.0)
+        if action_target is not None:
+            action_target *= cfg.get("pop_slot_mult_action_noun", 1.0)
+        if obj_target is not None:
+            obj_target *= cfg.get("pop_slot_mult_of_object", 1.0)
+
     # Draw or lock list items (avoid duplicates with locked value)
     if locks and "item1" in locks and "item2" in locks:
         items = [locks["item1"], locks["item2"]]

@@ -439,9 +439,11 @@ def run_tone_tuning(
 {bounds_text}
 {human_feedback_section}
 Propose ONE parameter change that you think will improve the composite score.
-Focus on parameters with the biggest potential impact (bias_floor and spread have historically had the largest effect).
+Prioritize parameters marked as NEW in the priority order — they have never been tuned
+and represent the biggest untapped improvement opportunity. The `pop_*` parameters were
+specifically added to replace the old freq-only scoring with empirical popularity data.
 Consider what previous experiments tell you about which direction to move.
-{f"Also consider the human feedback above — tone mismatches suggest the accessibility thresholds or tier centers may need adjustment." if human_feedback_section else ""}
+{f"Also consider the human feedback above — tone mismatches suggest the popularity blend params, per-slot multipliers, or tone targets may need adjustment." if human_feedback_section else ""}
 """
 
         click.echo("  proposing parameter change …")
@@ -450,7 +452,8 @@ Consider what previous experiments tell you about which direction to move.
                 model=proposer_model,
                 messages=[{"role": "user", "content": proposal_prompt}],
                 schema=ParamProposal,
-                timeout=180.0,
+                timeout=300.0,
+                max_retries=4,
             )
         except RuntimeError as e:
             click.echo(f"  ⚠ proposal failed: {e} — skipping iteration")

@@ -16,6 +16,10 @@ import click
 import litellm
 from pydantic import BaseModel
 
+# Suppress noisy litellm coroutine warnings
+import warnings
+warnings.filterwarnings("ignore", message="coroutine.*was never awaited")
+
 from subtitle_generator.config import get_tone_targets
 from subtitle_generator.generate import generate_subtitle
 
