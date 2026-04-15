@@ -32,6 +32,7 @@ def make_test_db() -> sqlite3.Connection:
     conn.execute("""
         CREATE TABLE slot_fillers (
             filler TEXT, slot_type TEXT, freq INTEGER,
+            popularity_score REAL,
             PRIMARY KEY (filler, slot_type)
         )
     """)

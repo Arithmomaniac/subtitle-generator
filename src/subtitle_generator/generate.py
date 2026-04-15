@@ -45,26 +45,48 @@ class GeneratedSubtitle:
 
 
 def _weighted_sample(
-    rows: list[tuple[str, int]], k: int,
+    rows: list[tuple], k: int,
     rng: random.Random | None = None,
     tone_target: float | None = None,
     conn: sqlite3.Connection | None = None,
 ) -> list[str]:
     """Pick k unique fillers weighted by sqrt(freq), optionally biased by tone.
 
+    Rows can be (filler, freq) or (filler, freq, popularity_score).
     When tone_target is set, applies a log-space Gaussian bias that boosts
-    fillers near the target frequency and suppresses distant ones.
-    tone_target is a log10 score: ~1.5 for pop, ~0.75 for mainstream, ~0.25 for niche.
+    fillers near the target score and suppresses distant ones.
+
+    Blending is controlled by pop_base_weight_blend (base weight) and
+    pop_tone_blend (tone bias score). At 0.0, uses pure freq; at 1.0, uses
+    pure popularity_score.
     """
+    cfg = load_tuning_config(conn) if (tone_target is not None or conn is not None) else {}
+    blend_base = cfg.get("pop_base_weight_blend", 0.0)
+    blend_tone = cfg.get("pop_tone_blend", 0.0)
+    pop_default = cfg.get("pop_missing_default", 0.1)
+
     fillers = [r[0] for r in rows]
-    weights = [math.sqrt(r[1]) for r in rows]
+    has_pop = len(rows) > 0 and len(rows[0]) >= 3
+
+    # Base weights: blend sqrt(freq) and sqrt(popularity_score)
+    weights = []
+    for r in rows:
+        freq = r[1]
+        pop_score = (r[2] if r[2] is not None else pop_default) if has_pop else pop_default
+        w_freq = math.sqrt(freq)
+        w_pop = math.sqrt(max(pop_score, 0.001))
+        weights.append((1 - blend_base) * w_freq + blend_base * w_pop)
 
     if tone_target is not None:
-        cfg = load_tuning_config(conn)
+        if not cfg:
+            cfg = load_tuning_config(conn)
         spread = cfg["weighted_sample_spread"]
         bias_floor = cfg["weighted_sample_bias_floor"]
-        for i, (_, freq) in enumerate(rows):
-            filler_score = math.log10(1 + freq)
+        for i, r in enumerate(rows):
+            freq = r[1]
+            pop_score = (r[2] if r[2] is not None else pop_default) if has_pop else pop_default
+            score_freq = math.log10(1 + freq)
+            filler_score = (1 - blend_tone) * score_freq + blend_tone * pop_score
             bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
             weights[i] *= (bias_floor + (1 - bias_floor) * bias)
 
@@ -521,7 +543,7 @@ def compose_compound(
 
         # Draw modifier with matching POS and word count
         mod_rows = conn.execute(
-            "SELECT filler, freq FROM slot_fillers "
+            "SELECT filler, freq, popularity_score FROM slot_fillers "
             "WHERE slot_type = 'of_modifier' AND pos_tag = ? "
             "AND length(filler) - length(replace(filler, ' ', '')) = ? AND mode = 'strict'",
             (chosen_mod_pos, mod_space_count),
@@ -534,7 +556,7 @@ def compose_compound(
         head = locked_head
     else:
         head_rows = conn.execute(
-            "SELECT filler, freq FROM slot_fillers "
+            "SELECT filler, freq, popularity_score FROM slot_fillers "
             "WHERE slot_type = 'of_head' AND mode = 'strict'",
         ).fetchall()
         if not head_rows:
@@ -567,7 +589,7 @@ def compose_prepositional(
         topic = locked_topic
     else:
         topic_rows = conn.execute(
-            "SELECT filler, freq FROM slot_fillers "
+            "SELECT filler, freq, popularity_score FROM slot_fillers "
             "WHERE slot_type = 'of_topic' AND prep = ? AND mode = 'strict'",
             (prep,),
         ).fetchall()
@@ -579,7 +601,7 @@ def compose_prepositional(
         complement = locked_complement
     else:
         comp_rows = conn.execute(
-            "SELECT filler, freq FROM slot_fillers "
+            "SELECT filler, freq, popularity_score FROM slot_fillers "
             "WHERE slot_type = 'of_complement' AND prep = ? AND mode = 'strict'",
             (prep,),
         ).fetchall()
@@ -723,13 +745,13 @@ def generate_subtitle(
             raise ValueError("Cannot combine of_object lock with sub-part locks")
 
     list_rows = conn.execute(
-        "SELECT filler, freq FROM slot_fillers WHERE slot_type = 'list_item' AND mode = 'strict'"
+        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item' AND mode = 'strict'"
     ).fetchall()
     action_rows = conn.execute(
-        "SELECT filler, freq FROM slot_fillers WHERE slot_type = 'action_noun' AND mode = 'strict'"
+        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'action_noun' AND mode = 'strict'"
     ).fetchall()
     obj_rows = conn.execute(
-        "SELECT filler, freq FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
+        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
     ).fetchall()
 
     # Adjust required-row checks based on locks

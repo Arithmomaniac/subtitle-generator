@@ -274,17 +274,28 @@ def _filler_log_freqs(
     conn: sqlite3.Connection,
     subtitles: list,
 ) -> list[float]:
-    """Return log10(1+freq) for every filler in the subtitle list."""
+    """Return blended filler scores for every filler in the subtitle list.
+
+    Blends log10(1+freq) with popularity_score per pop_tone_blend config.
+    """
+    from subtitle_generator.config import load_tuning_config
+
+    cfg = load_tuning_config(conn)
+    blend_tone = cfg.get("pop_tone_blend", 0.0)
+    pop_default = cfg.get("pop_missing_default", 0.1)
+
     scores: list[float] = []
     for sub in subtitles:
         for attr, slot_type in _SLOT_MAP.items():
             filler = getattr(sub, attr)
             row = conn.execute(
-                "SELECT freq FROM slot_fillers WHERE filler = ? AND slot_type = ?",
+                "SELECT freq, popularity_score FROM slot_fillers WHERE filler = ? AND slot_type = ?",
                 (filler, slot_type),
             ).fetchone()
             freq = row[0] if row else 0
-            scores.append(math.log10(1 + freq))
+            pop_score = (row[1] if row and row[1] is not None else pop_default)
+            score_freq = math.log10(1 + freq)
+            scores.append((1 - blend_tone) * score_freq + blend_tone * pop_score)
     return scores
 
 

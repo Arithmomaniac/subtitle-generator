@@ -27,6 +27,14 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "article_action_min_freq": 1.0,
     "article_remix_heuristic_threshold": 0.6,
     "remix_reject_double_of": 1.0,
+    # Popularity scoring params
+    "pop_weight_spl": 0.7,
+    "pop_weight_ol": 0.3,
+    "pop_weight_freq": 0.0,
+    "pop_exponent": 1.0,
+    "pop_base_weight_blend": 0.0,
+    "pop_tone_blend": 0.0,
+    "pop_missing_default": 0.1,
 }
 
 

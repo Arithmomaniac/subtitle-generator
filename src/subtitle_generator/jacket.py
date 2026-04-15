@@ -69,28 +69,39 @@ def _parse_subtitle_fillers(subtitle: str) -> list[str]:
     return items + [action, obj]
 
 
-def _lookup_freq(conn: sqlite3.Connection, filler: str) -> int:
-    """Look up a filler's corpus frequency. Returns 1 if not found."""
+def _lookup_freq(conn: sqlite3.Connection, filler: str) -> tuple[int, float | None]:
+    """Look up a filler's corpus frequency and popularity score.
+
+    Returns (freq, popularity_score). Defaults to (1, None) if not found.
+    """
     row = conn.execute(
-        "SELECT freq FROM slot_fillers WHERE filler = ? LIMIT 1", (filler,)
+        "SELECT freq, popularity_score FROM slot_fillers WHERE filler = ? LIMIT 1", (filler,)
     ).fetchone()
-    return row[0] if row else 1
+    return (row[0], row[1]) if row else (1, None)
 
 
 def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None) -> tuple[str, float]:
-    """Compute an accessibility tier for a subtitle based on filler frequencies.
+    """Compute an accessibility tier for a subtitle based on filler scores.
 
-    Returns (tone_text, score) where score is mean(log10(1+freq)).
-    Higher score = more pop-accessible fillers.
+    Returns (tone_text, score) where score is a blend of mean(log10(1+freq))
+    and mean(popularity_score) per pop_tone_blend config.
     """
     fillers = _parse_subtitle_fillers(subtitle)
     if not fillers or conn is None:
         return TONE_MEDIUM, 0.0
 
-    freqs = [_lookup_freq(conn, f) for f in fillers]
-    score = sum(math.log10(1 + f) for f in freqs) / len(freqs)
-
     cfg = load_tuning_config(conn)
+    blend_tone = cfg.get("pop_tone_blend", 0.0)
+    pop_default = cfg.get("pop_missing_default", 0.1)
+
+    filler_data = [_lookup_freq(conn, f) for f in fillers]
+    blended_scores = []
+    for freq, pop_score in filler_data:
+        score_freq = math.log10(1 + freq)
+        ps = pop_score if pop_score is not None else pop_default
+        blended_scores.append((1 - blend_tone) * score_freq + blend_tone * ps)
+    score = sum(blended_scores) / len(blended_scores)
+
     pop_thresh = cfg["accessibility_threshold_pop"]
     main_thresh = cfg["accessibility_threshold_mainstream"]
 

@@ -24,8 +24,22 @@ The tuning agent reads this file each iteration to guide parameter proposals.
 
 - **Pop and niche must produce clearly different output.** A human should be able to tell
   which tone was used just by reading 5 subtitles from each.
-- Measured by distributional overlap of filler log10(1+freq) scores.
+- Measured by distributional overlap of filler scores (blended log10(1+freq) and popularity_score
+  per `pop_tone_blend`).
 - Target: tone_separation ≥ 0.5 (at least 50% non-overlapping distributions).
+
+## Popularity Scoring
+
+When `pop_tone_blend > 0`, the tone bias uses a blend of corpus frequency and empirical
+popularity (SPL checkouts + OL edition counts) instead of pure `log10(1+freq)`. This reduces
+academic-word dominance in pop mode and surfaces genuinely popular topics.
+
+- The `pop_weight_*` params control how the composite popularity_score is computed
+  (used by `populate_popularity.py` to recompute scores in the DB).
+- The `pop_tone_blend` and `pop_base_weight_blend` params control how much the runtime
+  uses popularity_score vs corpus freq for sampling.
+- Tone targets may need recalibration when `pop_tone_blend` increases, since the
+  popularity_score scale (0.09–2.32) differs from log10(1+freq) scale (0–2.5).
 
 ## Coherence Constraints
 
@@ -57,6 +71,13 @@ propose values outside these bounds.
 | `article_action_min_freq` | 1 | 10 | 1 | Min corpus occurrences before trusting action article |
 | `article_remix_heuristic_threshold` | 0.5 | 1.0 | 0.6 | Min majority fraction for remix head-noun article backoff |
 | `remix_reject_double_of` | 0 | 1 | 1 | Reject type-2 remixes where inner prep is "of" (avoids double-of) |
+| `pop_weight_spl` | 0.0 | 1.0 | 0.7 | Weight of SPL checkout signal in popularity composite |
+| `pop_weight_ol` | 0.0 | 1.0 | 0.3 | Weight of OL edition count signal in popularity composite |
+| `pop_weight_freq` | 0.0 | 1.0 | 0.0 | Weight of corpus freq fallback in popularity composite |
+| `pop_exponent` | 0.5 | 2.0 | 1.0 | Power-law exponent applied to raw scores before combining |
+| `pop_base_weight_blend` | 0.0 | 1.0 | 0.0 | Blend: 0=sqrt(freq) for base weight, 1=sqrt(popularity) |
+| `pop_tone_blend` | 0.0 | 1.0 | 0.0 | Blend: 0=log10(1+freq) for tone bias, 1=popularity_score |
+| `pop_missing_default` | 0.01 | 0.5 | 0.1 | Default popularity_score for fillers with no empirical data |
 
 ## Priority Order
 

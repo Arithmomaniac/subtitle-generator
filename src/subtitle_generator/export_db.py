@@ -19,7 +19,8 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     # -- slot_fillers (with scalar decomposition and remix columns) --
     rows = source_conn.execute(
         "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep, "
-        "remix_type, remix_prep, remix_word_count, centroid_dot, norm_sq, token_count "
+        "remix_type, remix_prep, remix_word_count, centroid_dot, norm_sq, token_count, "
+        "popularity_score "
         "FROM slot_fillers"
     ).fetchall()
     path = output_dir / "slot_fillers.csv"
@@ -28,7 +29,7 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
         w.writerow([
             "id", "slot_type", "filler", "mode", "source_subtitle_id", "freq",
             "pos_tag", "prep", "remix_type", "remix_prep", "remix_word_count",
-            "centroid_dot", "norm_sq", "token_count",
+            "centroid_dot", "norm_sq", "token_count", "popularity_score",
         ])
         for row in rows:
             row = list(row)
@@ -37,6 +38,8 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
                 row[11] = ""
             if row[12] is None:
                 row[12] = ""
+            if row[14] is None:
+                row[14] = ""
             w.writerow(row)
     stats["slot_fillers.csv"] = len(rows)
 
@@ -99,6 +102,7 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
             centroid_dot REAL,
             norm_sq REAL,
             token_count INTEGER,
+            popularity_score REAL,
             UNIQUE(slot_type, filler)
         )
     """)
@@ -109,6 +113,7 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
         for row in reader:
             centroid_dot = float(row["centroid_dot"]) if row.get("centroid_dot") else None
             norm_sq = float(row["norm_sq"]) if row.get("norm_sq") else None
+            popularity_score = float(row["popularity_score"]) if row.get("popularity_score") else None
             rows.append((
                 int(row["id"]), row["slot_type"], row["filler"], row["mode"],
                 int(row["source_subtitle_id"]) if row["source_subtitle_id"] else None,
@@ -119,9 +124,10 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
                 centroid_dot,
                 norm_sq,
                 int(row["token_count"]) if row.get("token_count") else None,
+                popularity_score,
             ))
         conn.executemany(
-            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
         )
         stats["slot_fillers"] = len(rows)
 
