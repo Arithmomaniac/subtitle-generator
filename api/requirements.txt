@@ -1,2 +1,4 @@
 click>=8.3.2
 azure-functions
+inflect>=7.0
+titlecase>=2.4
