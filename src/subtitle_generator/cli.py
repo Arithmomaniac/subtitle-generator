@@ -581,7 +581,8 @@ def calibrate_remix_cmd(samples: int, model: str | None):
 @click.option("--dry-run", is_flag=True, help="Show proposals without evaluating or applying.")
 @click.option("--show-results", is_flag=True, help="Display past tuning results and exit.")
 @click.option("--spot-check", is_flag=True, help="Pause for human spot-checks at exponentially-spaced iterations (1, 2, 4, 8…).")
-def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool, spot_check: bool):
+@click.option("--spot-check-tui", is_flag=True, help="Use questionary TUI for spot-checks (faster grid UI). Implies --spot-check.")
+def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool, spot_check: bool, spot_check_tui: bool):
     """Unified tuning pipeline (autoresearch-inspired).
 
     Runs two phases:
@@ -595,7 +596,8 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
       subtitle-gen tune --phase remix --samples 100  # remix only, high confidence
       subtitle-gen tune --dry-run                    # show proposals only
       subtitle-gen tune --show-results               # view experiment history
-      subtitle-gen tune --spot-check                 # with human spot-checks
+      subtitle-gen tune --spot-check                 # with human spot-checks (CLI)
+      subtitle-gen tune --spot-check-tui             # with TUI grid spot-checks
     """
     if show_results:
         from pathlib import Path
@@ -623,6 +625,7 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
         results_file=results_file,
         dry_run=dry_run,
         spot_check=spot_check,
+        spot_check_tui=spot_check_tui,
     )
     conn.close()
 
