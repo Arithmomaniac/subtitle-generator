@@ -399,6 +399,17 @@ def run_tone_tuning(
         f"Composite: {current_score:.3f}\n"
     )
 
+    # Baseline spot-check: rate current output before any changes
+    if spot_check or spot_check_tui:
+        click.echo(click.style(
+            "  ⏸ Baseline spot check (before tuning):",
+            fg="green", bold=True,
+        ))
+        _run_spot_check(
+            conn, 0, iterations, seed_base=999,
+            use_tui=spot_check_tui,
+        )
+
     for i in range(1, iterations + 1):
         click.echo(f"--- Iteration {i}/{iterations} ---")
 
