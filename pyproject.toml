@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-tune = ["litellm>=1.72.0", "pydantic>=2.0"]
+tune = ["litellm>=1.72.0", "pydantic>=2.0", "questionary>=2.0"]
 deploy = ["azure-data-tables>=12.5"]
 
 [project.scripts]

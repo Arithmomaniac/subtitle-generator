@@ -286,13 +286,8 @@ def _spot_check_tui(
     tier_shortcuts: dict[str, str],
 ) -> float | None:
     """TUI spot-check using questionary for grid-style rating."""
-    try:
-        import questionary
-        from questionary import Choice
-    except ImportError:
-        click.echo("  questionary not installed, falling back to CLI mode")
-        click.echo("  Install with: uv pip install questionary")
-        return _spot_check_cli(conn, samples, tier_labels, tier_shortcuts)
+    import questionary
+    from questionary import Choice
 
     import random as _rng
     shuffled = list(samples)
