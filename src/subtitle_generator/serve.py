@@ -234,6 +234,7 @@ def _handle_rate(body: dict) -> tuple[int, dict]:
             tone_override=tone_override,
             free_text=free_text if free_text else None,
             tags=tags,
+            source="web_user",
         )
 
         # Dual-write to Azure Table Storage when deployed

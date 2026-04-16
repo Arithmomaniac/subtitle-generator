@@ -331,42 +331,8 @@ def test_cli_review_mock():
     conn.close()
 
 
-def test_spot_check_schedule():
-    """Verify exponential backoff: _is_spot_check_iteration checks powers of 2."""
-    from subtitle_generator.tune import _is_spot_check_iteration
-
-    expected_checks = {1, 2, 4, 8, 16, 32, 64}
-    expected_skips = {3, 5, 6, 7, 9, 10, 15, 17, 31, 33, 63, 65}
-
-    for i in expected_checks:
-        assert _is_spot_check_iteration(i), f"Should check at iter {i}"
-    for i in expected_skips:
-        assert not _is_spot_check_iteration(i), f"Should skip at iter {i}"
-
-    # Edge: 0 should not trigger
-    assert not _is_spot_check_iteration(0), "Should not check at iter 0"
-
-    print("  PASS: spot_check_schedule")
-
-
-def test_spot_check_scoring():
-    """Verify that spot-check human approval blends into composite correctly."""
-    from subtitle_generator.eval_harness import composite_score
-
-    # Without human: 50/50 blend
-    c1 = composite_score(quality=0.8, separation=0.6)
-    assert abs(c1 - 0.7) < 0.001, f"Expected 0.7, got {c1}"
-
-    # With human: 40/40/20 blend (done in tune.py, not composite_score)
-    quality, separation, human = 0.8, 0.6, 1.0
-    blended = 0.4 * quality + 0.4 * separation + 0.2 * human
-    assert abs(blended - 0.76) < 0.001, f"Expected 0.76, got {blended}"
-
-    # Human 0% approval drags score down
-    blended_bad = 0.4 * quality + 0.4 * separation + 0.2 * 0.0
-    assert abs(blended_bad - 0.56) < 0.001, f"Expected 0.56, got {blended_bad}"
-
-    print("  PASS: spot_check_scoring")
+# spot_check_schedule and spot_check_scoring tests removed:
+# spot-check is now a standalone command, not part of the tune loop.
 
 
 def test_idempotent_table_creation():
@@ -409,8 +375,6 @@ if __name__ == "__main__":
         ("format_summary", test_format_summary),
         ("robot_grader_batch", test_robot_grader_batch),
         ("cli_review_mock", test_cli_review_mock),
-        ("spot_check_schedule", test_spot_check_schedule),
-        ("spot_check_scoring", test_spot_check_scoring),
         ("idempotent_table_creation", test_idempotent_table_creation),
         ("empty_summary", test_empty_summary),
     ]

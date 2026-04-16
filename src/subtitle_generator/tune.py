@@ -28,7 +28,7 @@ from subtitle_generator.eval_harness import (
     rate_quality,
     structured_completion,
 )
-from subtitle_generator.feedback import format_summary_for_proposer, get_summary, store_rating
+from subtitle_generator.feedback import store_rating
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -218,70 +218,63 @@ def _evaluate(
 
 
 # ---------------------------------------------------------------------------
-# Spot-check helpers
+# Standalone spot-check (decoupled from tune loop)
 # ---------------------------------------------------------------------------
 
 
-def _is_spot_check_iteration(i: int) -> bool:
-    """Exponential backoff: check at iterations 1, 2, 4, 8, 16, 32…"""
-    return i > 0 and (i & (i - 1)) == 0  # power of 2
-
-
-def _run_spot_check(
+def run_spot_check(
     conn: sqlite3.Connection,
-    iteration: int,
-    total_iterations: int,
     n_samples: int = 2,
-    seed_base: int = 1000,
     use_tui: bool = False,
+    source: str = "spot_check",
+    seed_base: int | None = None,
 ) -> float | None:
-    """Show tone-targeted sample subtitles and collect human ratings.
+    """Generate tone-targeted samples and collect human tier ratings.
 
-    Generates n_samples per tier (pop, mainstream, niche) and asks the human
-    which tier each subtitle *feels* like. Stores both system_tone (target)
-    and tone_override (human perception) for mismatch analysis.
+    Standalone command — not part of the tune loop. Stores ratings in
+    human_ratings for later analysis via review_ratings().
 
-    When use_tui=True, uses questionary for a faster grid-style interface.
-
-    Returns human tone-accuracy (0.0-1.0) or None if all skipped.
+    Returns tone-accuracy (0.0-1.0) or None if all skipped.
     """
+    import random as _rng
     from subtitle_generator.config import get_tone_targets
+    from subtitle_generator.generate import generate_subtitle
 
-    next_check = iteration * 2
-    if next_check > total_iterations:
-        next_check_str = "no more checks"
-    else:
-        next_check_str = f"next at iter {next_check}"
-    click.echo(click.style(
-        f"\n  ⏸ Spot check (iter {iteration} — {next_check_str}):",
-        fg="green", bold=True,
-    ))
+    if seed_base is None:
+        seed_base = _rng.randint(0, 100000)
 
     targets = get_tone_targets(conn)
     tiers = ["pop", "mainstream", "niche"]
-    tier_labels = {"pop": "🔥 POP", "mainstream": "📚 MAINSTREAM", "niche": "🎓 NICHE"}
+    tier_labels = {"pop": "\U0001f525 POP", "mainstream": "\U0001f4da MAINSTREAM", "niche": "\U0001f393 NICHE"}
     tier_shortcuts = {"p": "pop", "m": "mainstream", "n": "niche"}
 
-    # Generate targeted samples per tier
-    all_samples: list[tuple[str, str, object]] = []  # (tier, text, subtitle_obj)
+    click.echo(click.style(
+        f"=== Spot Check ({n_samples} per tier, {n_samples * 3} total) ===\n",
+        fg="green", bold=True,
+    ))
+
+    all_samples: list[tuple[str, str, object]] = []
     for tier in tiers:
         tone_target = {
             slot: targets[tier][slot]
             for slot in ["list_item", "action_noun", "of_object"]
         }
         for j in range(n_samples):
-            from subtitle_generator.generate import generate_subtitle
             sub = generate_subtitle(
                 conn,
-                seed=seed_base + 500 + tiers.index(tier) * 100 + j,
+                seed=seed_base + tiers.index(tier) * 100 + j,
                 tone_target=tone_target,
             )
             all_samples.append((tier, sub.text, sub))
 
     if use_tui:
-        return _spot_check_tui(conn, all_samples, tier_labels, tier_shortcuts)
+        accuracy = _spot_check_tui(conn, all_samples, tier_labels, tier_shortcuts, source)
     else:
-        return _spot_check_cli(conn, all_samples, tier_labels, tier_shortcuts)
+        accuracy = _spot_check_cli(conn, all_samples, tier_labels, tier_shortcuts, source)
+
+    if accuracy is not None:
+        click.echo(f"\nRatings stored (source={source}). Run 'subtitle-gen review-ratings' to analyze.")
+    return accuracy
 
 
 def _spot_check_cli(
@@ -289,6 +282,7 @@ def _spot_check_cli(
     samples: list[tuple[str, str, object]],
     tier_labels: dict[str, str],
     tier_shortcuts: dict[str, str],
+    source: str = "spot_check",
 ) -> float | None:
     """CLI spot-check: sequential prompts per subtitle."""
     import random as _rng
@@ -316,36 +310,34 @@ def _spot_check_cli(
             total += 1
             if perceived == target_tier:
                 correct += 1
-                click.echo(click.style("       ✓ match", fg="green"))
+                click.echo(click.style("       \u2713 match", fg="green"))
             else:
                 click.echo(click.style(
-                    f"       ✗ mismatch (target={target_tier}, felt={perceived})",
+                    f"       \u2717 mismatch (target={target_tier}, felt={perceived})",
                     fg="yellow",
                 ))
-            # Store with system_tone=target, tone_override=perceived
+
+            tags_input = click.prompt(
+                click.style("       Tags? [f/g/c/b / Enter]", fg="cyan"),
+                default="", show_default=False,
+            ).strip().lower()
+            tag_map = {"f": "funny", "g": "grammar", "c": "contradiction", "b": "boring"}
+            tags = [tag_map[c] for c in tags_input if c in tag_map] or None
+
             store_rating(
                 conn, text,
                 system_tone=target_tier,
                 thumbs=1 if perceived == target_tier else -1,
                 tone_override=perceived,
+                tags=tags,
+                source=source,
             )
-
-            # Quick quality tag
-            tags_input = click.prompt(
-                click.style("       Tags? [f/g/c/b / Enter]", fg="cyan"),
-                default="", show_default=False,
-            ).strip().lower()
-            if tags_input:
-                tag_map = {"f": "funny", "g": "grammar", "c": "contradiction", "b": "boring"}
-                tags = [tag_map[c] for c in tags_input if c in tag_map] or None
-                if tags:
-                    store_rating(conn, text, system_tone=target_tier, tags=tags)
 
     if total == 0:
         return None
     accuracy = correct / total
     click.echo(click.style(
-        f"  Tone accuracy: {correct}/{total} ({accuracy:.0%})",
+        f"\n  Tone accuracy: {correct}/{total} ({accuracy:.0%})",
         fg="green" if accuracy >= 0.6 else "yellow",
     ))
     return accuracy
@@ -356,6 +348,7 @@ def _spot_check_tui(
     samples: list[tuple[str, str, object]],
     tier_labels: dict[str, str],
     tier_shortcuts: dict[str, str],
+    source: str = "spot_check",
 ) -> float | None:
     """TUI spot-check using questionary for grid-style rating."""
     import questionary
@@ -368,21 +361,19 @@ def _spot_check_tui(
     total = 0
     correct = 0
 
-    # Present all subtitles in a grid
     click.echo()
     for i, (target_tier, text, _) in enumerate(shuffled):
         click.echo(f"  {i+1}. [{tier_labels[target_tier]}] {text}")
     click.echo()
 
-    # Rate each one
     for i, (target_tier, text, sub) in enumerate(shuffled):
         result = questionary.select(
-            f"  {i+1}) \"{text[:60]}…\" — feels like?",
+            f"  {i+1}) \"{text[:60]}\u2026\" \u2014 feels like?",
             choices=[
-                Choice("🔥 Pop", "pop"),
-                Choice("📚 Mainstream", "mainstream"),
-                Choice("🎓 Niche", "niche"),
-                Choice("⏭ Skip", "skip"),
+                Choice("\U0001f525 Pop", "pop"),
+                Choice("\U0001f4da Mainstream", "mainstream"),
+                Choice("\U0001f393 Niche", "niche"),
+                Choice("\u23ed Skip", "skip"),
             ],
             use_shortcuts=True,
             use_arrow_keys=True,
@@ -393,31 +384,31 @@ def _spot_check_tui(
             match = result == target_tier
             if match:
                 correct += 1
-                click.echo(click.style("       ✓ match", fg="green"))
+                click.echo(click.style("       \u2713 match", fg="green"))
             else:
                 click.echo(click.style(
-                    f"       ✗ mismatch (target={target_tier}, felt={result})",
+                    f"       \u2717 mismatch (target={target_tier}, felt={result})",
                     fg="yellow",
                 ))
+
+            tag_choices = questionary.checkbox(
+                "       Tags?",
+                choices=[
+                    Choice("\U0001f604 Funny", "funny"),
+                    Choice("\U0001f4dd Grammar", "grammar"),
+                    Choice("\U0001f914 Contradiction", "contradiction"),
+                    Choice("\U0001f634 Boring", "boring"),
+                ],
+            ).ask()
+
             store_rating(
                 conn, text,
                 system_tone=target_tier,
                 thumbs=1 if match else -1,
                 tone_override=result,
+                tags=tag_choices or None,
+                source=source,
             )
-
-            # Quality tags (same as CLI mode)
-            tag_choices = questionary.checkbox(
-                "       Tags?",
-                choices=[
-                    Choice("😄 Funny", "funny"),
-                    Choice("📝 Grammar", "grammar"),
-                    Choice("🤔 Contradiction", "contradiction"),
-                    Choice("😴 Boring", "boring"),
-                ],
-            ).ask()
-            if tag_choices:
-                store_rating(conn, text, system_tone=target_tier, tags=tag_choices)
 
     if total == 0:
         return None
@@ -427,6 +418,152 @@ def _spot_check_tui(
         fg="green" if accuracy >= 0.6 else "yellow",
     ))
     return accuracy
+
+
+# ---------------------------------------------------------------------------
+# Review ratings -> propose tuning_goals.md edits
+# ---------------------------------------------------------------------------
+
+
+def review_ratings(
+    conn: sqlite3.Connection,
+    since: str | None = None,
+    source: str | None = None,
+    model: str = DEFAULT_PROPOSER_MODEL,
+) -> None:
+    """Analyze human ratings and propose tuning_goals.md edits.
+
+    Reads ratings, builds a mismatch summary, asks an LLM to propose
+    specific edits to tuning_goals.md, and displays the diff for human
+    approval. Does NOT write the file.
+    """
+    import json as _json
+    from collections import Counter
+
+    from subtitle_generator.feedback import ensure_ratings_table
+    ensure_ratings_table(conn)
+
+    query = "SELECT subtitle, system_tone, thumbs, tone_override, tags, source, created_at FROM human_ratings"
+    conditions = []
+    params = []
+    if since:
+        conditions.append("created_at >= ?")
+        params.append(since)
+    if source:
+        conditions.append("source = ?")
+        params.append(source)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY created_at DESC LIMIT 100"
+
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        click.echo("No ratings found matching filters.")
+        return
+
+    click.echo(f"Analyzing {len(rows)} ratings")
+    if source:
+        click.echo(f"  Source filter: {source}")
+
+    total = 0
+    matches = 0
+    mismatch_directions = Counter()
+    tag_counts = Counter()
+    mismatch_examples = []
+
+    for sub, sys_tone, thumbs, tone_override, tags_json, src, created in rows:
+        if sys_tone and tone_override:
+            total += 1
+            if sys_tone == tone_override:
+                matches += 1
+            else:
+                mismatch_directions[(sys_tone, tone_override)] += 1
+                if len(mismatch_examples) < 10:
+                    mismatch_examples.append((sys_tone, tone_override, sub))
+        tags = _json.loads(tags_json) if tags_json else []
+        for tag in tags:
+            tag_counts[tag] += 1
+
+    if total == 0:
+        click.echo("No tone-rated entries found (need system_tone + tone_override).")
+        return
+
+    accuracy = matches / total
+    click.echo(f"  Tone accuracy: {matches}/{total} ({accuracy:.0%})")
+    click.echo(f"  Tags: {dict(tag_counts.most_common())}")
+
+    summary_lines = [
+        f"## Human Rating Analysis ({total} rated samples)",
+        f"Tone accuracy: {matches}/{total} ({accuracy:.0%})",
+        "",
+        "### Mismatch patterns:",
+    ]
+    for (sys, felt), count in mismatch_directions.most_common():
+        summary_lines.append(f"  target={sys} -> felt={felt}: {count}x")
+    summary_lines.append("")
+    summary_lines.append("### Mismatch examples:")
+    for sys, felt, sub in mismatch_examples:
+        summary_lines.append(f"  [{sys}->{felt}] {sub}")
+    if tag_counts:
+        summary_lines.append("")
+        summary_lines.append(f"### Quality tags: {dict(tag_counts.most_common())}")
+    summary_text = "\n".join(summary_lines)
+
+    click.echo(f"\n{summary_text}\n")
+
+    goals_text = _load_goals()
+
+    prompt = f"""You are analyzing human feedback on a subtitle generator to propose
+improvements to its tuning goals document.
+
+## Current tuning_goals.md:
+{goals_text}
+
+## Human rating analysis:
+{summary_text}
+
+Based on the mismatch patterns and quality tags, propose SPECIFIC edits to
+tuning_goals.md. Focus on:
+1. Updating the exploration strategy based on what the data shows
+2. Adjusting priority order if certain params clearly matter more/less
+3. Adding observations about which slots/tiers are miscalibrated
+4. Noting any quality issues (grammar, contradictions) that need attention
+
+Output your proposed changes as a unified diff (--- old / +++ new format)
+showing exactly which lines to change. Only include sections that need changes.
+Do NOT rewrite the entire file -- show targeted edits.
+"""
+
+    click.echo("Generating proposed edits ...")
+    try:
+        from pydantic import BaseModel
+
+        class GoalsEdit(BaseModel):
+            diff: str
+            reasoning: str
+
+        result = structured_completion(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            schema=GoalsEdit,
+            timeout=300.0,
+            max_retries=2,
+        )
+
+        click.echo(click.style("\n=== Proposed tuning_goals.md edits ===\n", bold=True))
+        click.echo(result.diff)
+        click.echo(click.style(f"\nReasoning: {result.reasoning}", fg="cyan"))
+        click.echo(click.style(
+            "\nTo apply: edit tuning_goals.md manually with the changes above.",
+            fg="green",
+        ))
+
+    except Exception as e:
+        click.echo(f"  Warning: LLM analysis failed: {e}")
+        click.echo("  The rating summary above can still be used to manually edit tuning_goals.md.")
+
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -441,13 +578,14 @@ def run_tone_tuning(
     proposer_model: str = DEFAULT_PROPOSER_MODEL,
     results_file: str = "results.tsv",
     dry_run: bool = False,
-    spot_check: bool = False,
-    spot_check_tui: bool = False,
 ) -> dict:
     """Autoresearch loop for tone parameters.
 
-    Each iteration: propose a single parameter change via LLM, evaluate,
-    keep if improved, revert otherwise.
+    Pure automated loop (no human input). Each iteration: propose a single
+    parameter change via LLM, evaluate, keep if improved, revert otherwise.
+
+    Human feedback flows through tuning_goals.md edits between runs,
+    not through the loop itself (autoresearch pattern).
 
     Returns the final parameter dict.
     """
@@ -467,17 +605,6 @@ def run_tone_tuning(
         f"Composite: {current_score:.3f}\n"
     )
 
-    # Baseline spot-check: rate current output before any changes
-    if spot_check or spot_check_tui:
-        click.echo(click.style(
-            "  ⏸ Baseline spot check (before tuning):",
-            fg="green", bold=True,
-        ))
-        _run_spot_check(
-            conn, 0, iterations, seed_base=999,
-            use_tui=spot_check_tui,
-        )
-
     for i in range(1, iterations + 1):
         click.echo(f"--- Iteration {i}/{iterations} ---")
 
@@ -486,12 +613,6 @@ def run_tone_tuning(
         results_history = _load_results_history(results_file)
 
         # Propose a parameter change
-        # Include human feedback summary if enough ratings exist
-        human_feedback_section = ""
-        feedback_summary = get_summary(conn)
-        if feedback_summary:
-            human_feedback_section = "\n" + format_summary_for_proposer(feedback_summary) + "\n"
-
         proposal_prompt = f"""You are tuning parameters for a subtitle generator.
 
 ## Current parameter values:
@@ -510,13 +631,12 @@ def run_tone_tuning(
 
 ## Parameter bounds:
 {bounds_text}
-{human_feedback_section}
+
 Propose ONE parameter change that you think will improve the composite score.
 Prioritize parameters marked as NEW in the priority order — they have never been tuned
 and represent the biggest untapped improvement opportunity. The `pop_*` parameters were
 specifically added to replace the old freq-only scoring with empirical popularity data.
 Consider what previous experiments tell you about which direction to move.
-{f"Also consider the human feedback above — tone mismatches suggest the popularity blend params, per-slot multipliers, or tone targets may need adjustment." if human_feedback_section else ""}
 """
 
         click.echo("  proposing parameter change …")
@@ -590,17 +710,6 @@ Consider what previous experiments tell you about which direction to move.
             conn, rater_model, seed_base=1000 + i * 100,
         )
 
-        # Spot-check: exponential backoff (check at 1, 2, 4, 8, 16…)
-        human_approval = None
-        if (spot_check or spot_check_tui) and _is_spot_check_iteration(i):
-            human_approval = _run_spot_check(
-                conn, i, iterations, seed_base=1000 + i * 100,
-                use_tui=spot_check_tui,
-            )
-            if human_approval is not None:
-                # Blend: 40% quality + 40% separation + 20% human
-                new_score = 0.4 * new_quality + 0.4 * new_separation + 0.2 * human_approval
-
         delta = new_score - current_score
 
         if new_score > current_score:
@@ -661,8 +770,6 @@ def run_full_tuning(
     proposer_model: str = DEFAULT_PROPOSER_MODEL,
     results_file: str = "results.tsv",
     dry_run: bool = False,
-    spot_check: bool = False,
-    spot_check_tui: bool = False,
 ) -> None:
     """Run both tuning phases.
 
@@ -684,6 +791,4 @@ def run_full_tuning(
             proposer_model=proposer_model,
             results_file=results_file,
             dry_run=dry_run,
-            spot_check=spot_check,
-            spot_check_tui=spot_check_tui,
         )

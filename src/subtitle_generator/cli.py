@@ -580,10 +580,14 @@ def calibrate_remix_cmd(samples: int, model: str | None):
 @click.option("--results-file", default="results.tsv", help="TSV file for experiment log (default: results.tsv).")
 @click.option("--dry-run", is_flag=True, help="Show proposals without evaluating or applying.")
 @click.option("--show-results", is_flag=True, help="Display past tuning results and exit.")
-@click.option("--spot-check", is_flag=True, help="Pause for human spot-checks at exponentially-spaced iterations (1, 2, 4, 8…).")
-@click.option("--spot-check-tui", is_flag=True, help="Use questionary TUI for spot-checks (faster grid UI). Implies --spot-check.")
+@click.option("--spot-check", is_flag=True, hidden=True, help="Deprecated. Use 'subtitle-gen spot-check' instead.")
+@click.option("--spot-check-tui", is_flag=True, hidden=True, help="Deprecated. Use 'subtitle-gen spot-check --tui' instead.")
 def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool, spot_check: bool, spot_check_tui: bool):
     """Unified tuning pipeline (autoresearch-inspired).
+
+    Pure automated loop — no human input during the run. Human feedback
+    flows through tuning_goals.md edits between runs (see spot-check and
+    review-ratings commands).
 
     Runs two phases:
       Phase 1 (remix): Grid sweep over min_sim and remix_prob
@@ -596,9 +600,10 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
       subtitle-gen tune --phase remix --samples 100  # remix only, high confidence
       subtitle-gen tune --dry-run                    # show proposals only
       subtitle-gen tune --show-results               # view experiment history
-      subtitle-gen tune --spot-check                 # with human spot-checks (CLI)
-      subtitle-gen tune --spot-check-tui             # with TUI grid spot-checks
     """
+    if spot_check or spot_check_tui:
+        click.echo("⚠ --spot-check flags are deprecated. Use 'subtitle-gen spot-check' instead.")
+        click.echo("  Continuing without spot-checks.\n")
     if show_results:
         from pathlib import Path
         path = Path(results_file)
@@ -624,9 +629,59 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
         proposer_model=proposer_model or DEFAULT_PROPOSER_MODEL,
         results_file=results_file,
         dry_run=dry_run,
-        spot_check=spot_check,
-        spot_check_tui=spot_check_tui,
     )
+    conn.close()
+
+
+@cli.command("spot-check")
+@click.option("--tui", is_flag=True, help="Use questionary TUI for grid-style rating.")
+@click.option("--samples", default=2, type=click.IntRange(min=1, max=5), help="Samples per tier (default: 2).")
+@click.option("--source", default="spot_check", help="Rating source tag (default: spot_check).")
+@click.pass_context
+def spot_check_cmd(ctx, tui: bool, samples: int, source: str):
+    """Rate subtitle output by tone tier (separate from tuning).
+
+    Generates samples for each tier (pop/mainstream/niche) and asks which
+    tier each subtitle feels like. Stores ratings in human_ratings table.
+
+    Run this between tune runs, then use review-ratings to analyze
+    results and propose tuning_goals.md edits.
+
+    \b
+    Examples:
+      subtitle-gen spot-check              # CLI mode, 2 per tier
+      subtitle-gen spot-check --tui        # TUI grid mode
+      subtitle-gen spot-check --samples 3  # 3 per tier = 9 total
+    """
+    conn = ctx.obj["conn"]
+    from subtitle_generator.tune import run_spot_check
+    run_spot_check(conn, n_samples=samples, use_tui=tui, source=source)
+    conn.close()
+
+
+@cli.command("review-ratings")
+@click.option("--since", default=None, help="ISO date to review from (default: all recent).")
+@click.option("--source", default=None, help="Filter by source (spot_check, web_user, pull_ratings).")
+@click.option("--model", default=None, help="LLM model for analysis (default: proposer model).")
+@click.pass_context
+def review_ratings_cmd(ctx, since: str | None, source: str | None, model: str | None):
+    """Analyze human ratings and propose tuning_goals.md edits.
+
+    Reads recent human_ratings, identifies mismatch patterns, and has
+    an LLM propose specific edits to tuning_goals.md. Shows the diff
+    for human approval — does NOT write the file automatically.
+
+    \b
+    Examples:
+      subtitle-gen review-ratings                     # analyze all recent
+      subtitle-gen review-ratings --source spot_check # spot-check only
+      subtitle-gen review-ratings --source web_user   # end-user only
+      subtitle-gen review-ratings --since 2026-04-15  # since date
+    """
+    conn = ctx.obj["conn"]
+    from subtitle_generator.tune import review_ratings
+    from subtitle_generator.eval_harness import DEFAULT_PROPOSER_MODEL
+    review_ratings(conn, since=since, source=source, model=model or DEFAULT_PROPOSER_MODEL)
     conn.close()
 
 
@@ -842,6 +897,7 @@ def pull_ratings_cmd(ctx, since: str | None, account: str | None):
             tone_override=entity.get("tone_override") or None,
             free_text=entity.get("free_text") or None,
             tags=tags,
+            source="pull_ratings",
         )
         # Store RowKey in config_snapshot for dedup on next sync
         conn.execute(

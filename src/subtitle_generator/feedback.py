@@ -50,10 +50,12 @@ CREATE TABLE IF NOT EXISTS human_ratings (
 def ensure_ratings_table(conn: sqlite3.Connection) -> None:
     """Create the human_ratings table if it doesn't exist."""
     conn.execute(_CREATE_TABLE_SQL)
-    # Migrate: add tags column if missing
+    # Migrate: add columns if missing
     cols = {r[1] for r in conn.execute("PRAGMA table_info(human_ratings)")}
     if "tags" not in cols:
         conn.execute("ALTER TABLE human_ratings ADD COLUMN tags TEXT DEFAULT '[]'")
+    if "source" not in cols:
+        conn.execute("ALTER TABLE human_ratings ADD COLUMN source TEXT DEFAULT 'unknown'")
     conn.commit()
 
 
@@ -71,6 +73,7 @@ def store_rating(
     tone_override: str | None = None,
     free_text: str | None = None,
     tags: list[str] | None = None,
+    source: str = "unknown",
 ) -> int:
     """Store a human rating. Returns the row id.
 
@@ -81,6 +84,7 @@ def store_rating(
         tone_override: What the human thinks the tone should be (p/m/n).
         free_text: Optional free-text comment.
         tags: Quality tags like ["funny", "grammar", "contradiction", "boring"].
+        source: Origin of this rating ("spot_check", "web_user", "pull_ratings").
     """
     ensure_ratings_table(conn)
 
@@ -101,10 +105,10 @@ def store_rating(
     cur = conn.execute(
         """INSERT INTO human_ratings
            (subtitle, system_tone, thumbs, tone_override, free_text,
-            interpreted, config_snapshot, tags)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            interpreted, config_snapshot, tags, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (subtitle, system_tone, thumbs, tone_override, free_text,
-         interpreted, config_snapshot, tags_json),
+         interpreted, config_snapshot, tags_json, source),
     )
     conn.commit()
     return cur.lastrowid
