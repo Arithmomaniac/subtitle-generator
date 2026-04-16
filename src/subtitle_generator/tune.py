@@ -182,11 +182,13 @@ def _append_result(
     description: str,
 ) -> None:
     """Append one line to the results TSV."""
+    # Sanitize description: tabs/newlines would corrupt TSV parsing
+    safe_desc = description.replace("\t", " ").replace("\n", " ").replace("\r", "")
     with open(results_file, "a", encoding="utf-8") as f:
         f.write(
             f"{iteration}\t{param}\t{old_value}\t{new_value}\t"
             f"{quality:.4f}\t{separation:.4f}\t{comp:.4f}\t"
-            f"{status}\t{description}\n"
+            f"{status}\t{safe_desc}\n"
         )
 
 

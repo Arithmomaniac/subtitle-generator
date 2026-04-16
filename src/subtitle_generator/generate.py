@@ -781,6 +781,16 @@ def generate_subtitle(
         if obj_target is not None:
             obj_target *= cfg.get("pop_slot_mult_of_object", 1.0)
 
+    # Build adjusted tone_target dict with per-slot multipliers applied
+    # (used for remix path which receives the dict, not individual scalars)
+    adjusted_tone_target = None
+    if tone_target is not None:
+        adjusted_tone_target = {
+            "list_item": list_target,
+            "action_noun": action_target,
+            "of_object": obj_target,
+        }
+
     # Draw or lock list items (avoid duplicates with locked value)
     if locks and "item1" in locks and "item2" in locks:
         items = [locks["item1"], locks["item2"]]
@@ -819,7 +829,7 @@ def generate_subtitle(
         sub_locks = {k: v for k, v in (locks or {}).items() if k in sub_part_keys}
 
         if sub_locks:
-            result = _try_remix(conn, rng, tone_target, of_object, min_sim,
+            result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim,
                                 locked_parts=sub_locks)
             if result:
                 of_object, remix_parts, remix_similarity = result
@@ -827,7 +837,7 @@ def generate_subtitle(
         elif remix_prob > 0 and len(of_object.split()) >= 2:
             should_remix = (rng or random).random() < remix_prob
             if should_remix:
-                result = _try_remix(conn, rng, tone_target, of_object, min_sim)
+                result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim)
                 if result:
                     of_object, remix_parts, remix_similarity = result
                     remixed = True
