@@ -113,27 +113,29 @@ jobs:
           STORAGE_ACCOUNT="${AZURE_FUNCTIONAPP_NAME/-func/}st"
           STORAGE_ACCOUNT="${STORAGE_ACCOUNT//-/}"
 
-          # Upload HTML files (exclude spot-check.html — local-only workflow)
+          # Upload HTML files (only index.html — spot-check.html is local-only)
           az storage blob upload-batch \
             --account-name "$STORAGE_ACCOUNT" \
             --destination '$web' \
             --source web/ \
             --overwrite \
             --content-type "text/html; charset=utf-8" \
-            --pattern "*.html" \
-            --exclude-pattern "spot-check.html" \
+            --pattern "index.html" \
             --auth-mode login
 
           # Upload JS files (exclude spot-check-app.js — local-only workflow)
-          az storage blob upload-batch \
-            --account-name "$STORAGE_ACCOUNT" \
-            --destination '$web' \
-            --source web/ \
-            --overwrite \
-            --content-type "application/javascript; charset=utf-8" \
-            --pattern "*.js" \
-            --exclude-pattern "spot-check-app.js" \
-            --auth-mode login
+          for jsfile in web/js/*.js; do
+            fname=$(basename "$jsfile")
+            if [ "$fname" = "spot-check-app.js" ]; then continue; fi
+            az storage blob upload \
+              --account-name "$STORAGE_ACCOUNT" \
+              --container-name '$web' \
+              --file "$jsfile" \
+              --name "js/$fname" \
+              --overwrite \
+              --content-type "application/javascript; charset=utf-8" \
+              --auth-mode login
+          done
 
           # Upload version.json
           az storage blob upload \
