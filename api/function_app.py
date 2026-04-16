@@ -172,6 +172,8 @@ def generate(req: func.HttpRequest) -> func.HttpResponse:
                 "remixed": sub.remixed,
                 "remix_parts": sub.remix_parts,
                 "remix_similarity": sub.remix_similarity,
+                "of_article": sub.of_article,
+                "action_article": sub.action_article,
                 "sources": sources,
             }
             return _json_response(result)
