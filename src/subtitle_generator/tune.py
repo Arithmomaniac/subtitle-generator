@@ -39,7 +39,7 @@ def _load_goals() -> str:
     """Read tuning_goals.md from repo root."""
     goals_path = pathlib.Path(__file__).parent.parent.parent / "tuning_goals.md"
     if goals_path.exists():
-        return goals_path.read_text()
+        return goals_path.read_text(encoding="utf-8")
     return "(no tuning_goals.md found)"
 
 
@@ -80,7 +80,7 @@ def _load_results_history(results_file: str, max_lines: int = 20) -> str:
     path = pathlib.Path(results_file)
     if not path.exists():
         return "(no previous experiments)"
-    lines = path.read_text().strip().split("\n")
+    lines = path.read_text(encoding="utf-8").strip().split("\n")
     if len(lines) <= max_lines + 1:
         return "\n".join(lines)
     return "\n".join([lines[0]] + lines[-max_lines:])
@@ -93,6 +93,7 @@ def _ensure_results_header(results_file: str) -> None:
         path.write_text(
             "iteration\tparam\told_value\tnew_value\t"
             "quality\tseparation\tcomposite\tstatus\tdescription\n",
+            encoding="utf-8",
             encoding="utf-8",
         )
 
