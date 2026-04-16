@@ -57,11 +57,20 @@ log10(1+freq) scale (0–2.5, median ~0.5). When `pop_tone_blend` is high:
 
 ### Exploration strategy
 
-1. FIRST: Try adjusting `pop_tone_blend` (currently 1.0) and `pop_base_weight_blend`
-   (currently 0.5) — these have the most direct impact on output character
-2. THEN: Recalibrate `tone_target_*` to match the popularity_score scale
-3. THEN: Fine-tune `pop_exponent` to control score distribution shape
-4. LAST: Adjust `pop_weight_spl` / `pop_weight_ol` (requires DB rebuild)
+Initial tuning round (April 2026) explored all `pop_*` params. Key findings:
+- `pop_tone_blend=0.5` beat 1.0 — blending freq+pop works better than pure pop
+- `pop_base_weight_blend`: both 0.25 and 0.75 hurt from 0.5 — 0.5 is the sweet spot
+- Per-slot multipliers: reducing bias on secondary slots helped (list_item=0.8, action_noun=0.9),
+  but changing of_object in either direction (0.9 or 1.2) hurt — leave at 1.0
+- `pop_exponent=1.2` slightly helped — more contrast in popularity scores
+- `pop_missing_default`: lowering to 0.05 hurt — 0.1 is fine
+- Tone targets were NOT successfully recalibrated — attempts to move them hurt.
+  This may need a coordinated multi-param adjustment rather than single-param hill climbing.
+
+Future tuning should focus on:
+1. Coordinated tone target recalibration (move all `tone_target_*` together for the blended scale)
+2. `pop_weight_spl` / `pop_weight_ol` exploration (requires `populate_popularity.py` re-run)
+3. `sample_tone_spread` — still never changed from 0.6, may interact differently with popularity
 
 ## Coherence Constraints
 
@@ -78,9 +87,9 @@ propose values outside these bounds.
 
 | Parameter | Min | Max | Current | Notes |
 |---|---|---|---|---|
-| `weighted_sample_spread` | 0.1 | 1.0 | 0.4 | Gaussian width; too low = only exact-match fillers, too high = no tone effect |
+| `weighted_sample_spread` | 0.1 | 1.0 | 0.35 | Gaussian width; too low = only exact-match fillers, too high = no tone effect |
 | `weighted_sample_bias_floor` | 0.01 | 0.30 | 0.05 | Minimum weight; too low = complete suppression, too high = no suppression |
-| `tone_target_pop_*` | 0.5 | 2.5 | 1.0–1.5 | Higher = more common words only |
+| `tone_target_pop_*` | 0.5 | 2.5 | 1.0–1.5 | Higher = more common words only. May need recalibration for blended scale. |
 | `tone_target_mainstream_*` | 0.3 | 2.0 | 0.8–1.0 | Should be between pop and niche |
 | `tone_target_niche_*` | 0.0 | 1.0 | 0.25 | Lower = rarer words |
 | `sample_tone_spread` | 0.2 | 1.5 | 0.6 | Tier sampling Gaussian width |
@@ -96,31 +105,30 @@ propose values outside these bounds.
 | `pop_weight_spl` | 0.0 | 1.0 | 0.7 | Weight of SPL checkout signal in popularity composite |
 | `pop_weight_ol` | 0.0 | 1.0 | 0.3 | Weight of OL edition count signal in popularity composite |
 | `pop_weight_freq` | 0.0 | 1.0 | 0.0 | Weight of corpus freq fallback in popularity composite |
-| `pop_exponent` | 0.5 | 2.0 | 1.0 | Power-law exponent applied to raw scores before combining |
-| `pop_base_weight_blend` | 0.0 | 1.0 | 0.0 | Blend: 0=sqrt(freq) for base weight, 1=sqrt(popularity) |
-| `pop_tone_blend` | 0.0 | 1.0 | 0.0 | Blend: 0=log10(1+freq) for tone bias, 1=popularity_score |
+| `pop_exponent` | 0.5 | 2.0 | 1.2 | Power-law exponent applied to raw scores before combining |
+| `pop_base_weight_blend` | 0.0 | 1.0 | 0.5 | Blend: 0=sqrt(freq) for base weight, 1=sqrt(popularity). Sweet spot at 0.5. |
+| `pop_tone_blend` | 0.0 | 1.0 | 0.5 | Blend: 0=log10(1+freq) for tone bias, 1=popularity_score. 0.5 beat 1.0. |
 | `pop_missing_default` | 0.01 | 0.5 | 0.1 | Default popularity_score for fillers with no empirical data |
-| `pop_slot_mult_list_item` | 0.5 | 2.0 | 1.0 | Multiplier on tone_target for list items (lower = less pop bias on items) |
-| `pop_slot_mult_action_noun` | 0.5 | 2.0 | 1.0 | Multiplier on tone_target for action nouns |
-| `pop_slot_mult_of_object` | 0.5 | 2.0 | 1.0 | Multiplier on tone_target for of-objects (higher = stronger pop bias on of-obj) |
+| `pop_slot_mult_list_item` | 0.5 | 2.0 | 0.8 | Multiplier on tone_target for list items. Lower helped (less pop bias on items). |
+| `pop_slot_mult_action_noun` | 0.5 | 2.0 | 0.9 | Multiplier on tone_target for action nouns. Lower helped. |
+| `pop_slot_mult_of_object` | 0.5 | 2.0 | 1.0 | Multiplier on tone_target for of-objects. Both 0.9 and 1.2 hurt — leave at 1.0. |
 
 ## Priority Order
 
-**NEW popularity params are the highest priority** — they have never been tuned and
-the system was specifically built to enable their exploration.
+From tuning history — parameters ranked by impact and exploration status:
 
-1. **`pop_tone_blend`** — NEW, never tuned. Controls whether tone uses freq or popularity. Start at 1.0.
-2. **`pop_base_weight_blend`** — NEW, never tuned. Controls base sampling weight source.
-3. **`pop_slot_mult_of_object`** — NEW. Human feedback shows of-objects dominate tier perception.
-   Academic of-objects ("Carceral Expansion", "Dispute Resolution") make pop feel niche.
-   Try values > 1.0 to strengthen pop bias specifically on of-objects.
-4. **`pop_slot_mult_list_item`** — NEW. Human feedback shows list items are less tier-discriminating
-   ("Spies", "Religion" appear familiar across tiers). Try values < 1.0 to reduce pop bias on items.
-5. **`tone_target_*`** — Need recalibration for popularity scale. See Popularity Scoring section.
-6. **`pop_exponent`** — NEW, controls score distribution shape.
-7. `weighted_sample_bias_floor` — 6× change (0.3→0.05), previously highest impact
-8. `weighted_sample_spread` — 2× change (0.8→0.4), previously second-highest
-9. `tier_center_*`, `accessibility_threshold_*` — may need recalibration for popularity scale
+1. **`pop_slot_mult_action_noun`** — biggest single gain (+0.050), reduced from 1.0→0.9
+2. **`pop_tone_blend`** — +0.022, reduced from 1.0→0.5. Blending freq+pop beat pure pop.
+3. **`pop_slot_mult_list_item`** — +0.012, reduced from 1.0→0.8. Less pop bias on items helped.
+4. **`pop_exponent`** — +0.003, raised from 1.0→1.2. More score contrast helped slightly.
+5. `weighted_sample_spread` — historically impactful, currently at 0.35
+6. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.05)
+7. `tone_target_*` — need coordinated recalibration for blended scale (single-param changes hurt)
+8. `sample_tone_spread` — never tuned, may interact with popularity differently
+9. `pop_base_weight_blend` — explored both directions from 0.5, both hurt. Stable at 0.5.
+10. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.
+11. `pop_missing_default` — lowering hurt. Stable at 0.1.
+12. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires DB rebuild)
 
 ## Simplicity Criterion
 
