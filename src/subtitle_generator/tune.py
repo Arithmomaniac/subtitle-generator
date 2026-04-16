@@ -76,14 +76,23 @@ def _format_bounds(bounds: dict[str, tuple[float, float]]) -> str:
 
 
 def _load_results_history(results_file: str, max_lines: int = 20) -> str:
-    """Load recent results for the proposer's context."""
+    """Load recent results for the proposer's context.
+
+    Always includes regime-change markers even if they're outside the
+    last max_lines, so the proposer knows about param availability changes.
+    """
     path = pathlib.Path(results_file)
     if not path.exists():
         return "(no previous experiments)"
     lines = path.read_text(encoding="utf-8").strip().split("\n")
     if len(lines) <= max_lines + 1:
         return "\n".join(lines)
-    return "\n".join([lines[0]] + lines[-max_lines:])
+    # Always include the header + any regime-change lines + last max_lines
+    header = lines[0]
+    regime_lines = [l for l in lines[1:-max_lines] if "[regime change]" in l]
+    recent = lines[-max_lines:]
+    parts = [header] + regime_lines + recent
+    return "\n".join(parts)
 
 
 def _ensure_results_header(results_file: str) -> None:
@@ -94,7 +103,69 @@ def _ensure_results_header(results_file: str) -> None:
             "iteration\tparam\told_value\tnew_value\t"
             "quality\tseparation\tcomposite\tstatus\tdescription\n",
             encoding="utf-8",
-            encoding="utf-8",
+        )
+
+
+def _check_regime_change(results_file: str) -> None:
+    """Insert a regime-change marker if available params changed since last run.
+
+    Scans the TSV for the most recent regime marker (or all experiment rows if none)
+    to determine which params were available. If ALL_TUNABLE_PARAMS has new keys,
+    appends a marker row so the proposer knows old history is from a different regime.
+    """
+    path = pathlib.Path(results_file)
+    if not path.exists():
+        return
+
+    current_params = sorted(ALL_TUNABLE_PARAMS.keys())
+    lines = path.read_text(encoding="utf-8").strip().split("\n")
+
+    # Find the most recent regime marker
+    last_regime_params = None
+    for line in reversed(lines):
+        if line.startswith("---\t[regime change]"):
+            # Extract param list from description
+            parts = line.split("\t")
+            if len(parts) >= 9:
+                desc = parts[8]
+                if "available_params=" in desc:
+                    param_str = desc.split("available_params=")[1]
+                    last_regime_params = sorted(param_str.split(","))
+            break
+
+    if last_regime_params is None:
+        # No regime marker yet — extract params mentioned in experiment rows
+        mentioned = set()
+        for line in lines[1:]:  # skip header
+            if line.startswith("---"):
+                continue
+            parts = line.split("\t")
+            if len(parts) >= 2 and parts[1] not in ("(failed)", "[regime change]"):
+                mentioned.add(parts[1])
+        # If we have new params that were never mentioned and never regime-marked, add marker
+        if mentioned and set(current_params) - mentioned:
+            new_params = sorted(set(current_params) - mentioned)
+            _append_result(
+                results_file, 0, "[regime change]", 0, 0, 0, 0, 0,
+                "regime",
+                f"New params added: {', '.join(new_params)}. "
+                f"History above is from a prior regime without these params. "
+                f"available_params={','.join(current_params)}",
+            )
+            return
+
+    if last_regime_params is not None and last_regime_params != current_params:
+        new_params = sorted(set(current_params) - set(last_regime_params))
+        removed_params = sorted(set(last_regime_params) - set(current_params))
+        desc_parts = []
+        if new_params:
+            desc_parts.append(f"New params added: {', '.join(new_params)}.")
+        if removed_params:
+            desc_parts.append(f"Params removed: {', '.join(removed_params)}.")
+        desc_parts.append(f"available_params={','.join(current_params)}")
+        _append_result(
+            results_file, 0, "[regime change]", 0, 0, 0, 0, 0,
+            "regime", " ".join(desc_parts),
         )
 
 
@@ -381,6 +452,7 @@ def run_tone_tuning(
     Returns the final parameter dict.
     """
     _ensure_results_header(results_file)
+    _check_regime_change(results_file)
     goals_text = _load_goals()
     bounds = _parse_bounds(goals_text)
     bounds_text = _format_bounds(bounds)
