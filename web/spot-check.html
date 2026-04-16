@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="api-base" content="">
+<title>Spot Check — Subtitle Generator</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+[x-cloak]{display:none!important}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e0;min-height:100vh}
+.app{max-width:860px;margin:0 auto;padding:20px}
+
+/* Header */
+.header{text-align:center;padding:16px 0;border-bottom:1px solid #333;margin-bottom:20px}
+.header h1{font-size:20px;color:#f0f0f0;font-weight:600}
+.header .tagline{font-size:12px;color:#666;margin-top:4px}
+.back-link{font-size:12px;color:#6c8ebf;text-decoration:none;display:inline-block;margin-top:8px}
+.back-link:hover{text-decoration:underline}
+
+/* Settings */
+.settings{display:flex;align-items:center;justify-content:center;gap:16px;margin-bottom:20px}
+.settings label{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.settings select{padding:4px 8px;background:#0f1a30;border:1px solid #333;border-radius:5px;color:#e0e0e0;font-size:12px}
+
+/* Progress */
+.progress-bar{background:#0f1a30;border:1px solid #2a2a4a;border-radius:8px;padding:10px 16px;margin-bottom:18px;display:flex;align-items:center;gap:12px}
+.progress-text{font-size:13px;color:#aaa;min-width:60px}
+.progress-track{flex:1;height:6px;background:#2a2a4a;border-radius:3px;overflow:hidden}
+.progress-fill{height:100%;background:#e07a5f;border-radius:3px;transition:width .3s ease}
+.session-stats{font-size:11px;color:#666;text-align:right;min-width:120px}
+
+/* Subtitle card */
+.subtitle-card{background:#0f1a30;border:2px solid #2a2a4a;border-radius:12px;padding:28px 24px;margin-bottom:18px;text-align:center;min-height:120px;display:flex;flex-direction:column;justify-content:center;align-items:center}
+.slot-row{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:4px;font-size:20px;line-height:1.8}
+.slot{display:inline-flex;align-items:center;padding:3px 10px;border-radius:7px}
+.slot-list1{background:#1a3a2a;border:1px solid #2d6a4f;color:#a8dadc}
+.slot-list2{background:#1a2a3a;border:1px solid #3a6b8c;color:#a8c8dc}
+.slot-action{background:#2a1a3a;border:1px solid #6b3a8c;color:#d4a8dc}
+.slot-of{background:#3a2a1a;border:1px solid #8c6b3a;color:#dcd4a8}
+.slot-subpart{background:#332a1a;border:1px dashed #8c6b3a;color:#dcd4a8;font-size:18px}
+.punc{color:#555;font-size:20px;user-select:none}
+.empty-state{color:#555;font-style:italic;font-size:16px}
+
+/* Tier buttons */
+.tier-section{text-align:center;margin-bottom:18px}
+.tier-label{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+.tier-buttons{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.btn-tier{padding:10px 28px;border-radius:8px;border:2px solid #444;background:#2a2a4a;color:#ccc;font-size:14px;font-weight:600;cursor:pointer;transition:all .12s;min-width:120px}
+.btn-tier:hover:not(:disabled){transform:translateY(-1px);border-color:#6c8ebf}
+.btn-tier:active:not(:disabled){transform:translateY(0)}
+.btn-tier:disabled{opacity:.4;cursor:not-allowed}
+.btn-tier.pop{border-color:#e07a5f;color:#e07a5f}
+.btn-tier.pop:hover:not(:disabled){background:#3a2520}
+.btn-tier.mainstream{border-color:#81b29a;color:#81b29a}
+.btn-tier.mainstream:hover:not(:disabled){background:#1a2a22}
+.btn-tier.niche{border-color:#6c8ebf;color:#6c8ebf}
+.btn-tier.niche:hover:not(:disabled){background:#1a2040}
+.btn-skip{padding:10px 20px;border-radius:8px;border:1px solid #333;background:transparent;color:#666;font-size:13px;cursor:pointer;transition:all .12s}
+.btn-skip:hover:not(:disabled){color:#aaa;border-color:#555}
+.btn-skip:disabled{opacity:.4;cursor:not-allowed}
+
+/* Reveal panel */
+.reveal-panel{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:14px 18px;margin-bottom:18px;text-align:center}
+.reveal-result{font-size:14px;margin-bottom:10px}
+.reveal-match{color:#3fb950}
+.reveal-mismatch{color:#d29922}
+.reveal-skip{color:#666}
+.tag-section{margin:10px 0}
+.tag-label{font-size:10px;color:#777;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.tag-buttons{display:flex;gap:6px;justify-content:center;flex-wrap:wrap}
+.btn-tag{padding:5px 12px;border-radius:14px;border:1px solid #3a5b4c;background:#1a2a2a;color:#a8dcb8;font-size:12px;cursor:pointer;transition:all .12s}
+.btn-tag:hover{border-color:#58ff8a}
+.btn-tag.active{background:#5f9fe0;border-color:#5f9fe0;color:#fff}
+.btn-next{padding:8px 24px;border-radius:7px;border:none;background:#e07a5f;color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:all .12s;margin-top:8px}
+.btn-next:hover{transform:translateY(-1px)}
+
+/* Summary */
+.summary-panel{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:20px;margin-bottom:18px}
+.summary-panel h3{font-size:14px;color:#f0f0f0;margin-bottom:12px}
+.summary-stat{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #2a2a4a;font-size:13px}
+.summary-stat:last-child{border-bottom:none}
+.summary-label{color:#aaa}
+.summary-value{color:#f0f0f0;font-weight:600}
+.summary-value.good{color:#3fb950}
+.summary-value.ok{color:#d29922}
+.summary-value.bad{color:#f85149}
+.mismatch-list{margin-top:12px;padding:10px;background:#0f1a30;border-radius:6px}
+.mismatch-item{font-size:12px;color:#ccc;margin-bottom:4px}
+.mismatch-item .arrow{color:#555;margin:0 4px}
+
+/* Actions */
+.actions{display:flex;gap:8px;justify-content:center;margin-bottom:18px}
+.btn{padding:8px 20px;border-radius:7px;border:none;font-size:13px;font-weight:600;cursor:pointer;transition:all .12s}
+.btn:hover{transform:translateY(-1px)}
+.btn:active{transform:translateY(0)}
+.btn-primary{background:#e07a5f;color:#fff}
+.btn-secondary{background:#2a2a4a;color:#ccc;border:1px solid #444}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+
+/* Keyboard hints */
+.keyboard-hints{text-align:center;font-size:11px;color:#555;margin-bottom:18px}
+.keyboard-hints kbd{background:#2a2a4a;border:1px solid #444;border-radius:3px;padding:1px 5px;font-family:'Cascadia Code',monospace;font-size:10px;color:#aaa}
+
+/* Spinner */
+@keyframes spin{to{transform:rotate(360deg)}}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid #444;border-top-color:#e07a5f;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
+
+/* Footer */
+.footer{text-align:center;padding:14px 0;font-size:10px;color:#444;border-top:1px solid #222}
+.footer a{color:#6c8ebf;text-decoration:none;margin:0 6px}
+.footer a:hover{text-decoration:underline}
+</style>
+<script type="module">
+  import { spotCheckApp } from "./js/spot-check-app.js";
+  document.addEventListener("alpine:init", () => {
+    Alpine.data("spotCheckApp", spotCheckApp);
+  });
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+</head>
+<body>
+<div class="app" x-cloak x-data="spotCheckApp" x-init="init()" @keydown.window="handleKey($event)">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>Spot Check</h1>
+    <div class="tagline">Rate subtitles by perceived tone tier</div>
+    <a class="back-link" href="/">&larr; Back to Generator</a>
+  </div>
+
+  <!-- Settings -->
+  <div class="settings" data-testid="settings">
+    <label>Samples per tier</label>
+    <select x-model.number="samplesPerTier" :disabled="items.length > 0 && phase !== 'idle'" data-testid="samples-select">
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+      <option value="4">4</option>
+      <option value="5">5</option>
+    </select>
+  </div>
+
+  <!-- Load / Start -->
+  <div class="actions" x-show="phase === 'idle'" data-testid="start-section">
+    <button class="btn btn-primary" @click="loadBatch()" :disabled="loading" data-testid="load-batch-btn">
+      <span x-show="loading" class="spinner"></span>
+      <span x-text="loading ? 'Loading...' : (sessionStats.total > 0 ? 'Load More' : 'Start Spot Check')"></span>
+    </button>
+  </div>
+
+  <!-- Progress bar -->
+  <div class="progress-bar" x-show="phase !== 'idle'" data-testid="progress-bar">
+    <span class="progress-text" x-text="(currentIndex + 1) + ' / ' + items.length" data-testid="progress-text"></span>
+    <div class="progress-track">
+      <div class="progress-fill" :style="'width:' + ((currentIndex / items.length) * 100) + '%'"></div>
+    </div>
+    <span class="session-stats" x-text="'Session: ' + sessionStats.total + ' rated, ' + (sessionStats.total > 0 ? Math.round(sessionStats.correct / sessionStats.total * 100) + '%' : '—')" data-testid="session-stats"></span>
+  </div>
+
+  <!-- Subtitle card (rating phase) -->
+  <template x-if="phase === 'rating' && currentItem">
+    <div>
+      <div class="subtitle-card" data-testid="subtitle-card">
+        <div class="slot-row">
+          <template x-for="(slot, i) in currentItem.slots" :key="i">
+            <span :class="slot.isPunc ? 'punc' : 'slot ' + slot.cls" x-text="slot.text"></span>
+          </template>
+        </div>
+      </div>
+
+      <!-- Tier selection -->
+      <div class="tier-section" data-testid="tier-section">
+        <div class="tier-label">Where does this belong?</div>
+        <div class="tier-buttons">
+          <button class="btn-tier pop" @click="rateTier('pop')" :disabled="submitting" data-testid="btn-pop">🔥 Pop</button>
+          <button class="btn-tier mainstream" @click="rateTier('mainstream')" :disabled="submitting" data-testid="btn-mainstream">📚 Mainstream</button>
+          <button class="btn-tier niche" @click="rateTier('niche')" :disabled="submitting" data-testid="btn-niche">🎓 Niche</button>
+          <button class="btn-skip" @click="skip()" :disabled="submitting" data-testid="btn-skip">Skip</button>
+        </div>
+      </div>
+
+      <!-- Keyboard hints -->
+      <div class="keyboard-hints" data-testid="keyboard-hints">
+        <kbd>P</kbd> Pop &nbsp; <kbd>M</kbd> Mainstream &nbsp; <kbd>N</kbd> Niche &nbsp; <kbd>S</kbd> Skip
+      </div>
+    </div>
+  </template>
+
+  <!-- Reveal phase (after rating, before advancing) -->
+  <template x-if="phase === 'reveal' && currentResult">
+    <div>
+      <div class="subtitle-card">
+        <div class="slot-row">
+          <template x-for="(slot, i) in currentItem.slots" :key="i">
+            <span :class="slot.isPunc ? 'punc' : 'slot ' + slot.cls" x-text="slot.text"></span>
+          </template>
+        </div>
+      </div>
+
+      <div class="reveal-panel" data-testid="reveal-panel">
+        <template x-if="currentResult.match === true">
+          <div class="reveal-result reveal-match" data-testid="reveal-match">✓ Match — target was <strong x-text="currentResult.target_tier"></strong></div>
+        </template>
+        <template x-if="currentResult.match === false">
+          <div class="reveal-result reveal-mismatch" data-testid="reveal-mismatch">✗ Mismatch — you said <strong x-text="currentResult.felt_tier"></strong>, target was <strong x-text="currentResult.target_tier"></strong></div>
+        </template>
+        <template x-if="currentResult.match === null">
+          <div class="reveal-result reveal-skip" data-testid="reveal-skip">⏭ Skipped — target was <strong x-text="currentResult.target_tier"></strong></div>
+        </template>
+
+        <!-- Tags (available during reveal) -->
+        <div class="tag-section" data-testid="tag-section">
+          <div class="tag-label">Quality tags (optional)</div>
+          <div class="tag-buttons">
+            <button class="btn-tag" :class="{ active: currentTags.includes('funny') }" @click="toggleTag('funny')" data-testid="tag-funny">😄 Funny <kbd>F</kbd></button>
+            <button class="btn-tag" :class="{ active: currentTags.includes('grammar') }" @click="toggleTag('grammar')" data-testid="tag-grammar">🤔 Grammar <kbd>G</kbd></button>
+            <button class="btn-tag" :class="{ active: currentTags.includes('contradiction') }" @click="toggleTag('contradiction')" data-testid="tag-contradiction">🔄 Contradictory <kbd>C</kbd></button>
+            <button class="btn-tag" :class="{ active: currentTags.includes('boring') }" @click="toggleTag('boring')" data-testid="tag-boring">😴 Boring <kbd>B</kbd></button>
+          </div>
+        </div>
+
+        <button class="btn-next" @click="next()" data-testid="btn-next">Next →</button>
+      </div>
+
+      <div class="keyboard-hints">
+        <kbd>F</kbd> Funny &nbsp; <kbd>G</kbd> Grammar &nbsp; <kbd>C</kbd> Contradiction &nbsp; <kbd>B</kbd> Boring &nbsp; <kbd>Enter</kbd> Next
+      </div>
+    </div>
+  </template>
+
+  <!-- Summary -->
+  <template x-if="phase === 'summary'">
+    <div>
+      <div class="summary-panel" data-testid="summary-panel">
+        <h3>Batch Complete</h3>
+        <div class="summary-stat">
+          <span class="summary-label">Rated</span>
+          <span class="summary-value" x-text="batchStats.rated + ' / ' + items.length"></span>
+        </div>
+        <div class="summary-stat">
+          <span class="summary-label">Skipped</span>
+          <span class="summary-value" x-text="batchStats.skipped"></span>
+        </div>
+        <div class="summary-stat">
+          <span class="summary-label">Batch Accuracy</span>
+          <span class="summary-value" :class="batchStats.accuracy >= 0.7 ? 'good' : batchStats.accuracy >= 0.5 ? 'ok' : 'bad'" x-text="batchStats.rated > 0 ? Math.round(batchStats.accuracy * 100) + '%' : '—'" data-testid="batch-accuracy"></span>
+        </div>
+        <div class="summary-stat">
+          <span class="summary-label">Session Total</span>
+          <span class="summary-value" x-text="sessionStats.total + ' rated'" data-testid="session-total"></span>
+        </div>
+        <div class="summary-stat">
+          <span class="summary-label">Session Accuracy</span>
+          <span class="summary-value" :class="sessionAccuracy >= 0.7 ? 'good' : sessionAccuracy >= 0.5 ? 'ok' : 'bad'" x-text="sessionStats.total > 0 ? Math.round(sessionAccuracy * 100) + '%' : '—'" data-testid="session-accuracy"></span>
+        </div>
+
+        <!-- Mismatches -->
+        <template x-if="batchMismatches.length > 0">
+          <div class="mismatch-list" data-testid="mismatch-list">
+            <div class="tag-label">Mismatches</div>
+            <template x-for="m in batchMismatches" :key="m.text">
+              <div class="mismatch-item">
+                <span x-text="m.text.substring(0, 60) + (m.text.length > 60 ? '…' : '')"></span>
+                <span class="arrow">→</span>
+                felt <strong x-text="m.felt"></strong>, target <strong x-text="m.target"></strong>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" @click="loadBatch()" :disabled="loading" data-testid="load-more-btn">
+          <span x-show="loading" class="spinner"></span>
+          <span x-text="loading ? 'Loading...' : 'Load More'"></span>
+        </button>
+      </div>
+    </div>
+  </template>
+
+  <div class="footer">
+    <a href="/">Generator</a> &mdash;
+    <a href="https://github.com/Arithmomaniac/subtitle-generator" target="_blank">subtitle-generator</a>
+  </div>
+
+</div>
+</body>
+</html>

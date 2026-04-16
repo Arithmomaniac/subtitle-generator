@@ -113,7 +113,7 @@ jobs:
           STORAGE_ACCOUNT="${AZURE_FUNCTIONAPP_NAME/-func/}st"
           STORAGE_ACCOUNT="${STORAGE_ACCOUNT//-/}"
 
-          # Upload HTML files
+          # Upload HTML files (exclude spot-check.html — local-only workflow)
           az storage blob upload-batch \
             --account-name "$STORAGE_ACCOUNT" \
             --destination '$web' \
@@ -121,9 +121,10 @@ jobs:
             --overwrite \
             --content-type "text/html; charset=utf-8" \
             --pattern "*.html" \
+            --exclude-pattern "spot-check.html" \
             --auth-mode login
 
-          # Upload JS files
+          # Upload JS files (exclude spot-check-app.js — local-only workflow)
           az storage blob upload-batch \
             --account-name "$STORAGE_ACCOUNT" \
             --destination '$web' \
@@ -131,6 +132,7 @@ jobs:
             --overwrite \
             --content-type "application/javascript; charset=utf-8" \
             --pattern "*.js" \
+            --exclude-pattern "spot-check-app.js" \
             --auth-mode login
 
           # Upload version.json

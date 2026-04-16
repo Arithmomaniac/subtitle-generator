@@ -227,7 +227,6 @@ def _evaluate(
 def run_spot_check(
     conn: sqlite3.Connection,
     n_samples: int = 2,
-    use_tui: bool = False,
     source: str = "spot_check",
     seed_base: int | None = None,
 ) -> float | None:
@@ -235,6 +234,8 @@ def run_spot_check(
 
     Standalone command — not part of the tune loop. Stores ratings in
     human_ratings for later analysis via review_ratings().
+
+    For a richer UI, use the web spot-check page at /spot-check.html.
 
     Returns tone-accuracy (0.0-1.0) or None if all skipped.
     """
@@ -269,10 +270,7 @@ def run_spot_check(
             )
             all_samples.append((tier, sub.text, sub))
 
-    if use_tui:
-        accuracy = _spot_check_tui(conn, all_samples, tier_labels, tier_shortcuts, source)
-    else:
-        accuracy = _spot_check_cli(conn, all_samples, tier_labels, tier_shortcuts, source)
+    accuracy = _spot_check_cli(conn, all_samples, tier_labels, tier_shortcuts, source)
 
     if accuracy is not None:
         click.echo(f"\nRatings stored (source={source}). Run 'subtitle-gen review-ratings' to analyze.")
@@ -345,81 +343,6 @@ def _spot_check_cli(
     return accuracy
 
 
-def _spot_check_tui(
-    conn: sqlite3.Connection,
-    samples: list[tuple[str, str, object]],
-    tier_labels: dict[str, str],
-    tier_shortcuts: dict[str, str],
-    source: str = "spot_check",
-) -> float | None:
-    """TUI spot-check using questionary for grid-style rating."""
-    import questionary
-    from questionary import Choice
-
-    import random as _rng
-    shuffled = list(samples)
-    _rng.shuffle(shuffled)
-
-    total = 0
-    correct = 0
-
-    click.echo()
-    for i, (target_tier, text, _) in enumerate(shuffled):
-        click.echo(f"  {i+1}. [{tier_labels[target_tier]}] {text}")
-    click.echo()
-
-    for i, (target_tier, text, sub) in enumerate(shuffled):
-        result = questionary.select(
-            f"  {i+1}) \"{text[:60]}\u2026\" \u2014 feels like?",
-            choices=[
-                Choice("\U0001f525 Pop", "pop"),
-                Choice("\U0001f4da Mainstream", "mainstream"),
-                Choice("\U0001f393 Niche", "niche"),
-                Choice("\u23ed Skip", "skip"),
-            ],
-            use_shortcuts=True,
-            use_arrow_keys=True,
-        ).ask()
-
-        if result and result != "skip":
-            total += 1
-            match = result == target_tier
-            if match:
-                correct += 1
-                click.echo(click.style("       \u2713 match", fg="green"))
-            else:
-                click.echo(click.style(
-                    f"       \u2717 mismatch (target={target_tier}, felt={result})",
-                    fg="yellow",
-                ))
-
-            tag_choices = questionary.checkbox(
-                "       Tags?",
-                choices=[
-                    Choice("\U0001f604 Funny", "funny"),
-                    Choice("\U0001f4dd Grammar", "grammar"),
-                    Choice("\U0001f914 Contradiction", "contradiction"),
-                    Choice("\U0001f634 Boring", "boring"),
-                ],
-            ).ask()
-
-            store_rating(
-                conn, text,
-                system_tone=target_tier,
-                thumbs=1 if match else -1,
-                tone_override=result,
-                tags=tag_choices or None,
-                source=source,
-            )
-
-    if total == 0:
-        return None
-    accuracy = correct / total
-    click.echo(click.style(
-        f"\n  Tone accuracy: {correct}/{total} ({accuracy:.0%})",
-        fg="green" if accuracy >= 0.6 else "yellow",
-    ))
-    return accuracy
 
 
 # ---------------------------------------------------------------------------

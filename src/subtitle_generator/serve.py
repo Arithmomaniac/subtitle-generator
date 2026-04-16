@@ -7,7 +7,9 @@ without starting the server — call ``create_server()`` or ``run()``.
 import asyncio
 import json
 import os
+import random
 import sqlite3
+import uuid
 from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -283,6 +285,146 @@ def _write_to_table_storage(
         pass  # Non-critical — local SQLite is the primary store
 
 
+# -- /api/spot-check/* (local only) ------------------------------------------
+
+# In-memory store of spot-check samples keyed by sample_id.
+# Maps sample_id → {"text": str, "target_tier": str, "batch_id": str}
+_spot_check_samples: dict[str, dict] = {}
+
+
+def _handle_spot_check_batch(body: dict) -> tuple[int, dict]:
+    """Generate a shuffled batch of tone-targeted subtitles for spot-checking."""
+    from subtitle_generator.config import get_tone_targets
+
+    samples_per_tier = body.get("samples_per_tier", 2)
+    if not isinstance(samples_per_tier, int) or not 1 <= samples_per_tier <= 5:
+        return 400, {"error": "samples_per_tier must be an integer 1-5"}
+
+    seed_base = body.get("seed_base")
+    if seed_base is None:
+        seed_base = random.randint(0, 100_000)
+
+    conn = _get_db()
+    try:
+        targets = get_tone_targets(conn)
+        tiers = ["pop", "mainstream", "niche"]
+        batch_id = uuid.uuid4().hex[:12]
+        items: list[dict] = []
+
+        for tier in tiers:
+            tone_target = {
+                slot: targets[tier][slot]
+                for slot in ["list_item", "action_noun", "of_object"]
+            }
+            for j in range(samples_per_tier):
+                seed = seed_base + tiers.index(tier) * 100 + j
+                sub = generate_subtitle(conn, seed=seed, tone_target=tone_target)
+                sample_id = uuid.uuid4().hex[:12]
+
+                # Build slot info for display
+                slots = _build_slot_info(sub)
+
+                # Store server-side metadata (target_tier NOT sent to client)
+                _spot_check_samples[sample_id] = {
+                    "text": sub.text,
+                    "target_tier": tier,
+                    "batch_id": batch_id,
+                }
+
+                items.append({
+                    "sample_id": sample_id,
+                    "text": sub.text,
+                    "slots": slots,
+                })
+
+        # Shuffle to prevent tier-order bias
+        random.shuffle(items)
+        return 200, {"batch_id": batch_id, "items": items}
+    finally:
+        conn.close()
+
+
+def _build_slot_info(sub: GeneratedSubtitle) -> list[dict]:
+    """Build slot display info matching the main app's slot rendering."""
+    slots: list[dict] = []
+    slots.append({"text": sub.item1, "type": "list_item", "cls": "slot-list1"})
+    slots.append({"text": ",", "isPunc": True})
+    slots.append({"text": sub.item2, "type": "list_item", "cls": "slot-list2"})
+    slots.append({"text": ", and", "isPunc": True})
+    if sub.action_article:
+        slots.append({"text": sub.action_article, "isPunc": True})
+    slots.append({"text": sub.action_noun, "type": "action_noun", "cls": "slot-action"})
+    slots.append({"text": "of", "isPunc": True})
+    if sub.of_article:
+        slots.append({"text": sub.of_article, "isPunc": True})
+
+    if sub.remixed and sub.remix_parts:
+        if "modifier" in sub.remix_parts:
+            slots.append({"text": sub.remix_parts["modifier"], "type": "of_modifier", "cls": "slot-subpart"})
+            slots.append({"text": sub.remix_parts["head"], "type": "of_head", "cls": "slot-subpart"})
+        elif "topic" in sub.remix_parts:
+            slots.append({"text": sub.remix_parts["topic"], "type": "of_topic", "cls": "slot-subpart"})
+            slots.append({"text": sub.remix_parts["complement"], "type": "of_complement", "cls": "slot-subpart"})
+    else:
+        slots.append({"text": sub.of_object, "type": "of_object", "cls": "slot-of"})
+
+    return slots
+
+
+def _handle_spot_check_rate(body: dict) -> tuple[int, dict]:
+    """Rate a spot-check sample. Server derives target_tier and thumbs."""
+    sample_id = body.get("sample_id")
+    if not sample_id or sample_id not in _spot_check_samples:
+        return 400, {"error": "Invalid or expired sample_id"}
+
+    skipped = bool(body.get("skipped", False))
+    felt_tier = body.get("felt_tier")
+    tags = body.get("tags")
+
+    if not skipped:
+        if not felt_tier or felt_tier not in ("pop", "mainstream", "niche"):
+            return 400, {"error": "felt_tier must be pop, mainstream, or niche"}
+
+    if tags is not None:
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            return 400, {"error": "tags must be an array of strings"}
+        valid_tags = {"funny", "grammar", "contradiction", "boring"}
+        invalid_tags = set(tags) - valid_tags
+        if invalid_tags:
+            return 400, {"error": f"Invalid tags: {', '.join(invalid_tags)}"}
+
+    sample = _spot_check_samples[sample_id]
+    target_tier = sample["target_tier"]
+
+    if skipped:
+        thumbs = None
+        match = None
+    else:
+        match = felt_tier == target_tier
+        thumbs = 1 if match else -1
+
+    from subtitle_generator.feedback import store_rating
+
+    conn = _get_db()
+    try:
+        store_rating(
+            conn,
+            sample["text"],
+            system_tone=target_tier,
+            thumbs=thumbs,
+            tone_override=felt_tier if not skipped else None,
+            tags=tags,
+            source="spot_check_web",
+        )
+        return 200, {
+            "target_tier": target_tier,
+            "match": match,
+            "sample_id": sample_id,
+        }
+    finally:
+        conn.close()
+
+
 # -- /api/models (local only) ------------------------------------------------
 
 _models_cache: list[dict] | None = None
@@ -419,6 +561,18 @@ class _Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     status, resp = 500, {"error": f"Internal error: {exc}"}
                 self._send_json(resp, status)
+        elif path == "/api/spot-check/batch":
+            try:
+                status, resp = _handle_spot_check_batch(body)
+            except Exception as exc:
+                status, resp = 500, {"error": f"Internal error: {exc}"}
+            self._send_json(resp, status)
+        elif path == "/api/spot-check/rate":
+            try:
+                status, resp = _handle_spot_check_rate(body)
+            except Exception as exc:
+                status, resp = 500, {"error": f"Internal error: {exc}"}
+            self._send_json(resp, status)
         else:
             self._send_json({"error": "Not found"}, 404)
 

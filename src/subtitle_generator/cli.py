@@ -634,11 +634,10 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
 
 
 @cli.command("spot-check")
-@click.option("--tui", is_flag=True, help="Use questionary TUI for grid-style rating.")
 @click.option("--samples", default=2, type=click.IntRange(min=1, max=5), help="Samples per tier (default: 2).")
 @click.option("--source", default="spot_check", help="Rating source tag (default: spot_check).")
 @click.pass_context
-def spot_check_cmd(ctx, tui: bool, samples: int, source: str):
+def spot_check_cmd(ctx, samples: int, source: str):
     """Rate subtitle output by tone tier (separate from tuning).
 
     Generates samples for each tier (pop/mainstream/niche) and asks which
@@ -647,15 +646,17 @@ def spot_check_cmd(ctx, tui: bool, samples: int, source: str):
     Run this between tune runs, then use review-ratings to analyze
     results and propose tuning_goals.md edits.
 
+    For a richer experience, use the web UI: run 'subtitle-gen serve'
+    then visit http://localhost:8742/spot-check.html
+
     \b
     Examples:
       subtitle-gen spot-check              # CLI mode, 2 per tier
-      subtitle-gen spot-check --tui        # TUI grid mode
       subtitle-gen spot-check --samples 3  # 3 per tier = 9 total
     """
     conn = ctx.obj["conn"]
     from subtitle_generator.tune import run_spot_check
-    run_spot_check(conn, n_samples=samples, use_tui=tui, source=source)
+    run_spot_check(conn, n_samples=samples, source=source)
     conn.close()
 
 
