@@ -881,10 +881,10 @@ def generate_subtitle(
 
     return GeneratedSubtitle(
         text=text,
-        item1=items[0],
-        item2=items[1],
-        action_noun=action_noun,
-        of_object=of_object,
+        item1=_title_case(items[0]),
+        item2=_title_case(items[1]),
+        action_noun=_title_case(action_noun),
+        of_object=_title_case(of_object),
         remixed=remixed,
         remix_parts=remix_parts,
         remix_similarity=remix_similarity,
