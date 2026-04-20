@@ -57,12 +57,11 @@ def _weighted_sample(
     fillers near the target score and suppresses distant ones.
 
     Blending is controlled by pop_base_weight_blend (base weight) and
-    pop_tone_blend (tone bias score). At 0.0, uses pure freq; at 1.0, uses
-    pure popularity_score.
+    pop_classification_blend (tone bias score, aligned with tier thresholds).
+    At 0.0, uses pure freq; at 1.0, uses pure popularity_score.
     """
     cfg = load_tuning_config(conn) if (tone_target is not None or conn is not None) else {}
     blend_base = cfg.get("pop_base_weight_blend", 0.0)
-    blend_tone = cfg.get("pop_tone_blend", 0.0)
     pop_default = cfg.get("pop_missing_default", 0.1)
 
     fillers = [r[0] for r in rows]
@@ -82,11 +81,13 @@ def _weighted_sample(
             cfg = load_tuning_config(conn)
         spread = cfg["weighted_sample_spread"]
         bias_floor = cfg["weighted_sample_bias_floor"]
+        # Use classification blend for tone bias so targets align with tier thresholds
+        bias_blend = cfg.get("pop_classification_blend", 0.9)
         for i, r in enumerate(rows):
             freq = r[1]
             pop_score = (r[2] if r[2] is not None else pop_default) if has_pop else pop_default
             score_freq = math.log10(1 + freq)
-            filler_score = (1 - blend_tone) * score_freq + blend_tone * pop_score
+            filler_score = (1 - bias_blend) * score_freq + bias_blend * pop_score
             bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
             weights[i] *= (bias_floor + (1 - bias_floor) * bias)
 
