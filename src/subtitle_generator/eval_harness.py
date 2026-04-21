@@ -285,7 +285,7 @@ def _filler_log_freqs(
     from subtitle_generator.config import load_tuning_config
 
     cfg = load_tuning_config(conn)
-    blend_tone = cfg.get("pop_tone_blend", 0.0)
+    blend_tone = cfg.get("pop_classification_blend", 0.9)
     pop_default = cfg.get("pop_missing_default", 0.1)
 
     scores: list[float] = []

@@ -168,6 +168,9 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `build-db` | Build mini SQLite from CSV files (for CI) |
 | `patterns` | Show discovered subtitle patterns by frequency |
 | `slots` | Show available slot fillers |
+| `download-goodreads` | Download Goodbooks-10k dataset |
+| `download-nyt` | Download NYT bestseller data (resumable) |
+| `download-ottawa` | Download Ottawa library holds data |
 
 ## Architecture
 

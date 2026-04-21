@@ -18,10 +18,8 @@ DB_PATH = Path("data/db/subtitles.db")
 SPL_PATH = Path("data/spl_checkout_lookup.json")
 OL_PATH = Path("data/ol_edition_lookup.json")
 GR_PATH = Path("data/goodreads_lookup.json")
-CANADIAN_PATH = Path("data/canadian_library_lookup.json")
+OTTAWA_PATH = Path("data/canadian_library_lookup.json")
 NYT_PATH = Path("data/nyt_bestseller_lookup.json")
-LIBRARY_PATH = Path("data/library_lists_lookup.json")
-WIKI_PATH = Path("data/wikipedia_bestsellers_lookup.json")
 
 # Ensure src is importable (for config access)
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -100,36 +98,61 @@ def load_goodreads(conn: sqlite3.Connection, gr: dict) -> dict[str, dict]:
     return work_gr
 
 
-def load_canadian(conn: sqlite3.Connection, canadian_isbn: dict) -> dict[str, dict]:
-    """Map Canadian library ISBN-keyed data to work_keys via isbn_aliases."""
-    work_canadian: dict[str, dict] = {}
+def load_ottawa(conn: sqlite3.Connection, ottawa_isbn: dict) -> dict[str, dict]:
+    """Map Ottawa library ISBN-keyed data to work_keys via isbn_aliases."""
+    work_ottawa: dict[str, dict] = {}
     rows = conn.execute(
         "SELECT isbn, work_key FROM isbn_aliases WHERE work_key IS NOT NULL"
     ).fetchall()
     isbn_to_work = {r[0]: r[1] for r in rows}
 
     matched = 0
-    for isbn, data in canadian_isbn.items():
+    for isbn, data in ottawa_isbn.items():
         work = isbn_to_work.get(isbn)
         if work:
             holds = data.get("holds_count", data.get("appearances", 0))
-            existing = work_canadian.get(work)
+            existing = work_ottawa.get(work)
             if not existing or holds > existing.get("holds_count", 0):
-                work_canadian[work] = {"holds_count": holds, "source": data.get("source", "canadian")}
+                work_ottawa[work] = {"holds_count": holds, "source": "ottawa"}
             matched += 1
 
-    print(f"  Canadian ISBNs matched to works: {matched:,}")
-    print(f"  Unique works with Canadian data: {len(work_canadian):,}")
-    return work_canadian
+    print(f"  Ottawa ISBNs matched to works: {matched:,}")
+    print(f"  Unique works with Ottawa data: {len(work_ottawa):,}")
+    return work_ottawa
+
+
+def load_nyt(conn: sqlite3.Connection, nyt: dict) -> dict[str, dict]:
+    """Map NYT bestseller ISBN-keyed data to work_keys via isbn_aliases."""
+    work_nyt: dict[str, dict] = {}
+    rows = conn.execute(
+        "SELECT isbn, work_key FROM isbn_aliases WHERE work_key IS NOT NULL"
+    ).fetchall()
+    isbn_to_work = {r[0]: r[1] for r in rows}
+
+    matched = 0
+    for isbn, data in nyt.items():
+        work = isbn_to_work.get(isbn)
+        if work:
+            weeks = data.get("weeks_on_list", 1)
+            rank = data.get("peak_rank", 999)
+            existing = work_nyt.get(work)
+            if not existing or weeks > existing["weeks_on_list"]:
+                work_nyt[work] = {"weeks_on_list": weeks, "peak_rank": rank}
+            matched += 1
+
+    print(f"  NYT ISBNs matched to works: {matched:,}")
+    print(f"  Unique works with NYT data: {len(work_nyt):,}")
+    return work_nyt
 
 
 def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
                        w_spl: float = 0.7, w_ol: float = 0.3, exponent: float = 1.0,
                        gr: dict | None = None, w_gr: float = 0.2,
-                       canadian_isbn: dict | None = None, w_library: float = 0.05):
-    """Aggregate SPL + OL + Goodreads + Canadian library data at work level using isbn_aliases."""
+                       ottawa_isbn: dict | None = None, w_library: float = 0.05,
+                       nyt: dict | None = None, w_nyt: float = 0.1):
+    """Aggregate SPL + OL + Goodreads + Ottawa + NYT data at work level."""
     print(f"\nPopulating work-level popularity_data "
-          f"(w_spl={w_spl}, w_ol={w_ol}, w_gr={w_gr}, w_lib={w_library}, exp={exponent})...")
+          f"(w_spl={w_spl}, w_ol={w_ol}, w_gr={w_gr}, w_lib={w_library}, w_nyt={w_nyt}, exp={exponent})...")
 
     # Build work_key → aggregated signals
     work_spl: dict[str, dict] = defaultdict(lambda: {"checkouts": 0, "years": set(), "pub_year": ""})
@@ -140,7 +163,7 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
         "SELECT isbn, work_key FROM isbn_aliases WHERE work_key IS NOT NULL"
     ).fetchall()
     isbn_to_work = {r[0]: r[1] for r in rows}
-    print(f"  ISBN→work mappings: {len(isbn_to_work):,}")
+    print(f"  ISBN->work mappings: {len(isbn_to_work):,}")
 
     # Aggregate SPL by work_key (dedup across editions)
     spl_matched = 0
@@ -174,16 +197,55 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
         work_gr = {}
         print("  Goodreads: skipped (no data)")
 
-    # Canadian libraries: map ISBN-keyed data to work_keys
-    if canadian_isbn:
-        work_canadian = load_canadian(conn, canadian_isbn)
+    # Ottawa library: map ISBN-keyed data to work_keys
+    if ottawa_isbn:
+        work_ottawa = load_ottawa(conn, ottawa_isbn)
     else:
-        work_canadian = {}
-        print("  Canadian libraries: skipped (no data)")
+        work_ottawa = {}
+        print("  Ottawa library: skipped (no data)")
+
+    # NYT bestsellers: map ISBN-keyed data to work_keys
+    if nyt:
+        work_nyt = load_nyt(conn, nyt)
+    else:
+        work_nyt = {}
+        print("  NYT bestsellers: skipped (no data)")
 
     # Merge into popularity_data
-    all_works = set(work_spl.keys()) | set(work_ol.keys()) | set(work_gr.keys()) | set(work_canadian.keys())
+    all_works = set(work_spl.keys()) | set(work_ol.keys()) | set(work_gr.keys()) | set(work_ottawa.keys()) | set(work_nyt.keys())
     print(f"  Total unique works: {len(all_works):,}")
+
+    # Precompute percentile lookup functions for each source.
+    # Each converts a log1p(raw_value) to a [0, 1] percentile rank.
+    import bisect
+
+    def make_pctile_fn(values: list[float]):
+        """Build a fast percentile lookup from sorted values."""
+        sorted_vals = sorted(values)
+        n = len(sorted_vals)
+        if n == 0:
+            return lambda x: 0.0
+        def pctile(x):
+            idx = bisect.bisect_left(sorted_vals, x)
+            return idx / n
+        return pctile
+
+    spl_log_vals = [math.log10(1 + d["checkouts"] / max(len(d["years"]) if isinstance(d["years"], set) else d["years"], 1))
+                    for d in work_spl.values() if d["checkouts"] > 0]
+    spl_pctile = make_pctile_fn(spl_log_vals)
+    print(f"  SPL percentile base: {len(spl_log_vals):,} values")
+
+    gr_log_vals = [math.log10(1 + d["ratings_count"]) for d in work_gr.values()]
+    gr_pctile = make_pctile_fn(gr_log_vals)
+    print(f"  GR percentile base: {len(gr_log_vals):,} values")
+
+    ol_log_vals = [math.log10(1 + ec) for ec in work_ol.values()]
+    ol_pctile = make_pctile_fn(ol_log_vals)
+    print(f"  OL percentile base: {len(ol_log_vals):,} values")
+
+    lib_log_vals = [math.log10(1 + d["holds_count"]) for d in work_ottawa.values()]
+    lib_pctile = make_pctile_fn(lib_log_vals)
+    print(f"  Ottawa percentile base: {len(lib_log_vals):,} values")
 
     batch = []
     for work in all_works:
@@ -201,39 +263,70 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
         # For editions: normalize by decades since first edition (approximate)
         ed_per_decade = float(ol_ec)  # we don't have pub year for OL, use raw for now
 
-        # Composite: combine SPL (if available), OL, and Goodreads with tunable weights
-        if spl_co > 0:
-            spl_signal = w_spl * math.log10(1 + co_per_year) ** exponent
-        else:
-            spl_signal = 0.0
+        # Compute per-source normalized signals (percentile of log1p within each source)
+        # and build weighted average over AVAILABLE sources only.
+        # OL is always available as a fallback/prior, not a peer demand signal.
 
-        ol_signal = w_ol * math.log10(1 + ol_ec) ** exponent
+        signals = []  # list of (weight, normalized_value) for observed demand sources
+        total_weight = 0.0
+
+        if spl_co > 0:
+            spl_norm = spl_pctile(math.log10(1 + co_per_year))
+            signals.append((w_spl, spl_norm))
+            total_weight += w_spl
 
         gr_data = work_gr.get(work)
         if gr_data:
-            gr_signal = w_gr * math.log10(1 + gr_data["ratings_count"]) ** exponent
+            gr_norm = gr_pctile(math.log10(1 + gr_data["ratings_count"]))
             gr_ratings = gr_data["ratings_count"]
             gr_avg = gr_data.get("average_rating", 0.0)
+            signals.append((w_gr, gr_norm))
+            total_weight += w_gr
         else:
-            gr_signal = 0.0
             gr_ratings = 0
             gr_avg = 0.0
 
-        composite = spl_signal + ol_signal + gr_signal
-
-        # Canadian library signal
-        can_data = work_canadian.get(work)
+        # Ottawa library signal
+        can_data = work_ottawa.get(work)
         if can_data:
-            library_signal = w_library * math.log10(1 + can_data["holds_count"]) ** exponent
+            lib_norm = lib_pctile(math.log10(1 + can_data["holds_count"]))
             library_appearances = can_data["holds_count"]
+            signals.append((w_library, lib_norm))
+            total_weight += w_library
         else:
-            library_signal = 0.0
             library_appearances = 0
 
-        composite += library_signal
+        # NYT bestseller signal — binary boost: any appearance floors at 0.8
+        nyt_data = work_nyt.get(work)
+        if nyt_data:
+            nyt_weeks = nyt_data["weeks_on_list"]
+            nyt_rank = nyt_data["peak_rank"]
+            # Binary: on-list = 0.8 base + modest weeks increment (capped at 1.0)
+            nyt_norm = min(1.0, 0.8 + 0.2 * math.log10(1 + nyt_weeks) / 2.0)
+            signals.append((w_nyt, nyt_norm))
+            total_weight += w_nyt
+        else:
+            nyt_weeks = 0
+            nyt_rank = None
+
+        # Composite: weighted average over observed demand sources
+        if total_weight > 0:
+            demand_score = sum(w * s for w, s in signals) / total_weight
+        else:
+            demand_score = 0.0
+
+        # OL as prior/fallback: blend with demand score based on confidence
+        ol_norm = ol_pctile(math.log10(1 + ol_ec))
+        confidence = min(total_weight / (w_spl + w_gr + w_library + w_nyt), 1.0)
+        composite = confidence * demand_score + (1 - confidence) * ol_norm
+
+        # Cap OL-only works (no demand evidence) below pop threshold.
+        # Edition count is a supply metric, not demand — shouldn't make something pop.
+        if confidence == 0:
+            composite = min(composite, 0.5)  # firmly below mainstream center
 
         batch.append((work, spl_co, spl_yrs, pub_year, ol_ec, co_per_year, ed_per_decade,
-                       gr_ratings, gr_avg, 0, None, library_appearances, composite))
+                       gr_ratings, gr_avg, nyt_weeks, nyt_rank, library_appearances, composite))
 
         if len(batch) >= 50000:
             conn.executemany(
@@ -254,7 +347,8 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
     with_gr = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE gr_ratings_count > 0").fetchone()[0]
     with_lib = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE library_appearances > 0").fetchone()[0]
     print(f"\n  popularity_data: {total:,} works")
-    print(f"    with SPL: {with_spl:,} | with Goodreads: {with_gr:,} | with Canadian library: {with_lib:,}")
+    with_nyt = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE nyt_weeks_on_list > 0").fetchone()[0]
+    print(f"    with SPL: {with_spl:,} | with Goodreads: {with_gr:,} | with Ottawa: {with_lib:,} | with NYT: {with_nyt:,}")
 
     # Distribution
     scores = conn.execute(
@@ -271,18 +365,24 @@ def score_fillers_level1(conn: sqlite3.Connection):
     """Compute Level 1 popularity scores for fillers with ISBN sources."""
     print("\nScoring fillers (Level 1: ISBN-direct)...")
 
-    # For each filler, aggregate popularity across all source works
-    # Strategy: take the MAX composite score across all source works
-    # (a filler from one popular book should be scored as popular)
+    # For each filler, aggregate popularity across all source works.
+    # Strategy: top-3 mean of composite scores (not MAX).
+    # MAX inflates common words that appear in hundreds of niche books
+    # plus one popular book (e.g. "Future": avg=0.19, MAX=2.52 across 440 works).
+    # Top-3 mean is robust: requires multiple popular source works.
     updated = conn.execute("""
         UPDATE slot_fillers SET
             popularity_score = (
-                SELECT MAX(pd.composite_score)
-                FROM slot_filler_sources sfs
-                JOIN subtitles s ON sfs.subtitle_id = s.id
-                JOIN isbn_aliases ia ON ia.isbn = s.isbn
-                JOIN popularity_data pd ON pd.work_key = ia.work_key
-                WHERE sfs.slot_filler_id = slot_fillers.id
+                SELECT AVG(top_score) FROM (
+                    SELECT pd.composite_score AS top_score
+                    FROM slot_filler_sources sfs
+                    JOIN subtitles s ON sfs.subtitle_id = s.id
+                    JOIN isbn_aliases ia ON ia.isbn = s.isbn
+                    JOIN popularity_data pd ON pd.work_key = ia.work_key
+                    WHERE sfs.slot_filler_id = slot_fillers.id
+                    ORDER BY pd.composite_score DESC
+                    LIMIT 3
+                )
             ),
             popularity_level = 1,
             popularity_confidence = 1.0
@@ -297,7 +397,7 @@ def score_fillers_level1(conn: sqlite3.Connection):
     """).rowcount
     conn.commit()
 
-    print(f"  Updated {updated:,} fillers with Level 1 scores")
+    print(f"  Updated {updated:,} fillers with Level 1 scores (top-3 mean)")
 
     # Stats
     for stype in ["list_item", "action_noun", "of_object"]:
@@ -467,10 +567,10 @@ def calibrate_thresholds(conn: sqlite3.Connection):
 
     # Before/after comparison
     old_cfg = dict(ALL_TUNABLE_PARAMS)
-    print(f"\n  Before → After:")
+    print(f"\n  Before -> After:")
     for key, new_val in params.items():
         old_val = old_cfg.get(key, "N/A")
-        print(f"    {key}: {old_val} → {new_val}")
+        print(f"    {key}: {old_val} -> {new_val}")
 
 
 def main():
@@ -502,26 +602,24 @@ def main():
         gr = {}
         print("  Goodreads: not found (skipping)")
 
-    if CANADIAN_PATH.exists():
-        with open(CANADIAN_PATH) as f:
-            canadian = json.load(f)
-        canadian_isbn = {k: v for k, v in canadian.items() if "|" not in k and k.replace("-", "").isdigit()}
-        canadian_title = {k: v for k, v in canadian.items() if "|" in k}
-        print(f"  Canadian libraries: {len(canadian):,} total "
-              f"({len(canadian_isbn):,} ISBN-keyed, {len(canadian_title):,} title-keyed)")
-        del canadian  # free memory
+    if OTTAWA_PATH.exists():
+        with open(OTTAWA_PATH) as f:
+            ottawa = json.load(f)
+        ottawa_isbn = {k: v for k, v in ottawa.items() if k.replace("-", "").isdigit()}
+        print(f"  Ottawa library: {len(ottawa_isbn):,} ISBN-keyed entries")
+        del ottawa
     else:
-        canadian_isbn = {}
-        print("  Canadian libraries: not found (skipping)")
+        ottawa_isbn = {}
+        print("  Ottawa library: not found (skipping)")
 
-    # Log presence of other optional sources (not yet wired into composite)
-    for label, path in [("NYT bestsellers", NYT_PATH),
-                        ("Library lists", LIBRARY_PATH),
-                        ("Wikipedia bestsellers", WIKI_PATH)]:
-        if path.exists():
-            print(f"  {label}: found ({path})")
-        else:
-            print(f"  {label}: not found (skipping)")
+    # NYT bestsellers (partial data from API polling)
+    if NYT_PATH.exists():
+        with open(NYT_PATH) as f:
+            nyt = json.load(f)
+        print(f"  NYT bestsellers: {len(nyt):,} ISBNs")
+    else:
+        nyt = {}
+        print("  NYT bestsellers: not found (skipping)")
 
     conn = sqlite3.connect(args.db)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -532,14 +630,16 @@ def main():
     w_ol = args.ol if args.ol is not None else cfg["pop_weight_ol"]
     w_gr = args.gr if args.gr is not None else cfg["pop_weight_gr"]
     w_library = args.library if args.library is not None else cfg["pop_weight_library"]
+    w_nyt = cfg.get("pop_weight_nyt", 0.1)
     exponent = args.exponent if args.exponent is not None else cfg["pop_exponent"]
-    print(f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, exponent={exponent}")
+    print(f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, NYT={w_nyt}, exponent={exponent}")
 
     start = time.time()
     create_tables(conn)
     populate_work_level(conn, spl, ol, w_spl=w_spl, w_ol=w_ol, exponent=exponent,
                         gr=gr, w_gr=w_gr,
-                        canadian_isbn=canadian_isbn, w_library=w_library)
+                        ottawa_isbn=ottawa_isbn, w_library=w_library,
+                        nyt=nyt, w_nyt=w_nyt)
     score_fillers_level1(conn)
     score_fillers_fallback(conn)
     report(conn)

@@ -91,7 +91,7 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
         return TONE_MEDIUM, 0.0
 
     cfg = load_tuning_config(conn)
-    blend_tone = cfg.get("pop_tone_blend", 0.0)
+    blend_tone = cfg.get("pop_classification_blend", 0.9)
     pop_default = cfg.get("pop_missing_default", 0.1)
 
     filler_data = [_lookup_freq(conn, f) for f in fillers]

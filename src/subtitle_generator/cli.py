@@ -1,5 +1,6 @@
 """CLI entry point for subtitle-generator."""
 
+import sys
 from pathlib import Path
 
 import click
@@ -909,6 +910,47 @@ def pull_ratings_cmd(ctx, since: str | None, account: str | None):
         synced += 1
 
     click.echo(f"Synced {synced} ratings ({skipped} duplicates skipped).")
+
+
+@cli.command("download-goodreads")
+def download_goodreads():
+    """Download Goodbooks-10k dataset and build Goodreads lookup."""
+    import subprocess
+    subprocess.run([sys.executable, "data/goodreads_stream.py"], check=True)
+
+
+@cli.command("download-nyt")
+@click.option("--api-key", default=None, help="NYT API key (or set NYT_API_KEY env var)")
+@click.option("--max-requests", type=int, default=None, help="Stop after N requests")
+@click.option("--status", is_flag=True, help="Show progress and exit")
+@click.option("--export", is_flag=True, help="Export partial data to lookup JSON")
+def download_nyt(api_key, max_requests, status, export):
+    """Download NYT bestseller data (resumable, rate-limited)."""
+    import subprocess
+    args = [sys.executable, "data/nyt_stream.py"]
+    if api_key:
+        args.extend(["--api-key", api_key])
+    if max_requests:
+        args.extend(["--max-requests", str(max_requests)])
+    if status:
+        args.append("--status")
+    if export:
+        args.append("--export")
+    subprocess.run(args, check=True)
+
+
+@cli.command("download-ottawa")
+@click.option("--download/--no-download", default=True, help="Download raw data files")
+def download_ottawa(download):
+    """Download Ottawa Public Library holds data."""
+    import subprocess
+    args = [sys.executable, "data/canadian_library_stream.py"]
+    if download:
+        args.append("--download")
+    else:
+        args.append("--parse-only")
+    args.append("--skip-isbn-lookup")
+    subprocess.run(args, check=True)
 
 
 if __name__ == "__main__":

@@ -252,63 +252,81 @@ def parse_edmonton(csv_path: Path) -> list[dict]:
     return results
 
 
-# ── ISBN resolution via Open Library ──────────────────────────────────
+# ── ISBN resolution via local subtitles DB ────────────────────────────
 
 
-def lookup_isbn_via_ol(title: str, author: str) -> str | None:
-    """Look up ISBN via Open Library Search API."""
-    query = f"{title} {author}"
-    url = (
-        f"https://openlibrary.org/search.json"
-        f"?q={quote_plus(query)}&limit=1&fields=isbn"
-    )
-    try:
-        data = json.loads(_request(url, timeout=15))
-        docs = data.get("docs", [])
-        if not docs:
-            return None
-        isbns = docs[0].get("isbn", [])
-        # Prefer ISBN-13
-        for isbn in isbns:
-            clean = isbn.replace("-", "")
-            if ISBN13_RE.match(clean):
-                return clean
+DB_PATH = Path("data/db/subtitles.db")
+_isbn_conn = None
+
+
+def _get_isbn_conn():
+    """Get or create a shared DB connection for ISBN lookups."""
+    global _isbn_conn
+    if _isbn_conn is None:
+        import sqlite3
+        _isbn_conn = sqlite3.connect(str(DB_PATH))
+    return _isbn_conn
+
+
+def lookup_isbn_local(title: str, author: str) -> str | None:
+    """Resolve title+author to ISBN via our local subtitles database.
+
+    Uses COLLATE NOCASE index for fast case-insensitive matching.
+    """
+    if not DB_PATH.exists():
         return None
-    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError) as e:
-        print(f"    OL lookup failed for '{title}': {e}")
-        return None
+
+    conn = _get_isbn_conn()
+
+    row = conn.execute(
+        "SELECT isbn FROM subtitles "
+        "WHERE title = ? COLLATE NOCASE AND isbn IS NOT NULL "
+        "LIMIT 1",
+        (title,),
+    ).fetchone()
+    if row and row[0]:
+        return row[0].strip()
+
+    row = conn.execute(
+        "SELECT isbn FROM subtitles "
+        "WHERE title LIKE ? COLLATE NOCASE AND isbn IS NOT NULL "
+        "LIMIT 1",
+        (title + "%",),
+    ).fetchone()
+    if row and row[0]:
+        return row[0].strip()
+
+    return None
 
 
 def resolve_isbns(
-    entries: list[dict], delay: float = 1.0
+    entries: list[dict], delay: float = 0.0
 ) -> tuple[dict[str, dict], int]:
-    """Resolve entries without ISBNs via Open Library.
+    """Resolve entries without ISBNs via local subtitles DB.
 
     Returns (isbn_lookup_dict, skipped_count).
     """
     lookup: dict[str, dict] = {}
     skipped = 0
-    ol_lookups = 0
-    ol_hits = 0
+    local_lookups = 0
+    local_hits = 0
 
     for i, entry in enumerate(entries):
         isbn = entry.get("isbn")
 
         if not isbn:
-            # Need OL lookup
-            ol_lookups += 1
-            if ol_lookups % 50 == 0:
+            local_lookups += 1
+            if local_lookups % 500 == 0:
                 print(
-                    f"    OL lookups: {ol_lookups} done, "
-                    f"{ol_hits} hits, processing {i+1}/{len(entries)}..."
+                    f"    Local lookups: {local_lookups} done, "
+                    f"{local_hits} hits, processing {i+1}/{len(entries)}..."
                 )
-            isbn = lookup_isbn_via_ol(entry["title"], entry["author"])
+            isbn = lookup_isbn_local(entry["title"], entry["author"])
             if isbn:
-                ol_hits += 1
+                local_hits += 1
             else:
                 skipped += 1
                 continue
-            time.sleep(delay)
 
         # Deduplicate: keep entry with highest holds
         if isbn in lookup:
@@ -317,10 +335,10 @@ def resolve_isbns(
         else:
             lookup[isbn] = _make_record(entry, isbn)
 
-    if ol_lookups:
+    if local_lookups:
         print(
-            f"    OL resolution: {ol_lookups} lookups, "
-            f"{ol_hits} hits, {skipped} unresolved"
+            f"    Local DB resolution: {local_lookups} lookups, "
+            f"{local_hits} hits, {skipped} unresolved"
         )
 
     return lookup, skipped
