@@ -603,13 +603,13 @@ Consider what previous experiments tell you about which direction to move.
             clamped = max(lo, min(hi, new_value))
             if clamped != new_value:
                 click.echo(
-                    f"  ⚠ clamping {proposal.param} "
-                    f"{new_value} → {clamped} (bounds [{lo}, {hi}])"
+                    f"  ! clamping {proposal.param} "
+                    f"{new_value} -> {clamped} (bounds [{lo}, {hi}])"
                 )
                 new_value = clamped
 
         click.echo(
-            f"  proposal: {proposal.param} {old_value} → {new_value}"
+            f"  proposal: {proposal.param} {old_value} -> {new_value}"
         )
         click.echo(f"  reason: {proposal.reasoning}")
 
@@ -640,11 +640,11 @@ Consider what previous experiments tell you about which direction to move.
         if new_score > current_score:
             status = "keep"
             click.echo(
-                f"  Quality: {quality:.3f} → {new_quality:.3f}  "
-                f"Separation: {separation:.3f} → {new_separation:.3f}  "
-                f"Composite: {current_score:.3f} → {new_score:.3f}"
+                f"  Quality: {quality:.3f} -> {new_quality:.3f}  "
+                f"Separation: {separation:.3f} -> {new_separation:.3f}  "
+                f"Composite: {current_score:.3f} -> {new_score:.3f}"
             )
-            click.echo(f"  → KEEP (+{delta:.3f})\n")
+            click.echo(f"  -> KEEP (+{delta:.3f})\n")
             quality, separation, current_score = (
                 new_quality, new_separation, new_score,
             )
@@ -663,11 +663,11 @@ Consider what previous experiments tell you about which direction to move.
             conn.commit()
             invalidate_config_cache()
             click.echo(
-                f"  Quality: {quality:.3f} → {new_quality:.3f}  "
-                f"Separation: {separation:.3f} → {new_separation:.3f}  "
-                f"Composite: {current_score:.3f} → {new_score:.3f}"
+                f"  Quality: {quality:.3f} -> {new_quality:.3f}  "
+                f"Separation: {separation:.3f} -> {new_separation:.3f}  "
+                f"Composite: {current_score:.3f} -> {new_score:.3f}"
             )
-            click.echo(f"  → DISCARD ({delta:+.3f})\n")
+            click.echo(f"  -> DISCARD ({delta:+.3f})\n")
 
         _append_result(
             results_file, i, proposal.param, old_value, new_value,

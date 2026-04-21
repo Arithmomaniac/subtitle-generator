@@ -139,7 +139,7 @@ def run_calibration(
 
     # Find optimal min_sim: best average score
     best_min_sim = max(phase1_results, key=lambda k: phase1_results[k]["avg"])
-    click.echo(f"\n  → Best min_sim: {best_min_sim:.2f} "
+    click.echo(f"\n  -> Best min_sim: {best_min_sim:.2f} "
                f"(avg={phase1_results[best_min_sim]['avg']:.1f})\n")
 
     # --- Phase 2: Sweep remix_prob at optimal min_sim ---
@@ -177,7 +177,7 @@ def run_calibration(
                     f"E={dims['evocativeness']:.1f} S={dims['surprise']:.1f}")
 
     best_remix_prob = max(phase2_results, key=lambda k: phase2_results[k]["avg"])
-    click.echo(f"\n  → Best remix_prob: {best_remix_prob:.1f} "
+    click.echo(f"\n  -> Best remix_prob: {best_remix_prob:.1f} "
                f"(avg={phase2_results[best_remix_prob]['avg']:.1f})\n")
 
     # --- Store results ---

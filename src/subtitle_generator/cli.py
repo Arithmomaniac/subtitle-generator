@@ -198,9 +198,9 @@ def extract(parts: str | None, all_langs: bool):
         records, subs = extract_from_file(mrc_file, conn, english_only=not all_langs)
         total_records += records
         total_subtitles += subs
-        click.echo(f"  {mrc_file.name}: {records:,} records → {subs:,} subtitles")
+        click.echo(f"  {mrc_file.name}: {records:,} records -> {subs:,} subtitles")
 
-    click.echo(f"\nTotal: {total_records:,} records → {total_subtitles:,} subtitles")
+    click.echo(f"\nTotal: {total_records:,} records -> {total_subtitles:,} subtitles")
     click.echo(f"Database: {DB_PATH}")
     conn.close()
 
@@ -234,7 +234,7 @@ def extract_ol(all_langs: bool, no_dedup: bool):
     lines, subs, dupes = extract_from_ol_dump(
         conn, english_only=not all_langs, dedup=not no_dedup,
     )
-    click.echo(f"\nDone: {lines:,} lines → {subs:,} subtitles ({dupes:,} duplicates skipped)")
+    click.echo(f"\nDone: {lines:,} lines -> {subs:,} subtitles ({dupes:,} duplicates skipped)")
     total = conn.execute("SELECT COUNT(*) FROM subtitles").fetchone()[0]
     click.echo(f"Total subtitles in database: {total:,}")
     click.echo(f"Database: {DB_PATH}")
