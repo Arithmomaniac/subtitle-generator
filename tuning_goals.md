@@ -30,9 +30,11 @@ The tuning agent reads this file each iteration to guide parameter proposals.
 
 ## Popularity Scoring
 
-The system uses empirical popularity scoring from multiple data sources (SPL,
-Canadian libraries, Goodreads, Open Library) blended with corpus frequency.
-The `pop_*` parameters have been partially tuned across two rounds.
+The system uses empirical popularity scoring from multiple data sources blended
+with corpus frequency. Each source is percentile-normalized via `percentile(log1p(raw))`
+then combined as a weighted average over available demand sources, with OL edition
+count as a confidence-weighted prior (not a peer source). OL-only works are capped
+at 0.5 composite. NYT bestseller appearances get a binary boost (0.8 floor).
 
 **Highest-impact discovery:** `pop_classification_blend` (0.9) separates tier
 classification from tone sampling. Before this, classification and tone bias
@@ -47,26 +49,29 @@ but classification needed a higher blend to use actual popularity data.
   Now only used for base weights, NOT for tone bias alignment (which uses `pop_classification_blend`).
 - `pop_base_weight_blend` controls the sampling base weight: 0=sqrt(freq), 1=sqrt(pop)
 - `pop_weight_spl` / `pop_weight_ol` / `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library`
-  control the composite formula (takes effect when `populate_popularity.py` is re-run)
+  control the composite formula (takes effect when `populate-popularity` is re-run)
 - `pop_exponent` applies power-law scaling to raw signals before combining
+- Filler L1 scores use top-3 mean across source works (not MAX) to prevent single-outlier inflation
 
-### Scale and thresholds (recalibrated)
+### Scale and thresholds (auto-calibrated)
 
-Thresholds were recalibrated from percentile analysis of the blended score
-distribution (using `pop_classification_blend=0.9`):
-- `accessibility_threshold_pop`: 0.6021 (was 1.0) — 60th percentile of blended scores
-- `accessibility_threshold_mainstream`: 0.301 (was 0.5) — 30th percentile
-- `tier_center_pop`: 0.78, `tier_center_mainstream`: 0.3, `tier_center_niche`: 0.16
-- `tone_target_*` values now match tier centers (pop=0.78, mainstream=0.3, niche=0.16)
+Thresholds are auto-calibrated from percentile analysis of the blended score
+distribution (using `pop_classification_blend=0.9`). Current values:
+- `accessibility_threshold_pop`: 0.602 — p92, 1,091 fillers in pop tier
+- `accessibility_threshold_mainstream`: 0.480 — p64, 4,570 fillers in mainstream tier
+- Niche: 7,199 fillers
+- `tier_center_pop`: 0.699, `tier_center_mainstream`: 0.480, `tier_center_niche`: 0.301
+- `tone_target_*` values match tier centers
 
 ### Current accuracy and next steps
 
 - **Pop tier generation accuracy is still low (~10%).** The `weighted_sample_spread` at 0.35
-  is too wide for the compressed blended scale — fillers that should be pop-only leak into
-  mainstream and vice versa. Narrowing spread is the **highest priority** next tuning target.
+  is too wide for the percentile-based scale (popularity_score is 0–1, blended scores
+  cluster 0.03–0.98). Narrowing spread is the **highest priority** next tuning target.
+  Try 0.10–0.20.
 - Niche and mainstream accuracy are reasonable.
-- `pop_weight_gr`, `pop_weight_nyt`, `pop_weight_library` are new and unexplored — they
-  control how Goodreads, NYT, and other library signals blend into the composite score.
+- `pop_weight_gr`, `pop_weight_nyt`, `pop_weight_library` are set but unexplored —
+  changing them requires re-running `subtitle-gen populate-popularity`.
 
 ### Exploration history
 
@@ -78,11 +83,21 @@ Initial tuning round (April 2026) explored all `pop_*` params. Key findings:
 - `pop_exponent=1.2` slightly helped — more contrast in popularity scores
 - `pop_missing_default`: lowering to 0.05 hurt — 0.1 is fine
 
-Second round (May 2026) added `pop_classification_blend` and recalibrated:
+Second round (April 2026) added `pop_classification_blend` and recalibrated:
 - `pop_classification_blend=0.9` — high value drives tiers by actual popularity
 - Thresholds auto-calibrated from percentiles of blended score distribution
 - Tone targets aligned to calibrated tier centers
 - Pop accuracy still low — `weighted_sample_spread` needs narrowing for new scale
+
+Third round (April 2026) — multi-source scoring redesign:
+- Changed composite from additive sum to weighted average over available demand sources
+- Normalized each source via percentile(log1p(x)) for cross-source comparability
+- OL treated as confidence-weighted prior, not peer source; OL-only capped at 0.5
+- Changed filler L1 aggregation from MAX to top-3 mean
+- Added NYT as binary boost (0.8 floor + weeks increment)
+- Sources now: SPL (81k works), Goodreads (149k works), Ottawa (31k works), NYT (114 works), OL (5.96M works as prior)
+- SPL and Goodreads are uncorrelated (r=0.046) — they measure different things
+- Pop fillers with demand backing rose from 63 to 302; OL-only in pop dropped 876 to 254
 
 ## Coherence Constraints
 
@@ -99,17 +114,17 @@ propose values outside these bounds.
 
 | Parameter | Min | Max | Current | Notes |
 |---|---|---|---|---|
-| `weighted_sample_spread` | 0.1 | 1.0 | 0.35 | Gaussian width; too low = only exact-match fillers, too high = no tone effect |
+| `weighted_sample_spread` | 0.05 | 0.5 | 0.35 | Gaussian width; too low = only exact-match fillers, too high = no tone effect. **Try 0.10–0.20 for new scale.** |
 | `weighted_sample_bias_floor` | 0.01 | 0.30 | 0.05 | Minimum weight; too low = complete suppression, too high = no suppression |
-| `tone_target_pop_*` | 0.3 | 1.5 | 0.78 | Aligned to tier_center_pop. Higher = more common words only. |
-| `tone_target_mainstream_*` | 0.1 | 0.8 | 0.3 | Aligned to tier_center_mainstream. Between pop and niche. |
-| `tone_target_niche_*` | 0.0 | 0.5 | 0.16 | Aligned to tier_center_niche. Lower = rarer words. |
+| `tone_target_pop_*` | 0.4 | 1.0 | 0.699 | Aligned to tier_center_pop (auto-calibrated). Higher = more common words only. |
+| `tone_target_mainstream_*` | 0.2 | 0.6 | 0.480 | Aligned to tier_center_mainstream (auto-calibrated). Between pop and niche. |
+| `tone_target_niche_*` | 0.1 | 0.5 | 0.301 | Aligned to tier_center_niche (auto-calibrated). Lower = rarer words. |
 | `sample_tone_spread` | 0.2 | 1.5 | 0.6 | Tier sampling Gaussian width |
-| `tier_center_pop` | 0.4 | 1.5 | 0.78 | Center score for pop tier (calibrated from blended distribution) |
-| `tier_center_mainstream` | 0.1 | 0.6 | 0.3 | Center score for mainstream tier (calibrated from blended distribution) |
-| `tier_center_niche` | 0.0 | 0.3 | 0.16 | Center score for niche tier (calibrated from blended distribution) |
-| `accessibility_threshold_pop` | 0.3 | 1.0 | 0.6 | Score above which subtitle is classified as pop (auto-calibrated from 60th percentile) |
-| `accessibility_threshold_mainstream` | 0.1 | 0.6 | 0.3 | Score above which subtitle is classified as mainstream (auto-calibrated from 30th percentile) |
+| `tier_center_pop` | 0.4 | 1.0 | 0.699 | Center score for pop tier (auto-calibrated from percentile distribution) |
+| `tier_center_mainstream` | 0.2 | 0.6 | 0.480 | Center score for mainstream tier (auto-calibrated) |
+| `tier_center_niche` | 0.1 | 0.5 | 0.301 | Center score for niche tier (auto-calibrated) |
+| `accessibility_threshold_pop` | 0.3 | 1.0 | 0.602 | Score above which subtitle is classified as pop (auto-calibrated, p92) |
+| `accessibility_threshold_mainstream` | 0.2 | 0.6 | 0.480 | Score above which subtitle is classified as mainstream (auto-calibrated, p64) |
 | `article_of_min_freq` | 1 | 10 | 1 | Min corpus occurrences before trusting of-object article |
 | `article_action_min_freq` | 1 | 10 | 1 | Min corpus occurrences before trusting action article |
 | `article_remix_heuristic_threshold` | 0.5 | 1.0 | 0.6 | Min majority fraction for remix head-noun article backoff |
@@ -133,9 +148,9 @@ propose values outside these bounds.
 
 From tuning history — parameters ranked by impact and exploration status:
 
-1. **`weighted_sample_spread`** — **HIGHEST PRIORITY.** At 0.35, too wide for the compressed
-   blended scale (scores range ~0.09–2.32, most fillers below 0.5). Pop generation accuracy
-   is only ~10% because pop and mainstream fillers aren't separated enough. Try 0.15–0.25.
+1. **`weighted_sample_spread`** — **HIGHEST PRIORITY.** At 0.35, too wide for the percentile-
+   based scale (popularity_score is 0–1, blended scores 0.03–0.98). Pop generation accuracy
+   is only ~10% because pop and mainstream fillers aren't separated enough. Try 0.10–0.20.
 2. **`pop_classification_blend`** — set to 0.9. Separates tier classification from tone
    sampling. Biggest structural improvement — classification now tracks actual book popularity.
 3. **`pop_slot_mult_action_noun`** — biggest single gain (+0.050), reduced from 1.0→0.9
@@ -144,9 +159,9 @@ From tuning history — parameters ranked by impact and exploration status:
 5. **`pop_slot_mult_list_item`** — +0.012, reduced from 1.0→0.8. Less pop bias on items helped.
 6. **`pop_exponent`** — +0.003, raised from 1.0→1.2. More score contrast helped slightly.
 7. `sample_tone_spread` — never tuned, may interact with popularity differently
-8. `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library` — **unexplored**, new data source
-   weights. Changing requires `populate_popularity.py` re-run with new data.
-9. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires DB rebuild)
+8. `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library` — **unexplored**, data source
+   weights. Changing requires `subtitle-gen populate-popularity` re-run.
+9. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires populate-popularity re-run)
 10. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.05)
 11. `accessibility_threshold_*` — now auto-calibrated from percentiles, unlikely to need manual tuning
 12. `tone_target_*` — aligned to tier centers. Coordinate with `tier_center_*` if adjusting.
@@ -154,34 +169,36 @@ From tuning history — parameters ranked by impact and exploration status:
 14. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.
 15. `pop_missing_default` — lowering hurt. Stable at 0.1.
 
-## Multi-Source Popularity — NEW
+## Multi-Source Popularity
 
 ### Current source coverage
 
 | Source | Raw entries | Matched to works | Notes |
 |---|---|---|---|
-| SPL (Seattle Public Library) | ~81k works | 81k | Primary checkout-based signal |
-| Canadian libraries | 243k entries (102k ISBNs) | 12.8k works | Excellent ISBN→work matching |
-| Goodreads | 18k entries | 118 works | Low overlap expected — popular fiction ISBNs aren't in academic-heavy subtitle corpus |
-| Open Library | ~5.9M editions | ~5.9M | Edition count proxy for popularity |
-| NYT bestsellers | — | — | API harness built, needs API key + ~7 days background polling |
-| Wikipedia bestsellers | — | — | Scraper script ready, needs full run |
-| NYPL/VPL/PLR | 120 entries | — | Small but high-quality curated lists |
+| SPL (Seattle Public Library) | 994k ISBNs | 81k works | Primary checkout-based signal |
+| Goodreads (UCSD Book Graph) | 2.94M ISBNs | 149k works | Global reader engagement (ratings_count) |
+| Ottawa Public Library | 125k ISBNs | 31k works | Canadian library holds data |
+| NYT bestsellers (partial) | 1.8k ISBNs | 114 works | 2008–2013 nonfiction lists; needs API key to continue |
+| Open Library | 5.98M ISBNs | 5.96M works | Edition count prior (not a demand signal); OL-only capped at 0.5 |
+
+### Composite formula
+
+`demand_score = sum(w_i * percentile_i) / sum(w_i)` over observed demand sources only.
+`composite = confidence * demand_score + (1-confidence) * ol_percentile`
+where confidence scales with number of demand sources.
+OL-only works capped at 0.5. NYT appearance floors at 0.8.
 
 ### Key observations
 
-- **Canadian library data** provided the best new coverage: 102k ISBNs → 12.8k matched works
-  with high confidence. The ISBN-to-work pipeline resolved editions effectively.
-- **Goodreads low overlap (118/18k)** is expected and not a data quality issue — most popular
-  fiction ISBNs (thrillers, romance) simply don't appear in our academic-heavy subtitle corpus.
-  The 118 that do match are high-signal.
-- **NYT API** harness is built (`data/nyt_bestsellers/`) but requires an API key and ~7 days
-  of rate-limited background polling to collect the full historical bestseller list.
-- **Wikipedia bestsellers** scraper is ready (`data/wikipedia_bestsellers/`) but needs a full
-  run to extract and match ISBNs.
-- New composite weights (`pop_weight_gr=0.2`, `pop_weight_nyt=0.1`, `pop_weight_library=0.05`)
-  are set but unexplored — actual impact depends on running `populate_popularity.py` with all
-  sources integrated.
+- **SPL and Goodreads are uncorrelated** (r=0.046) — they measure different things
+  (local library checkouts vs global reader engagement). Both are valuable.
+- **Goodreads is fiction-dominated** — most popular fiction ISBNs don't appear in our
+  academic-heavy subtitle corpus. The 149k that match are high-signal.
+- **Ottawa** provides excellent Canadian library coverage with ISBNs directly from CSV.
+- **NYT** is partial (2008–2013, nonfiction only). Full historical pull needs ~3 more days
+  of API polling. Run `subtitle-gen download-popularity --sources nyt --nyt-api-key KEY`.
+- Weight tuning for `pop_weight_gr`, `pop_weight_nyt`, `pop_weight_library` requires
+  re-running `subtitle-gen populate-popularity` after each change.
 
 ## Simplicity Criterion
 
