@@ -14,6 +14,8 @@ import json
 import pathlib
 import re
 import sqlite3
+import subprocess
+import sys
 
 import click
 
@@ -33,6 +35,41 @@ from subtitle_generator.feedback import store_rating
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+# Parameters that require re-running populate-popularity to take effect.
+# These change the composite scoring formula, not just generation-time behavior.
+_REPOPULATE_PARAMS = frozenset({
+    "pop_weight_spl", "pop_weight_ol", "pop_weight_gr",
+    "pop_weight_nyt", "pop_weight_library", "pop_exponent",
+})
+
+
+def _needs_repopulate(param: str) -> bool:
+    """Check if changing this param requires a populate-popularity re-run."""
+    return param in _REPOPULATE_PARAMS
+
+
+def _run_repopulate(conn: sqlite3.Connection):
+    """Re-run populate-popularity with current config weights (skip data model rebuild)."""
+    click.echo("  [repopulate] re-scoring popularity with updated weights...")
+    cfg = load_tuning_config(conn)
+    args = [
+        sys.executable, "data/populate_popularity.py",
+        "--skip-calibrate",
+        "--spl", str(cfg.get("pop_weight_spl", 0.7)),
+        "--ol", str(cfg.get("pop_weight_ol", 0.3)),
+        "--gr", str(cfg.get("pop_weight_gr", 0.2)),
+        "--library", str(cfg.get("pop_weight_library", 0.05)),
+        "--nyt", str(cfg.get("pop_weight_nyt", 0.1)),
+        "--exponent", str(cfg.get("pop_exponent", 1.2)),
+    ]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode != 0:
+        click.echo(f"  [repopulate] ERROR: {result.stderr[-500:]}")
+        raise RuntimeError("populate-popularity failed")
+    # Reconnect to pick up table changes (populate drops and recreates tables)
+    conn.execute("SELECT 1")  # verify connection still works
+    click.echo("  [repopulate] done")
 
 
 def _load_goals() -> str:
@@ -562,6 +599,12 @@ Prioritize parameters marked as NEW in the priority order — they have never be
 and represent the biggest untapped improvement opportunity. The `pop_*` parameters were
 specifically added to replace the old freq-only scoring with empirical popularity data.
 Consider what previous experiments tell you about which direction to move.
+
+NOTE: Changes to pop_weight_spl, pop_weight_ol, pop_weight_gr, pop_weight_nyt,
+pop_weight_library, and pop_exponent now automatically trigger a populate-popularity
+re-run (~200s) so their effects are properly evaluated. Previous experiments with
+these params that did NOT mention repopulate may have been evaluated against stale
+scores — treat those results as unreliable.
 """
 
         click.echo("  proposing parameter change …")
@@ -630,6 +673,29 @@ Consider what previous experiments tell you about which direction to move.
         conn.commit()
         invalidate_config_cache()
 
+        # Re-run populate-popularity if this is a weight/exponent param
+        if _needs_repopulate(proposal.param):
+            try:
+                _run_repopulate(conn)
+            except RuntimeError:
+                click.echo("  -> SKIP (repopulate failed)\n")
+                # Revert the config change
+                if old_value == ALL_TUNABLE_PARAMS[proposal.param]:
+                    conn.execute("DELETE FROM config WHERE key = ?", (proposal.param,))
+                else:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                        (proposal.param, str(old_value)),
+                    )
+                conn.commit()
+                invalidate_config_cache()
+                _append_result(
+                    results_file, i, proposal.param, old_value, new_value,
+                    quality, separation, current_score,
+                    "error", f"repopulate failed: {proposal.reasoning}",
+                )
+                continue
+
         # Evaluate with new value
         new_quality, new_separation, new_score = _evaluate(
             conn, rater_model, seed_base=1000 + i * 100,
@@ -662,6 +728,9 @@ Consider what previous experiments tell you about which direction to move.
                 )
             conn.commit()
             invalidate_config_cache()
+            # Re-run populate-popularity to restore old scores
+            if _needs_repopulate(proposal.param):
+                _run_repopulate(conn)
             click.echo(
                 f"  Quality: {quality:.3f} -> {new_quality:.3f}  "
                 f"Separation: {separation:.3f} -> {new_separation:.3f}  "
