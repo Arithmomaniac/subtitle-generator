@@ -149,70 +149,95 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
                        w_spl: float = 0.7, w_ol: float = 0.3, exponent: float = 1.0,
                        gr: dict | None = None, w_gr: float = 0.2,
                        ottawa_isbn: dict | None = None, w_library: float = 0.05,
-                       nyt: dict | None = None, w_nyt: float = 0.1):
-    """Aggregate SPL + OL + Goodreads + Ottawa + NYT data at work level."""
+                       nyt: dict | None = None, w_nyt: float = 0.1,
+                       work_data_cache: dict | None = None):
+    """Aggregate SPL + OL + Goodreads + Ottawa + NYT data at work level.
+
+    If work_data_cache is provided and populated, skip the expensive ISBN→work
+    mapping and reuse cached work-level dicts. The cache is a dict that this
+    function populates on first call; pass the same dict on subsequent calls.
+    """
     print(f"\nPopulating work-level popularity_data "
           f"(w_spl={w_spl}, w_ol={w_ol}, w_gr={w_gr}, w_lib={w_library}, w_nyt={w_nyt}, exp={exponent})...")
 
-    # Build work_key → aggregated signals
-    work_spl: dict[str, dict] = defaultdict(lambda: {"checkouts": 0, "years": set(), "pub_year": ""})
-    work_ol: dict[str, int] = {}
-
-    # Get isbn → work_key mapping
-    rows = conn.execute(
-        "SELECT isbn, work_key FROM isbn_aliases WHERE work_key IS NOT NULL"
-    ).fetchall()
-    isbn_to_work = {r[0]: r[1] for r in rows}
-    print(f"  ISBN->work mappings: {len(isbn_to_work):,}")
-
-    # Aggregate SPL by work_key (dedup across editions)
-    spl_matched = 0
-    for isbn, data in spl.items():
-        work = isbn_to_work.get(isbn)
-        if work:
-            w = work_spl[work]
-            w["checkouts"] += data["total_checkouts"]
-            # years_active is an int count, not a set — approximate
-            w["years"] = max(len(w["years"]) if isinstance(w["years"], set) else w["years"], data["years_active"])
-            if data.get("pub_year") and (not w["pub_year"] or data["pub_year"] < w["pub_year"]):
-                w["pub_year"] = data["pub_year"]
-            spl_matched += 1
-
-    print(f"  SPL ISBNs matched to works: {spl_matched:,}")
-    print(f"  Unique works with SPL data: {len(work_spl):,}")
-
-    # OL edition counts are already per-work in the lookup
-    for isbn, data in ol.items():
-        work = data["work_key"]
-        ec = data["edition_count"]
-        # Keep max edition count per work (they should all be the same but just in case)
-        work_ol[work] = max(work_ol.get(work, 0), ec)
-
-    print(f"  Unique works with OL data: {len(work_ol):,}")
-
-    # Goodreads: map to work_keys
-    if gr:
-        work_gr = load_goodreads(conn, gr)
+    # Check if we can use cached work-level data
+    if work_data_cache is not None and "work_spl" in work_data_cache:
+        work_spl = work_data_cache["work_spl"]
+        work_ol = work_data_cache["work_ol"]
+        work_gr = work_data_cache["work_gr"]
+        work_ottawa = work_data_cache["work_ottawa"]
+        work_nyt = work_data_cache["work_nyt"]
+        all_works = work_data_cache["all_works"]
+        print(f"  Using cached work-level data ({len(all_works):,} works)")
     else:
-        work_gr = {}
-        print("  Goodreads: skipped (no data)")
+        # Build work_key → aggregated signals
+        work_spl: dict[str, dict] = defaultdict(lambda: {"checkouts": 0, "years": set(), "pub_year": ""})
+        work_ol: dict[str, int] = {}
 
-    # Ottawa library: map ISBN-keyed data to work_keys
-    if ottawa_isbn:
-        work_ottawa = load_ottawa(conn, ottawa_isbn)
-    else:
-        work_ottawa = {}
-        print("  Ottawa library: skipped (no data)")
+        # Get isbn → work_key mapping
+        rows = conn.execute(
+            "SELECT isbn, work_key FROM isbn_aliases WHERE work_key IS NOT NULL"
+        ).fetchall()
+        isbn_to_work = {r[0]: r[1] for r in rows}
+        print(f"  ISBN->work mappings: {len(isbn_to_work):,}")
 
-    # NYT bestsellers: map ISBN-keyed data to work_keys
-    if nyt:
-        work_nyt = load_nyt(conn, nyt)
-    else:
-        work_nyt = {}
-        print("  NYT bestsellers: skipped (no data)")
+        # Aggregate SPL by work_key (dedup across editions)
+        spl_matched = 0
+        for isbn, data in spl.items():
+            work = isbn_to_work.get(isbn)
+            if work:
+                w = work_spl[work]
+                w["checkouts"] += data["total_checkouts"]
+                w["years"] = max(len(w["years"]) if isinstance(w["years"], set) else w["years"], data["years_active"])
+                if data.get("pub_year") and (not w["pub_year"] or data["pub_year"] < w["pub_year"]):
+                    w["pub_year"] = data["pub_year"]
+                spl_matched += 1
+
+        print(f"  SPL ISBNs matched to works: {spl_matched:,}")
+        print(f"  Unique works with SPL data: {len(work_spl):,}")
+
+        # OL edition counts are already per-work in the lookup
+        for isbn, data in ol.items():
+            work = data["work_key"]
+            ec = data["edition_count"]
+            work_ol[work] = max(work_ol.get(work, 0), ec)
+
+        print(f"  Unique works with OL data: {len(work_ol):,}")
+
+        # Goodreads: map to work_keys
+        if gr:
+            work_gr = load_goodreads(conn, gr)
+        else:
+            work_gr = {}
+            print("  Goodreads: skipped (no data)")
+
+        # Ottawa library: map ISBN-keyed data to work_keys
+        if ottawa_isbn:
+            work_ottawa = load_ottawa(conn, ottawa_isbn)
+        else:
+            work_ottawa = {}
+            print("  Ottawa library: skipped (no data)")
+
+        # NYT bestsellers: map ISBN-keyed data to work_keys
+        if nyt:
+            work_nyt = load_nyt(conn, nyt)
+        else:
+            work_nyt = {}
+            print("  NYT bestsellers: skipped (no data)")
+
+        all_works = set(work_spl.keys()) | set(work_ol.keys()) | set(work_gr.keys()) | set(work_ottawa.keys()) | set(work_nyt.keys())
+
+        # Cache for reuse
+        if work_data_cache is not None:
+            work_data_cache["work_spl"] = dict(work_spl)
+            work_data_cache["work_ol"] = work_ol
+            work_data_cache["work_gr"] = work_gr
+            work_data_cache["work_ottawa"] = work_ottawa
+            work_data_cache["work_nyt"] = work_nyt
+            work_data_cache["all_works"] = all_works
+            print(f"  Cached work-level data for reuse")
 
     # Merge into popularity_data
-    all_works = set(work_spl.keys()) | set(work_ol.keys()) | set(work_gr.keys()) | set(work_ottawa.keys()) | set(work_nyt.keys())
     print(f"  Total unique works: {len(all_works):,}")
 
     # Precompute percentile lookup functions for each source.
@@ -624,6 +649,10 @@ def main():
 
     conn = sqlite3.connect(args.db)
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=OFF")
+    conn.execute("PRAGMA cache_size=-65536")  # 64 MB
+    conn.execute("PRAGMA mmap_size=268435456")  # 256 MB
+    conn.execute("PRAGMA temp_store=MEMORY")
 
     # Load weights from config, allow CLI overrides
     cfg = load_tuning_config(conn)

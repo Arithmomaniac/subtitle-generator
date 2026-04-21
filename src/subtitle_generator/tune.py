@@ -49,27 +49,102 @@ def _needs_repopulate(param: str) -> bool:
     return param in _REPOPULATE_PARAMS
 
 
+# Cached popularity data (loaded once, reused across tuner iterations)
+_pop_data_cache: dict | None = None
+_work_data_cache: dict = {}
+
+
+def _load_pop_data():
+    """Load all popularity JSON files (cached across calls)."""
+    global _pop_data_cache
+    if _pop_data_cache is not None:
+        return _pop_data_cache
+
+    import json
+    from pathlib import Path
+
+    click.echo("  [repopulate] loading popularity data (first time, will cache)...")
+    data = {}
+    spl_path = Path("data/spl_checkout_lookup.json")
+    ol_path = Path("data/ol_edition_lookup.json")
+    gr_path = Path("data/goodreads_lookup.json")
+    ottawa_path = Path("data/canadian_library_lookup.json")
+    nyt_path = Path("data/nyt_bestseller_lookup.json")
+
+    with open(spl_path) as f:
+        data["spl"] = json.load(f)
+    with open(ol_path) as f:
+        data["ol"] = json.load(f)
+
+    if gr_path.exists():
+        with open(gr_path) as f:
+            data["gr"] = json.load(f)
+    else:
+        data["gr"] = {}
+
+    if ottawa_path.exists():
+        with open(ottawa_path) as f:
+            raw = json.load(f)
+        data["ottawa_isbn"] = {k: v for k, v in raw.items() if k.replace("-", "").isdigit()}
+    else:
+        data["ottawa_isbn"] = {}
+
+    if nyt_path.exists():
+        with open(nyt_path) as f:
+            data["nyt"] = json.load(f)
+    else:
+        data["nyt"] = {}
+
+    _pop_data_cache = data
+    click.echo(f"  [repopulate] cached: SPL={len(data['spl']):,}, OL={len(data['ol']):,}, "
+               f"GR={len(data['gr']):,}, Ottawa={len(data['ottawa_isbn']):,}, NYT={len(data['nyt']):,}")
+    return data
+
+
 def _run_repopulate(conn: sqlite3.Connection):
     """Re-run populate-popularity with current config weights (skip data model rebuild)."""
+    import importlib
+    import time as _time
+
     click.echo("  [repopulate] re-scoring popularity with updated weights...")
+    t0 = _time.time()
+
+    # Load cached data
+    data = _load_pop_data()
     cfg = load_tuning_config(conn)
-    args = [
-        sys.executable, "data/populate_popularity.py",
-        "--skip-calibrate",
-        "--spl", str(cfg.get("pop_weight_spl", 0.7)),
-        "--ol", str(cfg.get("pop_weight_ol", 0.3)),
-        "--gr", str(cfg.get("pop_weight_gr", 0.2)),
-        "--library", str(cfg.get("pop_weight_library", 0.05)),
-        "--nyt", str(cfg.get("pop_weight_nyt", 0.1)),
-        "--exponent", str(cfg.get("pop_exponent", 1.2)),
-    ]
-    result = subprocess.run(args, capture_output=True, text=True)
-    if result.returncode != 0:
-        click.echo(f"  [repopulate] ERROR: {result.stderr[-500:]}")
-        raise RuntimeError("populate-popularity failed")
-    # Reconnect to pick up table changes (populate drops and recreates tables)
-    conn.execute("SELECT 1")  # verify connection still works
-    click.echo("  [repopulate] done")
+
+    w_spl = cfg.get("pop_weight_spl", 0.7)
+    w_ol = cfg.get("pop_weight_ol", 0.3)
+    w_gr = cfg.get("pop_weight_gr", 0.2)
+    w_library = cfg.get("pop_weight_library", 0.05)
+    w_nyt = cfg.get("pop_weight_nyt", 0.1)
+    exponent = cfg.get("pop_exponent", 1.2)
+
+    # Import populate_popularity functions directly
+    sys.path.insert(0, "data")
+    import populate_popularity as pp
+    importlib.reload(pp)  # ensure fresh module if code changed
+
+    # Apply performance pragmas
+    conn.execute("PRAGMA synchronous=OFF")
+    conn.execute("PRAGMA cache_size=-65536")
+    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute("PRAGMA temp_store=MEMORY")
+
+    pp.create_tables(conn)
+    pp.populate_work_level(
+        conn, data["spl"], data["ol"],
+        w_spl=w_spl, w_ol=w_ol, exponent=exponent,
+        gr=data["gr"], w_gr=w_gr,
+        ottawa_isbn=data["ottawa_isbn"], w_library=w_library,
+        nyt=data["nyt"], w_nyt=w_nyt,
+        work_data_cache=_work_data_cache,
+    )
+    pp.score_fillers_level1(conn)
+    pp.score_fillers_fallback(conn)
+
+    elapsed = _time.time() - t0
+    click.echo(f"  [repopulate] done in {elapsed:.0f}s")
 
 
 def _load_goals() -> str:
