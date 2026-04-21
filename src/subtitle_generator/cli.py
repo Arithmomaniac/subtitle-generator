@@ -120,6 +120,11 @@ def cli():
       subtitle-gen extract                 # parse into SQLite
       subtitle-gen build-slots             # extract slot fillers
       subtitle-gen generate                # slot-machine time
+
+    \b
+    Popularity scoring:
+      subtitle-gen download-popularity     # download all popularity sources
+      subtitle-gen populate-popularity     # compute composite scores
     """
     pass
 
@@ -912,45 +917,167 @@ def pull_ratings_cmd(ctx, since: str | None, account: str | None):
     click.echo(f"Synced {synced} ratings ({skipped} duplicates skipped).")
 
 
-@cli.command("download-goodreads")
-def download_goodreads():
-    """Download Goodbooks-10k dataset and build Goodreads lookup."""
-    import subprocess
-    subprocess.run([sys.executable, "data/goodreads_stream.py"], check=True)
+_POP_SOURCES = ["spl", "ol", "gr", "ottawa", "nyt"]
+_POP_LOOKUP_FILES = {
+    "spl": Path("data/spl_checkout_lookup.json"),
+    "ol": Path("data/ol_edition_lookup.json"),
+    "gr": Path("data/goodreads_lookup.json"),
+    "ottawa": Path("data/canadian_library_lookup.json"),
+    "nyt": Path("data/nyt_bestseller_lookup.json"),
+}
 
 
-@cli.command("download-nyt")
-@click.option("--api-key", default=None, help="NYT API key (or set NYT_API_KEY env var)")
-@click.option("--max-requests", type=int, default=None, help="Stop after N requests")
-@click.option("--status", is_flag=True, help="Show progress and exit")
-@click.option("--export", is_flag=True, help="Export partial data to lookup JSON")
-def download_nyt(api_key, max_requests, status, export):
-    """Download NYT bestseller data (resumable, rate-limited)."""
+def _pop_status():
+    """Show which popularity lookup files exist."""
+    import json
+    from datetime import datetime
+
+    for name, path in _POP_LOOKUP_FILES.items():
+        if path.exists():
+            size = path.stat().st_size
+            mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+            with open(path) as f:
+                count = len(json.load(f))
+            if size >= 1e6:
+                click.echo(f"  {name:8s}  {size / 1e6:7.1f} MB  {count:>10,} entries  updated {mtime}")
+            else:
+                click.echo(f"  {name:8s}  {size / 1e3:7.0f} KB  {count:>10,} entries  updated {mtime}")
+        else:
+            click.echo(f"  {name:8s}  -- not downloaded --")
+
+
+@cli.command("download-popularity")
+@click.option("--sources", default=None, help="Comma-separated sources to download (spl,ol,gr,ottawa,nyt). Default: all except nyt without API key.")
+@click.option("--nyt-api-key", default=None, envvar="NYT_API_KEY", help="NYT API key (or set NYT_API_KEY env var)")
+@click.option("--nyt-max-requests", type=int, default=None, help="Stop NYT after N requests")
+@click.option("--status", is_flag=True, help="Show what's downloaded and exit")
+def download_popularity(sources, nyt_api_key, nyt_max_requests, status):
+    """Download popularity data sources (SPL, OL editions, Goodreads, Ottawa, NYT).
+
+    \b
+    Sources:
+      spl     Seattle Public Library checkouts (~11 GB raw CSV)
+      ol      Open Library edition counts (requires download-ol first)
+      gr      Goodreads / UCSD Book Graph (~2 GB download)
+      ottawa  Ottawa Public Library holds data
+      nyt     NYT bestseller lists (multi-day, resumable, needs API key)
+
+    \b
+    Examples:
+      subtitle-gen download-popularity                    # all (except NYT w/o key)
+      subtitle-gen download-popularity --sources spl,gr   # specific sources
+      subtitle-gen download-popularity --sources nyt --nyt-api-key KEY
+      subtitle-gen download-popularity --status           # show what's downloaded
+    """
     import subprocess
-    args = [sys.executable, "data/nyt_stream.py"]
-    if api_key:
-        args.extend(["--api-key", api_key])
-    if max_requests:
-        args.extend(["--max-requests", str(max_requests)])
+
     if status:
-        args.append("--status")
-    if export:
-        args.append("--export")
-    subprocess.run(args, check=True)
+        click.echo("Popularity data status:")
+        _pop_status()
+        return
 
-
-@cli.command("download-ottawa")
-@click.option("--download/--no-download", default=True, help="Download raw data files")
-def download_ottawa(download):
-    """Download Ottawa Public Library holds data."""
-    import subprocess
-    args = [sys.executable, "data/canadian_library_stream.py"]
-    if download:
-        args.append("--download")
+    if sources:
+        selected = [s.strip().lower() for s in sources.split(",")]
+        invalid = [s for s in selected if s not in _POP_SOURCES]
+        if invalid:
+            raise click.ClickException(f"Unknown source(s): {', '.join(invalid)}. Choose from: {', '.join(_POP_SOURCES)}")
     else:
-        args.append("--parse-only")
-    args.append("--skip-isbn-lookup")
+        selected = [s for s in _POP_SOURCES if s != "nyt" or nyt_api_key]
+
+    for src in selected:
+        click.echo(f"\n{'=' * 60}")
+        click.echo(f"Downloading: {src}")
+        click.echo(f"{'=' * 60}")
+
+        if src == "spl":
+            subprocess.run([sys.executable, "data/spl_stream.py"], check=True)
+
+        elif src == "ol":
+            ol_dump = Path("data/raw/ol_dump_editions_latest.txt.gz")
+            if not ol_dump.exists():
+                raise click.ClickException(
+                    "OL editions dump not found. Run 'subtitle-gen download-ol' first, "
+                    "then re-run with --sources ol."
+                )
+            subprocess.run([sys.executable, "data/ol_edition_extract.py"], check=True)
+
+        elif src == "gr":
+            subprocess.run([sys.executable, "data/goodreads_stream.py"], check=True)
+
+        elif src == "ottawa":
+            subprocess.run([
+                sys.executable, "data/canadian_library_stream.py",
+                "--download", "--skip-isbn-lookup",
+            ], check=True)
+
+        elif src == "nyt":
+            if not nyt_api_key:
+                raise click.ClickException("NYT requires --nyt-api-key or NYT_API_KEY env var.")
+            args = [sys.executable, "data/nyt_stream.py", "--api-key", nyt_api_key]
+            if nyt_max_requests:
+                args.extend(["--max-requests", str(nyt_max_requests)])
+            subprocess.run(args, check=True)
+            # Auto-export partial data to lookup JSON
+            subprocess.run([sys.executable, "data/nyt_stream.py", "--export"], check=True)
+
+    click.echo(f"\n{'=' * 60}")
+    click.echo("Summary:")
+    _pop_status()
+
+
+@cli.command("populate-popularity")
+@click.option("--spl", "w_spl", type=float, default=None, help="Override pop_weight_spl")
+@click.option("--ol", "w_ol", type=float, default=None, help="Override pop_weight_ol")
+@click.option("--gr", "w_gr", type=float, default=None, help="Override pop_weight_gr")
+@click.option("--library", "w_library", type=float, default=None, help="Override pop_weight_library")
+@click.option("--nyt", "w_nyt", type=float, default=None, help="Override pop_weight_nyt")
+@click.option("--exponent", type=float, default=None, help="Override pop_exponent")
+@click.option("--skip-calibrate", is_flag=True, help="Skip threshold calibration")
+@click.option("--skip-data-model", is_flag=True, help="Skip ISBN alias / filler-source rebuild")
+def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, exponent, skip_calibrate, skip_data_model):
+    """Build ISBN mappings and compute popularity scores from all available sources.
+
+    \b
+    Runs the full popularity pipeline:
+      1. Build ISBN aliases + filler-source mapping (unless --skip-data-model)
+      2. Load all available popularity lookups (SPL, OL, Goodreads, Ottawa, NYT)
+      3. Compute composite scores via weighted-average percentile normalization
+      4. Score slot fillers (L1 top-3 mean + L2 corpus fallback)
+      5. Auto-calibrate tier thresholds (unless --skip-calibrate)
+
+    \b
+    Examples:
+      subtitle-gen populate-popularity                     # full pipeline
+      subtitle-gen populate-popularity --spl 0.7 --gr 0.3  # override weights
+      subtitle-gen populate-popularity --skip-calibrate     # skip recalibration
+      subtitle-gen populate-popularity --skip-data-model    # just re-score
+    """
+    import subprocess
+
+    if not skip_data_model:
+        click.echo("Step 1/2: Building ISBN aliases + filler-source mapping...")
+        subprocess.run([sys.executable, "data/build_data_model.py"], check=True)
+        click.echo()
+
+    click.echo(f"Step {'2/2' if not skip_data_model else '1/1'}: Computing popularity scores...")
+    args = [sys.executable, "data/populate_popularity.py"]
+    if w_spl is not None:
+        args.extend(["--spl", str(w_spl)])
+    if w_ol is not None:
+        args.extend(["--ol", str(w_ol)])
+    if w_gr is not None:
+        args.extend(["--gr", str(w_gr)])
+    if w_library is not None:
+        args.extend(["--library", str(w_library)])
+    if w_nyt is not None:
+        args.extend(["--nyt", str(w_nyt)])
+    if exponent is not None:
+        args.extend(["--exponent", str(exponent)])
+    if skip_calibrate:
+        args.append("--skip-calibrate")
     subprocess.run(args, check=True)
+
+    click.echo("\nDone! Popularity scores updated.")
 
 
 if __name__ == "__main__":

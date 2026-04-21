@@ -50,6 +50,8 @@ uv run subtitle-gen extract                     # parse into SQLite
 uv run subtitle-gen download-ol                 # Open Library (~9.2 GB)
 uv run subtitle-gen extract-ol                  # parse + deduplicate
 uv run subtitle-gen build-slots                 # extract slot fillers
+uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, etc.
+uv run subtitle-gen populate-popularity         # compute composite scores
 ```
 
 ## Usage
@@ -168,9 +170,8 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `build-db` | Build mini SQLite from CSV files (for CI) |
 | `patterns` | Show discovered subtitle patterns by frequency |
 | `slots` | Show available slot fillers |
-| `download-goodreads` | Download Goodbooks-10k dataset |
-| `download-nyt` | Download NYT bestseller data (resumable) |
-| `download-ottawa` | Download Ottawa library holds data |
+| `download-popularity` | Download all popularity data sources (SPL, Goodreads, Ottawa, NYT) |
+| `populate-popularity` | Build ISBN mappings + compute composite popularity scores |
 
 ## Architecture
 

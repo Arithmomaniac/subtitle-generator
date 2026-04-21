@@ -582,6 +582,7 @@ def main():
     parser.add_argument("--ol", type=float, default=None, help="Override pop_weight_ol")
     parser.add_argument("--gr", type=float, default=None, help="Override pop_weight_gr")
     parser.add_argument("--library", type=float, default=None, help="Override pop_weight_library")
+    parser.add_argument("--nyt", type=float, default=None, help="Override pop_weight_nyt")
     parser.add_argument("--exponent", type=float, default=None, help="Override pop_exponent")
     parser.add_argument("--skip-calibrate", action="store_true", help="Skip threshold calibration")
     args = parser.parse_args()
@@ -630,7 +631,7 @@ def main():
     w_ol = args.ol if args.ol is not None else cfg["pop_weight_ol"]
     w_gr = args.gr if args.gr is not None else cfg["pop_weight_gr"]
     w_library = args.library if args.library is not None else cfg["pop_weight_library"]
-    w_nyt = cfg.get("pop_weight_nyt", 0.1)
+    w_nyt = args.nyt if args.nyt is not None else cfg.get("pop_weight_nyt", 0.1)
     exponent = args.exponent if args.exponent is not None else cfg["pop_exponent"]
     print(f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, NYT={w_nyt}, exponent={exponent}")
 
