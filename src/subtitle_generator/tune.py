@@ -52,6 +52,8 @@ def _needs_repopulate(param: str) -> bool:
 # Cached popularity data (loaded once, reused across tuner iterations)
 _pop_data_cache: dict | None = None
 _work_data_cache: dict = {}
+_filler_works_cache: dict | None = None  # filler_id -> list of work_keys
+_filler_freq_cache: dict | None = None   # filler_id -> freq (for fallback)
 
 
 def _load_pop_data():
@@ -101,15 +103,175 @@ def _load_pop_data():
     return data
 
 
-def _run_repopulate(conn: sqlite3.Connection):
-    """Re-run populate-popularity with current config weights (skip data model rebuild)."""
+def _load_filler_works(conn: sqlite3.Connection):
+    """Build filler_id -> [work_keys] mapping (cached)."""
+    global _filler_works_cache, _filler_freq_cache
+    if _filler_works_cache is not None:
+        return _filler_works_cache, _filler_freq_cache
+
+    click.echo("  [repopulate] building filler->work mapping (first time)...")
+    from collections import defaultdict
+
+    rows = conn.execute("""
+        SELECT sf.id, ia.work_key
+        FROM slot_fillers sf
+        JOIN slot_filler_sources sfs ON sfs.slot_filler_id = sf.id
+        JOIN subtitles s ON sfs.subtitle_id = s.id
+        JOIN isbn_aliases ia ON ia.isbn = s.isbn
+        WHERE ia.work_key IS NOT NULL AND sf.mode = 'strict'
+    """).fetchall()
+
+    filler_works = defaultdict(list)
+    for fid, wk in rows:
+        filler_works[fid].append(wk)
+    # Deduplicate
+    _filler_works_cache = {fid: list(set(wks)) for fid, wks in filler_works.items()}
+
+    # Also cache freq for fallback scoring
+    freq_rows = conn.execute(
+        "SELECT id, freq FROM slot_fillers WHERE mode = 'strict'"
+    ).fetchall()
+    _filler_freq_cache = {r[0]: r[1] for r in freq_rows}
+
+    click.echo(f"  [repopulate] cached {len(_filler_works_cache):,} fillers with work mappings")
+    return _filler_works_cache, _filler_freq_cache
+
+
+def _score_in_memory(conn: sqlite3.Connection):
+    """Compute composite scores in memory and write only filler scores to DB.
+
+    Returns the work_composites dict for use by _flush_repopulate if kept.
+    """
+    import bisect
+    import math
+    import time as _time
+
+    t0 = _time.time()
+    data = _load_pop_data()
+    cfg = load_tuning_config(conn)
+
+    w_spl = cfg.get("pop_weight_spl", 0.7)
+    w_ol = cfg.get("pop_weight_ol", 0.3)
+    w_gr = cfg.get("pop_weight_gr", 0.2)
+    w_library = cfg.get("pop_weight_library", 0.05)
+    w_nyt = cfg.get("pop_weight_nyt", 0.1)
+
+    click.echo(f"  [repopulate] scoring in-memory (SPL={w_spl}, OL={w_ol}, "
+               f"GR={w_gr}, LIB={w_library}, NYT={w_nyt})...")
+
+    # Ensure work-level data is cached
+    if "work_spl" not in _work_data_cache:
+        # Need a full run first to populate the cache
+        click.echo("  [repopulate] cold start: need full populate for work data cache")
+        _run_repopulate_full(conn)
+        return None
+
+    work_spl = _work_data_cache["work_spl"]
+    work_ol = _work_data_cache["work_ol"]
+    work_gr = _work_data_cache["work_gr"]
+    work_ottawa = _work_data_cache["work_ottawa"]
+    work_nyt = _work_data_cache["work_nyt"]
+    all_works = _work_data_cache["all_works"]
+
+    # Build percentile arrays
+    spl_log_vals = sorted([math.log10(1 + d["checkouts"] / max(d["years"], 1))
+                           for d in work_spl.values() if d["checkouts"] > 0])
+    gr_log_vals = sorted([math.log10(1 + d["ratings_count"]) for d in work_gr.values()])
+    ol_log_vals = sorted([math.log10(1 + ec) for ec in work_ol.values()])
+    lib_log_vals = sorted([math.log10(1 + d["holds_count"]) for d in work_ottawa.values()])
+
+    n_spl = len(spl_log_vals) or 1
+    n_gr = len(gr_log_vals) or 1
+    n_ol = len(ol_log_vals) or 1
+    n_lib = len(lib_log_vals) or 1
+
+    # Score all works in memory (dict, no DB)
+    work_composites: dict[str, float] = {}
+    denom = w_spl + w_gr + w_library + w_nyt
+
+    for work in all_works:
+        signals = []
+        total_weight = 0.0
+
+        spl_data = work_spl.get(work)
+        if spl_data and spl_data["checkouts"] > 0:
+            co_per_year = spl_data["checkouts"] / max(spl_data["years"], 1)
+            spl_norm = bisect.bisect_left(spl_log_vals, math.log10(1 + co_per_year)) / n_spl
+            signals.append((w_spl, spl_norm))
+            total_weight += w_spl
+
+        gr_data = work_gr.get(work)
+        if gr_data:
+            gr_norm = bisect.bisect_left(gr_log_vals, math.log10(1 + gr_data["ratings_count"])) / n_gr
+            signals.append((w_gr, gr_norm))
+            total_weight += w_gr
+
+        can_data = work_ottawa.get(work)
+        if can_data:
+            lib_norm = bisect.bisect_left(lib_log_vals, math.log10(1 + can_data["holds_count"])) / n_lib
+            signals.append((w_library, lib_norm))
+            total_weight += w_library
+
+        nyt_data = work_nyt.get(work)
+        if nyt_data:
+            nyt_norm = min(1.0, 0.8 + 0.2 * math.log10(1 + nyt_data["weeks_on_list"]) / 2.0)
+            signals.append((w_nyt, nyt_norm))
+            total_weight += w_nyt
+
+        if total_weight > 0:
+            demand_score = sum(w * s for w, s in signals) / total_weight
+        else:
+            demand_score = 0.0
+
+        ol_ec = work_ol.get(work, 1)
+        ol_norm = bisect.bisect_left(ol_log_vals, math.log10(1 + ol_ec)) / n_ol
+        confidence = min(total_weight / denom, 1.0) if denom > 0 else 0.0
+        composite = confidence * demand_score + (1 - confidence) * ol_norm
+        if confidence == 0:
+            composite = min(composite, 0.5)
+
+        work_composites[work] = composite
+
+    t1 = _time.time()
+
+    # Compute filler scores from in-memory composites (top-3 mean)
+    filler_works, filler_freq = _load_filler_works(conn)
+
+    filler_updates = []  # (popularity_score, popularity_level, filler_id)
+    for fid, wkeys in filler_works.items():
+        scores = sorted([work_composites.get(wk, 0.0) for wk in wkeys], reverse=True)
+        top3 = scores[:3]
+        avg = sum(top3) / len(top3) if top3 else 0.0
+        filler_updates.append((avg, 1, 1.0, fid))
+
+    # Fallback for fillers without L1 data
+    l1_ids = set(filler_works.keys())
+    for fid, freq in filler_freq.items():
+        if fid not in l1_ids:
+            score = math.log10(1 + freq) if freq > 0 else 0.0
+            filler_updates.append((score, 0, 0.0, fid))
+
+    # Write only filler scores to DB (~13k rows)
+    conn.executemany(
+        "UPDATE slot_fillers SET popularity_score=?, popularity_level=?, popularity_confidence=? WHERE id=?",
+        filler_updates,
+    )
+    conn.commit()
+
+    elapsed = _time.time() - t0
+    click.echo(f"  [repopulate] scored {len(all_works):,} works in memory, "
+               f"updated {len(filler_updates):,} fillers in {elapsed:.0f}s")
+    return work_composites
+
+
+def _run_repopulate_full(conn: sqlite3.Connection):
+    """Full repopulate: recompute and write everything to DB (for 'keep' path)."""
     import importlib
     import time as _time
 
-    click.echo("  [repopulate] re-scoring popularity with updated weights...")
+    click.echo("  [repopulate] full DB write...")
     t0 = _time.time()
 
-    # Load cached data
     data = _load_pop_data()
     cfg = load_tuning_config(conn)
 
@@ -120,12 +282,10 @@ def _run_repopulate(conn: sqlite3.Connection):
     w_nyt = cfg.get("pop_weight_nyt", 0.1)
     exponent = cfg.get("pop_exponent", 1.2)
 
-    # Import populate_popularity functions directly
     sys.path.insert(0, "data")
     import populate_popularity as pp
-    importlib.reload(pp)  # ensure fresh module if code changed
+    importlib.reload(pp)
 
-    # Apply performance pragmas
     conn.execute("PRAGMA synchronous=OFF")
     conn.execute("PRAGMA cache_size=-65536")
     conn.execute("PRAGMA mmap_size=268435456")
@@ -144,7 +304,12 @@ def _run_repopulate(conn: sqlite3.Connection):
     pp.score_fillers_fallback(conn)
 
     elapsed = _time.time() - t0
-    click.echo(f"  [repopulate] done in {elapsed:.0f}s")
+    click.echo(f"  [repopulate] full write done in {elapsed:.0f}s")
+
+
+def _run_repopulate(conn: sqlite3.Connection):
+    """Fast repopulate: score in memory, write only filler scores."""
+    _score_in_memory(conn)
 
 
 def _load_goals() -> str:
@@ -676,8 +841,8 @@ specifically added to replace the old freq-only scoring with empirical popularit
 Consider what previous experiments tell you about which direction to move.
 
 NOTE: Changes to pop_weight_spl, pop_weight_ol, pop_weight_gr, pop_weight_nyt,
-pop_weight_library, and pop_exponent now automatically trigger a populate-popularity
-re-run (~200s) so their effects are properly evaluated. Previous experiments with
+pop_weight_library, and pop_exponent automatically trigger in-memory rescoring
+(~15s) so their effects are properly evaluated. Previous experiments with
 these params that did NOT mention repopulate may have been evaluated against stale
 scores — treat those results as unreliable.
 """
@@ -786,6 +951,9 @@ scores — treat those results as unreliable.
                 f"Composite: {current_score:.3f} -> {new_score:.3f}"
             )
             click.echo(f"  -> KEEP (+{delta:.3f})\n")
+            # Flush full DB write for kept weight changes
+            if _needs_repopulate(proposal.param):
+                _run_repopulate_full(conn)
             quality, separation, current_score = (
                 new_quality, new_separation, new_score,
             )
@@ -803,7 +971,7 @@ scores — treat those results as unreliable.
                 )
             conn.commit()
             invalidate_config_cache()
-            # Re-run populate-popularity to restore old scores
+            # Restore old filler scores in memory (no full DB write needed)
             if _needs_repopulate(proposal.param):
                 _run_repopulate(conn)
             click.echo(
