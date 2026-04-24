@@ -123,9 +123,13 @@ Fourth round (April 2026) — diagnosed phantom regression:
   `pop_classification_blend=0.5` gives separation ≈ 0.68; blend=0.7 gives ≈ 0.63;
   blend=1.0 (current) gives ≈ 0.59. **Lower blend is better.**
 - The agent's recent move to push `pop_classification_blend` from 0.9 → 1.0 was
-  wrong; it should be reverted toward 0.5–0.7. Note that recalibration of
-  thresholds + tier centers must follow any blend change (run
-  `subtitle-gen populate-popularity` so `calibrate_thresholds` reruns).
+  wrong; it should be reverted toward 0.5–0.7. **Recalibration of thresholds +
+  tier centers is now automatic** — `pop_classification_blend` and
+  `pop_missing_default` trigger `calibrate_thresholds` inside the tune loop,
+  and the popularity-weight params do too on both fast and full repopulate
+  paths. (Prior to this fix the thresholds were stale relative to whatever
+  blend the agent had set, which is another reason historical separation
+  numbers from rounds 2–3 are not directly comparable.)
 
 ## Coherence Constraints
 
@@ -163,7 +167,7 @@ propose values outside these bounds.
 | `pop_exponent` | 0.5 | 2.0 | 1.2 | Power-law exponent applied to raw scores before combining |
 | `pop_base_weight_blend` | 0.0 | 1.0 | 0.5 | Blend: 0=sqrt(freq) for base weight, 1=sqrt(popularity). Sweet spot at 0.5. |
 | `pop_tone_blend` | 0.0 | 1.0 | 0.5 | Blend for base weights only: 0=log10(1+freq), 1=popularity_score. Tone bias now uses pop_classification_blend. |
-| `pop_classification_blend` | 0.0 | 1.0 | 1.0 | Blend for tier classification: 0=log10(1+freq), 1=popularity_score. **Currently at 1.0; sweeps suggest 0.5–0.7 gives better separation. Recalibrate thresholds after changing.** |
+| `pop_classification_blend` | 0.0 | 1.0 | 1.0 | Blend for tier classification: 0=log10(1+freq), 1=popularity_score. **Currently at 1.0; sweeps suggest 0.5–0.7 gives better separation. Thresholds + tier centers are now auto-recalibrated on every change.** |
 | `pop_weight_gr` | 0.0 | 1.0 | 0.2 | Weight of Goodreads ratings signal in popularity composite |
 | `pop_weight_nyt` | 0.0 | 1.0 | 0.1 | Weight of NYT bestseller signal in popularity composite |
 | `pop_weight_library` | 0.0 | 1.0 | 0.05 | Weight of other library lists signal in popularity composite |
@@ -179,8 +183,8 @@ From tuning history — parameters ranked by impact and exploration status:
 1. **`pop_classification_blend`** — **HIGHEST PRIORITY.** Currently at 1.0 (pushed
    up from 0.9 in last regime). Sweeps after the histogram-metric fix show
    blend=0.5 gives the best separation (~0.68 vs ~0.59 at 1.0). Recommend
-   reverting to 0.5–0.7 and re-running `populate-popularity` so thresholds
-   and tier centers recalibrate to the new score distribution.
+   reverting to 0.5–0.7. Threshold/tier-center recalibration is now automatic
+   on every change, so no manual `populate-popularity` step is needed.
 2. **`weighted_sample_spread`** — Currently 0.10. Insensitive in [0.05, 0.15];
    all values give separation ~0.57–0.60. Probably close to optimal once
    blend is fixed. Stop tuning unless quality is regressing.
@@ -193,7 +197,7 @@ From tuning history — parameters ranked by impact and exploration status:
    weights. Changing requires `subtitle-gen populate-popularity` re-run.
 9. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires populate-popularity re-run)
 10. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.01)
-11. `accessibility_threshold_*` — auto-calibrated; recalibrate after blend changes
+11. `accessibility_threshold_*` — auto-calibrated on every popularity-related change; do not tune manually
 12. `tone_target_*` — aligned to tier centers. Coordinate with `tier_center_*` if adjusting.
 13. `pop_base_weight_blend` — explored both directions from 0.5, both hurt. Stable at 0.5.
 14. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.
