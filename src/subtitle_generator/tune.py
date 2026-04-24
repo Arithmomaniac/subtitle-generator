@@ -428,6 +428,150 @@ def _ensure_results_header(results_file: str) -> None:
         )
 
 
+def _summarize_regime_state(results_file: str) -> dict:
+    """Scan the current regime in results.tsv and return:
+      - best:        dict with composite/quality/separation/iter/param_changed/to_value, or None
+      - explored:    sorted list of params probed since last regime marker
+      - unexplored:  sorted list of params in ALL_TUNABLE_PARAMS not yet probed this regime
+                     (excludes auto-calibrated params that the tuner can't usefully set)
+      - param_freq:  dict of param -> count of times probed this regime
+    """
+    # These params are auto-derived on every calibrate; manual tuning is futile.
+    AUTO_CALIBRATED = {
+        k for k in ALL_TUNABLE_PARAMS
+        if k.startswith(("accessibility_threshold_", "tier_center_", "tone_target_"))
+    }
+    available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED
+    path = pathlib.Path(results_file)
+    if not path.exists():
+        return {
+            "best": None, "explored": [], "unexplored": sorted(available),
+            "param_freq": {},
+        }
+    lines = path.read_text(encoding="utf-8").strip().split("\n")
+    if len(lines) <= 1:
+        return {
+            "best": None, "explored": [], "unexplored": sorted(available),
+            "param_freq": {},
+        }
+    rows = lines[1:]
+    # Find rows after the most recent regime marker
+    last_regime_idx = -1
+    for i, line in enumerate(rows):
+        if "[regime change]" in line:
+            last_regime_idx = i
+    current_regime_rows = rows[last_regime_idx + 1:]
+
+    explored: set[str] = set()
+    param_freq: dict[str, int] = {}
+    best: dict | None = None
+    for line in current_regime_rows:
+        parts = line.split("\t")
+        if len(parts) < 8:
+            continue
+        try:
+            iter_num = int(parts[0])
+        except ValueError:
+            continue
+        param = parts[1]
+        if param in ("(failed)", "[regime change]"):
+            continue
+        explored.add(param)
+        param_freq[param] = param_freq.get(param, 0) + 1
+        try:
+            comp = float(parts[6])
+        except ValueError:
+            continue
+        if best is None or comp > best["composite"]:
+            best = {
+                "iteration": iter_num,
+                "param_changed": param,
+                "to_value": parts[3],
+                "quality": float(parts[4]),
+                "separation": float(parts[5]),
+                "composite": comp,
+                "status": parts[7],
+            }
+    unexplored = sorted(available - explored)
+    return {
+        "best": best,
+        "explored": sorted(explored),
+        "unexplored": unexplored,
+        "param_freq": param_freq,
+    }
+
+
+def _best_snapshot_path(results_file: str) -> pathlib.Path:
+    return pathlib.Path(results_file).parent / "tune_best_state.json"
+
+
+def _read_best_snapshot(results_file: str) -> dict | None:
+    p = _best_snapshot_path(results_file)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_best_snapshot(
+    results_file: str, composite: float, quality: float, separation: float,
+    params: dict, iteration: int,
+) -> None:
+    p = _best_snapshot_path(results_file)
+    p.write_text(
+        json.dumps({
+            "composite": composite,
+            "quality": quality,
+            "separation": separation,
+            "params": params,
+            "iteration": iteration,
+        }, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _clear_best_snapshot(results_file: str) -> None:
+    """Called on regime change — old best may be invalid in new regime."""
+    p = _best_snapshot_path(results_file)
+    if p.exists():
+        p.unlink()
+
+
+def _restore_params_from_snapshot(
+    conn: sqlite3.Connection, snapshot_params: dict,
+) -> tuple[bool, bool]:
+    """Write snapshot params back to config table.
+
+    Returns (any_pop_param_changed, any_calibrate_param_changed) so the caller
+    knows whether to repopulate / calibrate.
+    """
+    needs_repop = False
+    needs_calib = False
+    current = load_tuning_config(conn)
+    for key, value in snapshot_params.items():
+        if key not in ALL_TUNABLE_PARAMS:
+            continue  # param removed in current regime
+        cur = current.get(key)
+        if cur == value or str(cur) == str(value):
+            continue
+        if value == ALL_TUNABLE_PARAMS[key]:
+            conn.execute("DELETE FROM config WHERE key = ?", (key,))
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
+                (key, str(value)),
+            )
+        if _needs_repopulate(key):
+            needs_repop = True
+        elif _needs_calibrate(key):
+            needs_calib = True
+    conn.commit()
+    invalidate_config_cache()
+    return needs_repop, needs_calib
+
+
 def _check_regime_change(results_file: str) -> None:
     """Insert a regime-change marker if available params changed since last run.
 
@@ -474,6 +618,7 @@ def _check_regime_change(results_file: str) -> None:
                 f"History above is from a prior regime without these params. "
                 f"available_params={','.join(current_params)}",
             )
+            _clear_best_snapshot(results_file)
             return
 
     if last_regime_params is not None and last_regime_params != current_params:
@@ -489,6 +634,7 @@ def _check_regime_change(results_file: str) -> None:
             results_file, 0, "[regime change]", 0, 0, 0, 0, 0,
             "regime", " ".join(desc_parts),
         )
+        _clear_best_snapshot(results_file)
 
 
 def _append_result(
@@ -852,12 +998,118 @@ def run_tone_tuning(
         f"Composite: {current_score:.3f}\n"
     )
 
+    # Seed best-snapshot from baseline if no snapshot exists yet
+    if _read_best_snapshot(results_file) is None:
+        _write_best_snapshot(
+            results_file, current_score, quality, separation,
+            current_params, iteration=0,
+        )
+
+    # Threshold for considering current "drifted below best" (1σ-ish on composite)
+    DRIFT_THRESHOLD = 0.03
+
     for i in range(1, iterations + 1):
         click.echo(f"--- Iteration {i}/{iterations} ---")
 
         # Reload state each iteration
         current_params = load_tuning_config(conn)
         results_history = _load_results_history(results_file)
+        regime_state = _summarize_regime_state(results_file)
+        snapshot = _read_best_snapshot(results_file)
+
+        # --- Auto-revert if we've drifted below best ---
+        if (
+            snapshot is not None
+            and snapshot["composite"] > current_score + DRIFT_THRESHOLD
+        ):
+            click.echo(
+                f"  [auto-revert] current composite {current_score:.3f} is "
+                f"{snapshot['composite'] - current_score:.3f} below best "
+                f"{snapshot['composite']:.3f} (iter {snapshot['iteration']}). "
+                f"Restoring best-known params and re-evaluating."
+            )
+            needs_repop, needs_calib = _restore_params_from_snapshot(
+                conn, snapshot["params"],
+            )
+            if needs_repop:
+                _run_repopulate_full(conn)
+            elif needs_calib:
+                _run_calibrate_thresholds(conn)
+            quality, separation, current_score = _evaluate(
+                conn, rater_model, seed_base=2000 + i * 100,
+            )
+            click.echo(
+                f"  After revert — Quality: {quality:.3f}  "
+                f"Separation: {separation:.3f}  Composite: {current_score:.3f}\n"
+            )
+            _append_result(
+                results_file, i, "[auto-revert]", 0, 0,
+                quality, separation, current_score,
+                "auto_revert",
+                f"Drifted {snapshot['composite'] - current_score:+.3f} below best "
+                f"{snapshot['composite']:.3f} from iter {snapshot['iteration']}; "
+                f"restored snapshot params.",
+            )
+            # Update snapshot if revert eval produces a new best (it shouldn't,
+            # but rater noise can surprise)
+            if current_score > snapshot["composite"]:
+                _write_best_snapshot(
+                    results_file, current_score, quality, separation,
+                    load_tuning_config(conn), iteration=i,
+                )
+            continue  # consume an iteration on the revert
+
+        # Build extra context for the proposer about regime exploration state
+        best_section = ""
+        if regime_state["best"] is not None:
+            b = regime_state["best"]
+            best_section = (
+                f"- Best composite this regime: {b['composite']:.4f} at iter {b['iteration']} "
+                f"(after `{b['param_changed']}` -> {b['to_value']}, status={b['status']}).\n"
+                f"- Current composite: {current_score:.4f}"
+            )
+            delta_to_best = b["composite"] - current_score
+            if delta_to_best > DRIFT_THRESHOLD:
+                best_section += (
+                    f" — **{delta_to_best:.3f} BELOW best**. Strongly consider "
+                    f"reverting recent changes that moved you away from the best config."
+                )
+            elif current_score > b["composite"]:
+                best_section += " — **NEW BEST so far this regime.**"
+            else:
+                best_section += " (within noise of best)."
+        else:
+            best_section = f"- Current composite: {current_score:.4f} (no regime history yet)."
+
+        # Repeat-probe pressure: discourage hitting the same param twice in a row
+        repeat_warning = ""
+        recent_params = [
+            row.split("\t")[1] for row in pathlib.Path(results_file)
+            .read_text(encoding="utf-8").strip().split("\n")[1:]
+            if row.split("\t")[1] not in ("(failed)", "[regime change]", "[auto-revert]")
+        ][-5:]
+        overused = [p for p, c in regime_state["param_freq"].items() if c >= 3]
+        if overused:
+            repeat_warning = (
+                f"\n- **Avoid these params** (probed {[regime_state['param_freq'][p] for p in overused]} "
+                f"times this regime, signal exhausted): {overused}"
+            )
+        if recent_params:
+            repeat_warning += (
+                f"\n- Last 5 iterations probed: {recent_params}. "
+                f"Probing the same param again is unlikely to add signal."
+            )
+
+        unexplored_text = (
+            ", ".join(regime_state["unexplored"])
+            if regime_state["unexplored"] else "(all params probed at least once)"
+        )
+
+        regime_context = f"""
+## Regime exploration state:
+{best_section}
+- Params NOT YET probed this regime (HIGH PRIORITY for new probes): {unexplored_text}{repeat_warning}
+"""
 
         # Propose a parameter change
         proposal_prompt = f"""You are tuning parameters for a subtitle generator.
@@ -872,7 +1124,7 @@ def run_tone_tuning(
 - Quality: {quality:.3f}
 - Tone separation: {separation:.3f}
 - Composite: {current_score:.3f}
-
+{regime_context}
 ## Previous experiments:
 {results_history}
 
@@ -880,9 +1132,10 @@ def run_tone_tuning(
 {bounds_text}
 
 Propose ONE parameter change that you think will improve the composite score.
-Prioritize parameters marked as NEW in the priority order — they have never been tuned
-and represent the biggest untapped improvement opportunity. The `pop_*` parameters were
-specifically added to replace the old freq-only scoring with empirical popularity data.
+Strongly prefer params from the "NOT YET probed" list above — they are the highest-leverage
+remaining moves. Avoid re-probing params already tested several times this regime; their
+signal is exhausted and further probes are noise.
+
 Consider what previous experiments tell you about which direction to move.
 
 NOTE: Changes to pop_weight_spl, pop_weight_ol, pop_weight_gr, pop_weight_nyt,
@@ -1006,6 +1259,14 @@ scores — treat those results as unreliable.
             quality, separation, current_score = (
                 new_quality, new_separation, new_score,
             )
+            # Update best snapshot if this is a new high
+            best_snap = _read_best_snapshot(results_file)
+            if best_snap is None or current_score > best_snap["composite"]:
+                _write_best_snapshot(
+                    results_file, current_score, quality, separation,
+                    load_tuning_config(conn), iteration=i,
+                )
+                click.echo(f"  [snapshot] new best composite {current_score:.4f} saved")
         else:
             status = "discard"
             # Revert: restore old value or remove if it was a default
