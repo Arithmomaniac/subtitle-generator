@@ -39,7 +39,7 @@ def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
     return "niche", score
 
 
-_TAG_MAP = {"f": "funny", "g": "grammar", "c": "contradiction", "b": "boring"}
+_TAG_MAP = {"f": "funny", "b": "boring", "r": "broken", "n": "nonsense"}
 
 
 def _prompt_review(conn, subtitle_text: str) -> int | None:
@@ -72,7 +72,7 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
 
     # Tags
     tags_input = click.prompt(
-        click.style("     Tags? [f=funny / g=grammar / c=contradiction / b=boring / Enter]", fg="cyan"),
+        click.style("     Tags? [f=funny / b=boring / r=broken / n=nonsense / Enter]", fg="cyan"),
         default="", show_default=False,
     ).strip().lower()
     tags = [_TAG_MAP[c] for c in tags_input if c in _TAG_MAP] or None
@@ -588,7 +588,8 @@ def calibrate_remix_cmd(samples: int, model: str | None):
 @click.option("--show-results", is_flag=True, help="Display past tuning results and exit.")
 @click.option("--spot-check", is_flag=True, hidden=True, help="Deprecated. Use 'subtitle-gen spot-check' instead.")
 @click.option("--spot-check-tui", is_flag=True, hidden=True, help="Deprecated. Use 'subtitle-gen spot-check --tui' instead.")
-def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool, spot_check: bool, spot_check_tui: bool):
+@click.option("--debug", is_flag=True, help="Enable verbose litellm debug logging.")
+def tune(phase: str, iterations: int, samples: int, rater_model: str | None, proposer_model: str | None, results_file: str, dry_run: bool, show_results: bool, spot_check: bool, spot_check_tui: bool, debug: bool):
     """Unified tuning pipeline (autoresearch-inspired).
 
     Pure automated loop — no human input during the run. Human feedback
@@ -622,6 +623,10 @@ def tune(phase: str, iterations: int, samples: int, rater_model: str | None, pro
         for line in lines:
             click.echo(line)
         return
+
+    if debug:
+        import litellm
+        litellm.set_verbose = True
 
     from subtitle_generator.eval_harness import DEFAULT_RATER_MODEL, DEFAULT_PROPOSER_MODEL
     from subtitle_generator.tune import run_full_tuning

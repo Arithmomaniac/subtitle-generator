@@ -194,29 +194,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 
   <!-- Rating -->
   <div class="rating-section" x-show="hasSubtitle" x-cloak>
-    <div class="rating-row">
-      <span class="rating-label">Good subtitle?</span>
-      <button class="btn-thumb btn-thumb-up" :class="{ active: ratingSubmitted && ratingSubmitted === 1 }" @click="submitRating(1)" :disabled="ratingSubmitted">👍</button>
-      <button class="btn-thumb btn-thumb-down" :class="{ active: ratingSubmitted && ratingSubmitted === -1 }" @click="submitRating(-1)" :disabled="ratingSubmitted">👎</button>
-    </div>
-    <div class="rating-row" x-show="!ratingSubmitted">
-      <span class="rating-label">Where does this belong?</span>
-      <button class="btn-tone" :class="{ active: selectedTone === 'pop' }" @click="selectTone('pop')">Pop</button>
-      <button class="btn-tone" :class="{ active: selectedTone === 'mainstream' }" @click="selectTone('mainstream')">Mainstream</button>
-      <button class="btn-tone" :class="{ active: selectedTone === 'niche' }" @click="selectTone('niche')">Niche</button>
-    </div>
-    <!-- Collapsible quality tags pane -->
-    <div class="rating-row" x-show="!ratingSubmitted">
-      <button class="btn-toggle-tags" @click="tagsExpanded = !tagsExpanded; if(tagsExpanded) sessionStorage.setItem('tagsExpanded','1')" x-text="tagsExpanded ? '▾ Tags' : '▸ Tags'" style="font-size:11px;color:#81b29a;background:none;border:none;cursor:pointer;padding:0"></button>
-    </div>
-    <div class="rating-row tag-row" x-show="!ratingSubmitted && tagsExpanded" x-cloak>
-      <button class="btn-tag" :class="{ active: selectedTags.includes('funny') }" @click="toggleTag('funny')">😄 Funny</button>
-      <button class="btn-tag" :class="{ active: selectedTags.includes('grammar') }" @click="toggleTag('grammar')">🤔 Grammar</button>
-      <button class="btn-tag" :class="{ active: selectedTags.includes('contradiction') }" @click="toggleTag('contradiction')">🔄 Contradictory</button>
-      <button class="btn-tag" :class="{ active: selectedTags.includes('boring') }" @click="toggleTag('boring')">😴 Boring</button>
-    </div>
-    <div class="rating-reveal" x-show="ratingToneRevealed" x-cloak>
-      ✓ Rating saved<template x-if="selectedTone"> — you said: <strong x-text="selectedTone"></strong></template>
+    <div class="rating-row tag-row">
+      <span class="rating-label">How'd it land?</span>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('funny') }" @click="toggleTag('funny')">😂 Funny</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('boring') }" @click="toggleTag('boring')">🥱 Boring</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('broken') }" @click="toggleTag('broken')">🪦 Broken</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('nonsense') }" @click="toggleTag('nonsense')">🥴 Nonsense</button>
     </div>
   </div>
 

@@ -220,9 +220,9 @@ export function spotCheckApp() {
         else if (key === "s") { this.skip(); event.preventDefault(); }
       } else if (this.phase === "reveal") {
         if (key === "f") { this.toggleTag("funny"); event.preventDefault(); }
-        else if (key === "g") { this.toggleTag("grammar"); event.preventDefault(); }
-        else if (key === "c") { this.toggleTag("contradiction"); event.preventDefault(); }
         else if (key === "b") { this.toggleTag("boring"); event.preventDefault(); }
+        else if (key === "r") { this.toggleTag("broken"); event.preventDefault(); }
+        else if (key === "n") { this.toggleTag("nonsense"); event.preventDefault(); }
         else if (key === "enter") { this.next(); event.preventDefault(); }
       }
     },

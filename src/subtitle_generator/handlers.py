@@ -225,7 +225,7 @@ def handle_rate(body: dict) -> tuple[int, dict]:
     if tags is not None:
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
             return 400, {"error": "tags must be an array of strings"}
-        valid_tags = {"funny", "grammar", "contradiction", "boring"}
+        valid_tags = {"funny", "boring", "broken", "nonsense"}
         invalid_tags = set(tags) - valid_tags
         if invalid_tags:
             return 400, {"error": f"Invalid tags: {', '.join(invalid_tags)}"}

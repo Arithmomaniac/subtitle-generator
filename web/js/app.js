@@ -72,6 +72,9 @@ export function createApp() {
           }
         }
       }
+
+      // Flush any pending rating on tab close / navigation
+      window.addEventListener("beforeunload", () => this._flushRatingBeacon());
     },
 
     // ── Settings persistence ──
@@ -93,6 +96,9 @@ export function createApp() {
 
     // ── Generate ──
     async generate() {
+      // Flush any pending rating on the previous subtitle before moving on
+      await this._flushRating();
+
       this.loading = true;
       this._setJacket(null);
       this.prompt = null;
@@ -108,22 +114,13 @@ export function createApp() {
         this.subtitle = deriveSubtitleVM(result);
         this.sources = deriveSourcesVM(result);
         this.hasSubtitle = true;
-        this.ratingSubmitted = false;
-        this.ratingToneRevealed = false;
-        this.selectedTone = null;
         this.selectedTags = [];
       }
       this.loading = false;
     },
 
-    // ── Rating ──
-    ratingSubmitted: false,
-    ratingToneRevealed: false,
-    selectedTone: null,
-    ratingSystemTone: null,
-    ratingScore: null,
+    // ── Rating (tag-only, auto-save on next generate / unload) ──
     selectedTags: [],
-    tagsExpanded: sessionStorage.getItem('tagsExpanded') === '1',
 
     toggleTag(tag) {
       const idx = this.selectedTags.indexOf(tag);
@@ -131,26 +128,28 @@ export function createApp() {
       else this.selectedTags.push(tag);
     },
 
-    async submitRating(thumbs) {
-      if (!this.hasSubtitle || this.ratingSubmitted) return;
-      const body = {
-        subtitle: this.subtitle.fullText,
-        thumbs,
-        tone_override: this.selectedTone,
-        system_tone: this.tone || null,
-        tags: this.selectedTags.length ? this.selectedTags : undefined,
-      };
-      await api.rate(body);
-      this.ratingSubmitted = true;
-      this.ratingToneRevealed = true;
-      if (this.selectedTags.length) {
-        this.tagsExpanded = true;
-        sessionStorage.setItem('tagsExpanded', '1');
-      }
+    async _flushRating() {
+      if (!this.hasSubtitle || this.selectedTags.length === 0) return;
+      try {
+        await api.rate({
+          subtitle: this.subtitle.fullText,
+          system_tone: this.tone || null,
+          tags: this.selectedTags.slice(),
+        });
+      } catch (e) { /* best-effort; don't block generate */ }
     },
 
-    selectTone(tone) {
-      this.selectedTone = this.selectedTone === tone ? null : tone;
+    _flushRatingBeacon() {
+      if (!this.hasSubtitle || this.selectedTags.length === 0) return;
+      try {
+        const body = JSON.stringify({
+          subtitle: this.subtitle.fullText,
+          system_tone: this.tone || null,
+          tags: this.selectedTags.slice(),
+        });
+        const blob = new Blob([body], { type: "application/json" });
+        navigator.sendBeacon(apiBase + "/api/rate", blob);
+      } catch (e) { /* best-effort */ }
     },
 
     // ── Jacket ──
