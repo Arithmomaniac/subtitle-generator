@@ -43,10 +43,36 @@ _REPOPULATE_PARAMS = frozenset({
     "pop_weight_nyt", "pop_weight_library", "pop_exponent",
 })
 
+# Params that don't change stored filler scores but DO change the blended-score
+# distribution used for tier classification. Trigger calibrate-only (no repopulate).
+_CALIBRATE_ONLY_PARAMS = frozenset({
+    "pop_classification_blend", "pop_missing_default",
+})
+
 
 def _needs_repopulate(param: str) -> bool:
     """Check if changing this param requires a populate-popularity re-run."""
     return param in _REPOPULATE_PARAMS
+
+
+def _needs_calibrate(param: str) -> bool:
+    """Check if changing this param requires recalibrating thresholds/tier centers."""
+    return param in _REPOPULATE_PARAMS or param in _CALIBRATE_ONLY_PARAMS
+
+
+def _run_calibrate_thresholds(conn: sqlite3.Connection) -> None:
+    """Re-derive accessibility thresholds, tier centers, and tone targets from
+    the current blended-score distribution. Cheap; safe to call after any
+    repopulate or after a pop_classification_blend / pop_missing_default change.
+    """
+    import importlib
+    sys.path.insert(0, "data")
+    import populate_popularity as pp
+    importlib.reload(pp)
+    click.echo("  [calibrate] recomputing thresholds + tier centers...")
+    pp.calibrate_thresholds(conn)
+    conn.commit()
+    invalidate_config_cache()
 
 
 # Cached popularity data (loaded once, reused across tuner iterations)
@@ -305,11 +331,13 @@ def _run_repopulate_full(conn: sqlite3.Connection):
 
     elapsed = _time.time() - t0
     click.echo(f"  [repopulate] full write done in {elapsed:.0f}s")
+    _run_calibrate_thresholds(conn)
 
 
 def _run_repopulate(conn: sqlite3.Connection):
     """Fast repopulate: score in memory, write only filler scores."""
     _score_in_memory(conn)
+    _run_calibrate_thresholds(conn)
 
 
 def _load_goals() -> str:
@@ -595,10 +623,10 @@ def _spot_check_cli(
                 ))
 
             tags_input = click.prompt(
-                click.style("       Tags? [f/g/c/b / Enter]", fg="cyan"),
+                click.style("       Tags? [f=funny/b=boring/r=broken/n=nonsense / Enter]", fg="cyan"),
                 default="", show_default=False,
             ).strip().lower()
-            tag_map = {"f": "funny", "g": "grammar", "c": "contradiction", "b": "boring"}
+            tag_map = {"f": "funny", "b": "boring", "r": "broken", "n": "nonsense"}
             tags = [tag_map[c] for c in tags_input if c in tag_map] or None
 
             store_rating(
@@ -935,6 +963,10 @@ scores — treat those results as unreliable.
                     "error", f"repopulate failed: {proposal.reasoning}",
                 )
                 continue
+        elif _needs_calibrate(proposal.param):
+            # Stored filler scores unchanged, but blended-score distribution
+            # shifted -> re-derive thresholds + tier centers.
+            _run_calibrate_thresholds(conn)
 
         # Evaluate with new value
         new_quality, new_separation, new_score = _evaluate(
@@ -974,6 +1006,8 @@ scores — treat those results as unreliable.
             # Restore old filler scores in memory (no full DB write needed)
             if _needs_repopulate(proposal.param):
                 _run_repopulate(conn)
+            elif _needs_calibrate(proposal.param):
+                _run_calibrate_thresholds(conn)
             click.echo(
                 f"  Quality: {quality:.3f} -> {new_quality:.3f}  "
                 f"Separation: {separation:.3f} -> {new_separation:.3f}  "
