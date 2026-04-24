@@ -65,14 +65,28 @@ def _run_calibrate_thresholds(conn: sqlite3.Connection) -> None:
     the current blended-score distribution. Cheap; safe to call after any
     repopulate or after a pop_classification_blend / pop_missing_default change.
     """
+    import contextlib
     import importlib
+    import io
     sys.path.insert(0, "data")
     import populate_popularity as pp
     importlib.reload(pp)
-    click.echo("  [calibrate] recomputing thresholds + tier centers...")
-    pp.calibrate_thresholds(conn)
+    # Suppress the verbose threshold report; tune loop only needs the new values
+    # to be live in config, not a 30-line dump every iteration.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        pp.calibrate_thresholds(conn)
     conn.commit()
     invalidate_config_cache()
+    # One-line summary
+    cfg = load_tuning_config(conn)
+    click.echo(
+        f"  [calibrate] thresholds pop={cfg.get('accessibility_threshold_pop'):.3f} "
+        f"main={cfg.get('accessibility_threshold_mainstream'):.3f} "
+        f"centers pop={cfg.get('tier_center_pop'):.3f} "
+        f"main={cfg.get('tier_center_mainstream'):.3f} "
+        f"niche={cfg.get('tier_center_niche'):.3f}"
+    )
 
 
 # Cached popularity data (loaded once, reused across tuner iterations)
@@ -336,8 +350,11 @@ def _run_repopulate_full(conn: sqlite3.Connection):
 
 def _run_repopulate(conn: sqlite3.Connection):
     """Fast repopulate: score in memory, write only filler scores."""
-    _score_in_memory(conn)
-    _run_calibrate_thresholds(conn)
+    result = _score_in_memory(conn)
+    if result is not None:
+        # Fast in-memory path; cold-start path (result is None) already
+        # delegated to _run_repopulate_full which calibrated.
+        _run_calibrate_thresholds(conn)
 
 
 def _load_goals() -> str:
