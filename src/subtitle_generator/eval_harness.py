@@ -219,7 +219,7 @@ Subtitles:
 def rate_batch_raw(
     subtitles: list[str],
     model: str = DEFAULT_RATER_MODEL,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ) -> list[SubtitleRating]:
     """Rate subtitles and return raw SubtitleRating objects (not normalized)."""
     chunk_size = 25
@@ -249,7 +249,7 @@ def rate_batch_raw(
 def rate_quality(
     subtitles: list[str],
     model: str = DEFAULT_RATER_MODEL,
-    timeout: float = 60.0,
+    timeout: float = 120.0,
 ) -> float:
     """Rate a batch of subtitles via LLM.  Returns normalised average (0-1)."""
     if not subtitles:
@@ -304,8 +304,20 @@ def _filler_log_freqs(
 
 
 def _histogram_overlap(a: list[float], b: list[float], bins: int = 10) -> float:
-    """Compute histogram overlap coefficient between two distributions."""
-    lo, hi = 0.0, 3.0
+    """Compute histogram overlap coefficient between two distributions.
+
+    The bin range is auto-derived from the union of the two samples so the
+    metric stays scale-invariant when the underlying score scale changes
+    (e.g. when ``pop_classification_blend`` is increased and scores shift
+    from log10(1+freq) range ~0–3 to popularity-percentile range 0–1).
+    """
+    if not a or not b:
+        return 1.0
+    lo = min(min(a), min(b))
+    hi = max(max(a), max(b))
+    if hi - lo < 1e-9:
+        # All values identical → distributions perfectly overlap
+        return 1.0
     bin_width = (hi - lo) / bins
 
     def _bin_counts(vals: list[float]) -> list[float]:
