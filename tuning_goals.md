@@ -65,13 +65,25 @@ distribution (using `pop_classification_blend=0.9`). Current values:
 
 ### Current accuracy and next steps
 
-- **Pop tier generation accuracy is still low (~10%).** The `weighted_sample_spread` at 0.35
-  is too wide for the percentile-based scale (popularity_score is 0–1, blended scores
-  cluster 0.03–0.98). Narrowing spread is the **highest priority** next tuning target.
-  Try 0.10–0.20.
-- Niche and mainstream accuracy are reasonable.
+- **Pop tier accuracy ~50%** (9/18 in the most recent spot-check batch).
+  Mainstream 67%, niche 67%. Overall 60%. The earlier "~10% pop accuracy"
+  claim in this doc was an artifact of a broken `_histogram_overlap` metric
+  (fixed: now auto-ranges bins instead of hardcoding [0, 3]).
+- Tone separation under the current scoring scale tops out around 0.6–0.7
+  (Cohen's d ≈ 1.35, so distributions are genuinely well-separated).
 - `pop_weight_gr`, `pop_weight_nyt`, `pop_weight_library` are set but unexplored —
   changing them requires re-running `subtitle-gen populate-popularity`.
+
+### Metric calibration history (April 2026)
+
+The `_histogram_overlap` function used by `measure_tone_separation` originally
+hardcoded its bin range to [0.0, 3.0]. That fit the original
+`log10(1+freq)` score scale. After `pop_classification_blend` was raised
+toward 1.0, blended scores moved into [0, 1] and 7 of 10 bins became
+unused — inflating measured overlap and depressing reported separation by
+~0.13 absolute. Fixed by auto-ranging the histogram from the union of
+both samples. Many "discard" decisions during the post-regime tuning
+phase were driven by this artifact.
 
 ### Exploration history
 
@@ -99,6 +111,22 @@ Third round (April 2026) — multi-source scoring redesign:
 - SPL and Goodreads are uncorrelated (r=0.046) — they measure different things
 - Pop fillers with demand backing rose from 63 to 302; OL-only in pop dropped 876 to 254
 
+Fourth round (April 2026) — diagnosed phantom regression:
+- After regime changes pushing `pop_classification_blend` to 0.9 then 1.0,
+  composite collapsed from ~0.74 to ~0.55 and the autotune loop spent ~16
+  iterations in a near-random walk of `discard` decisions.
+- Root cause: `_histogram_overlap` had a hardcoded [0, 3] bin range (calibrated
+  for the old freq-based score). Under the new percentile-blended scores in [0, 1],
+  7 of 10 bins were empty. **Fixed: auto-range the histogram.**
+- Sweeps after the fix (3–5 seeds, n=30 per tone): `weighted_sample_spread` is
+  insensitive in the 0.05–0.15 range (all give separation ≈ 0.57–0.60).
+  `pop_classification_blend=0.5` gives separation ≈ 0.68; blend=0.7 gives ≈ 0.63;
+  blend=1.0 (current) gives ≈ 0.59. **Lower blend is better.**
+- The agent's recent move to push `pop_classification_blend` from 0.9 → 1.0 was
+  wrong; it should be reverted toward 0.5–0.7. Note that recalibration of
+  thresholds + tier centers must follow any blend change (run
+  `subtitle-gen populate-popularity` so `calibrate_thresholds` reruns).
+
 ## Coherence Constraints
 
 - Every subtitle must be grammatically plausible as a real book subtitle.
@@ -114,8 +142,8 @@ propose values outside these bounds.
 
 | Parameter | Min | Max | Current | Notes |
 |---|---|---|---|---|
-| `weighted_sample_spread` | 0.05 | 0.5 | 0.35 | Gaussian width; too low = only exact-match fillers, too high = no tone effect. **Try 0.10–0.20 for new scale.** |
-| `weighted_sample_bias_floor` | 0.01 | 0.30 | 0.05 | Minimum weight; too low = complete suppression, too high = no suppression |
+| `weighted_sample_spread` | 0.05 | 0.5 | 0.10 | Gaussian width. Insensitive in [0.05, 0.15] under current scoring scale. |
+| `weighted_sample_bias_floor` | 0.01 | 0.30 | 0.01 | Minimum weight; pinned at lower bound. |
 | `tone_target_pop_*` | 0.4 | 1.0 | 0.699 | Aligned to tier_center_pop (auto-calibrated). Higher = more common words only. |
 | `tone_target_mainstream_*` | 0.2 | 0.6 | 0.480 | Aligned to tier_center_mainstream (auto-calibrated). Between pop and niche. |
 | `tone_target_niche_*` | 0.1 | 0.5 | 0.301 | Aligned to tier_center_niche (auto-calibrated). Lower = rarer words. |
@@ -135,7 +163,7 @@ propose values outside these bounds.
 | `pop_exponent` | 0.5 | 2.0 | 1.2 | Power-law exponent applied to raw scores before combining |
 | `pop_base_weight_blend` | 0.0 | 1.0 | 0.5 | Blend: 0=sqrt(freq) for base weight, 1=sqrt(popularity). Sweet spot at 0.5. |
 | `pop_tone_blend` | 0.0 | 1.0 | 0.5 | Blend for base weights only: 0=log10(1+freq), 1=popularity_score. Tone bias now uses pop_classification_blend. |
-| `pop_classification_blend` | 0.0 | 1.0 | 0.9 | Blend for tier classification: 0=log10(1+freq), 1=popularity_score. Also used for tone bias in generation. |
+| `pop_classification_blend` | 0.0 | 1.0 | 1.0 | Blend for tier classification: 0=log10(1+freq), 1=popularity_score. **Currently at 1.0; sweeps suggest 0.5–0.7 gives better separation. Recalibrate thresholds after changing.** |
 | `pop_weight_gr` | 0.0 | 1.0 | 0.2 | Weight of Goodreads ratings signal in popularity composite |
 | `pop_weight_nyt` | 0.0 | 1.0 | 0.1 | Weight of NYT bestseller signal in popularity composite |
 | `pop_weight_library` | 0.0 | 1.0 | 0.05 | Weight of other library lists signal in popularity composite |
@@ -148,22 +176,24 @@ propose values outside these bounds.
 
 From tuning history — parameters ranked by impact and exploration status:
 
-1. **`weighted_sample_spread`** — **HIGHEST PRIORITY.** At 0.35, too wide for the percentile-
-   based scale (popularity_score is 0–1, blended scores 0.03–0.98). Pop generation accuracy
-   is only ~10% because pop and mainstream fillers aren't separated enough. Try 0.10–0.20.
-2. **`pop_classification_blend`** — set to 0.9. Separates tier classification from tone
-   sampling. Biggest structural improvement — classification now tracks actual book popularity.
-3. **`pop_slot_mult_action_noun`** — biggest single gain (+0.050), reduced from 1.0→0.9
-4. **`pop_tone_blend`** — +0.022, reduced from 1.0→0.5. Now only used for base weights,
-   not tone bias (which uses `pop_classification_blend`).
-5. **`pop_slot_mult_list_item`** — +0.012, reduced from 1.0→0.8. Less pop bias on items helped.
-6. **`pop_exponent`** — +0.003, raised from 1.0→1.2. More score contrast helped slightly.
+1. **`pop_classification_blend`** — **HIGHEST PRIORITY.** Currently at 1.0 (pushed
+   up from 0.9 in last regime). Sweeps after the histogram-metric fix show
+   blend=0.5 gives the best separation (~0.68 vs ~0.59 at 1.0). Recommend
+   reverting to 0.5–0.7 and re-running `populate-popularity` so thresholds
+   and tier centers recalibrate to the new score distribution.
+2. **`weighted_sample_spread`** — Currently 0.10. Insensitive in [0.05, 0.15];
+   all values give separation ~0.57–0.60. Probably close to optimal once
+   blend is fixed. Stop tuning unless quality is regressing.
+3. **`pop_slot_mult_action_noun`** — historic +0.050 win, reduced 1.0→0.9
+4. **`pop_tone_blend`** — +0.022, reduced 1.0→0.5. Used for base weights only.
+5. **`pop_slot_mult_list_item`** — +0.012, reduced 1.0→0.8.
+6. **`pop_exponent`** — +0.003, raised 1.0→1.2.
 7. `sample_tone_spread` — never tuned, may interact with popularity differently
 8. `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library` — **unexplored**, data source
    weights. Changing requires `subtitle-gen populate-popularity` re-run.
 9. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires populate-popularity re-run)
-10. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.05)
-11. `accessibility_threshold_*` — now auto-calibrated from percentiles, unlikely to need manual tuning
+10. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.01)
+11. `accessibility_threshold_*` — auto-calibrated; recalibrate after blend changes
 12. `tone_target_*` — aligned to tier centers. Coordinate with `tier_center_*` if adjusting.
 13. `pop_base_weight_blend` — explored both directions from 0.5, both hurt. Stable at 0.5.
 14. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.
