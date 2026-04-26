@@ -110,8 +110,18 @@ async def test():
         print(f"  Slots ({slots}): {slot_texts}")
         print("  PASS: subtitle generated")
 
+        print("TEST 3b: Rating quality tags")
+        interesting_btn = page.locator('[data-testid="tag-interesting"]')
+        realistic_btn = page.locator('[data-testid="tag-realistic"]')
+        assert await interesting_btn.is_visible(), "Interesting tag should be visible"
+        assert await realistic_btn.is_visible(), "Realistic tag should be visible"
+        await interesting_btn.click()
+        interesting_class = await interesting_btn.get_attribute("class")
+        assert "active" in interesting_class, f"Expected Interesting tag active, got: {interesting_class}"
+        print("  PASS: realistic/interesting tags visible and toggle")
+
         if not is_local:
-            print("TEST 3b: App Insights generate telemetry")
+            print("TEST 3c: App Insights generate telemetry")
             await wait_for_telemetry(
                 lambda: any(
                     "GenerateSuccess" in post or "GenerateDuration" in post
@@ -213,8 +223,18 @@ async def test():
         assert got_remix, "No remix after 30 attempts (remix_prob=0.8, expected ~80%)"
         print("  PASS: remix sub-parts rendered")
 
+        # 11. Mobile layout should not create horizontal overflow
+        print("TEST 11: Mobile spacing")
+        await page.set_viewport_size({"width": 390, "height": 844})
+        await page.wait_for_timeout(500)
+        has_horizontal_overflow = await page.evaluate(
+            "() => document.documentElement.scrollWidth > window.innerWidth"
+        )
+        assert not has_horizontal_overflow, "Mobile layout should not horizontally overflow"
+        print("  PASS: mobile layout stays within viewport")
+
         print()
-        print(f"ALL 10 TESTS PASSED ({BASE_URL})")
+        print(f"ALL 11 TESTS PASSED ({BASE_URL})")
         await browser.close()
 
 

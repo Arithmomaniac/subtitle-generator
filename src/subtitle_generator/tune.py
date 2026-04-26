@@ -786,10 +786,17 @@ def _spot_check_cli(
                 ))
 
             tags_input = click.prompt(
-                click.style("       Tags? [f=funny/b=boring/r=broken/n=nonsense / Enter]", fg="cyan"),
+                click.style("       Tags? [f=funny/b=boring/r=broken/n=nonsense/l=realistic/i=interesting / Enter]", fg="cyan"),
                 default="", show_default=False,
             ).strip().lower()
-            tag_map = {"f": "funny", "b": "boring", "r": "broken", "n": "nonsense"}
+            tag_map = {
+                "f": "funny",
+                "b": "boring",
+                "r": "broken",
+                "n": "nonsense",
+                "l": "realistic",
+                "i": "interesting",
+            }
             tags = [tag_map[c] for c in tags_input if c in tag_map] or None
 
             store_rating(

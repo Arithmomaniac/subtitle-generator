@@ -188,8 +188,9 @@ def _handle_spot_check_rate(body: dict) -> tuple[int, dict]:
     if tags is not None:
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
             return 400, {"error": "tags must be an array of strings"}
-        valid_tags = {"funny", "grammar", "contradiction", "boring"}
-        invalid_tags = set(tags) - valid_tags
+        from subtitle_generator.feedback import VALID_RATING_TAGS
+
+        invalid_tags = set(tags) - VALID_RATING_TAGS
         if invalid_tags:
             return 400, {"error": f"Invalid tags: {', '.join(invalid_tags)}"}
 

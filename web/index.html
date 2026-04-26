@@ -109,6 +109,25 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 .tag-row{gap:6px}
 .rating-reveal{font-size:11px;color:#81b29a;padding:4px 0}
 
+@media (max-width: 600px){
+  body{overflow-x:hidden}
+  .app{max-width:none;padding:12px}
+  .header{padding:12px 0;margin-bottom:14px}
+  .settings,.subtitle-display,.rating-section,.jacket-section,.prompt-section,.sources{padding:12px;margin-bottom:12px}
+  .settings-grid{grid-template-columns:1fr}
+  .subtitle-display{min-height:78px}
+  .slot-row{font-size:16px;line-height:1.65;gap:3px}
+  .slot{padding:3px 8px}
+  .slot-subpart{font-size:14px}
+  .actions{gap:7px;margin-bottom:12px}
+  .actions .btn{flex:1 1 calc(50% - 7px);min-width:0;padding:9px 10px}
+  .rating-row{align-items:stretch;flex-wrap:wrap;gap:7px}
+  .rating-label{flex:1 0 100%;min-width:0}
+  .btn-tag{flex:1 1 calc(50% - 7px);padding:7px 8px;text-align:center}
+  .jacket-actions,.prompt-actions{flex-wrap:wrap}
+  .prompt-text{max-height:220px}
+}
+
 /* Spinner */
 @keyframes spin{to{transform:rotate(360deg)}}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid #444;border-top-color:#e07a5f;border-radius:50%;animation:spin .6s linear infinite;margin-right:6px;vertical-align:middle}
@@ -196,6 +215,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
   <div class="rating-section" x-show="hasSubtitle" x-cloak>
     <div class="rating-row tag-row">
       <span class="rating-label">How'd it land?</span>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('interesting') }" @click="toggleTag('interesting')" data-testid="tag-interesting">✨ Interesting</button>
+      <button class="btn-tag" :class="{ active: selectedTags.includes('realistic') }" @click="toggleTag('realistic')" data-testid="tag-realistic">✅ Realistic</button>
       <button class="btn-tag" :class="{ active: selectedTags.includes('funny') }" @click="toggleTag('funny')">😂 Funny</button>
       <button class="btn-tag" :class="{ active: selectedTags.includes('boring') }" @click="toggleTag('boring')">🥱 Boring</button>
       <button class="btn-tag" :class="{ active: selectedTags.includes('broken') }" @click="toggleTag('broken')">🪦 Broken</button>

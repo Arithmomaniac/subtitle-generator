@@ -39,7 +39,14 @@ def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
     return "niche", score
 
 
-_TAG_MAP = {"f": "funny", "b": "boring", "r": "broken", "n": "nonsense"}
+_TAG_MAP = {
+    "f": "funny",
+    "b": "boring",
+    "r": "broken",
+    "n": "nonsense",
+    "l": "realistic",
+    "i": "interesting",
+}
 
 
 def _prompt_review(conn, subtitle_text: str) -> int | None:
@@ -72,7 +79,7 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
 
     # Tags
     tags_input = click.prompt(
-        click.style("     Tags? [f=funny / b=boring / r=broken / n=nonsense / Enter]", fg="cyan"),
+        click.style("     Tags? [f=funny / b=boring / r=broken / n=nonsense / l=realistic / i=interesting / Enter]", fg="cyan"),
         default="", show_default=False,
     ).strip().lower()
     tags = [_TAG_MAP[c] for c in tags_input if c in _TAG_MAP] or None
