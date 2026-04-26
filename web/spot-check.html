@@ -75,6 +75,16 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
 .btn-next{padding:8px 24px;border-radius:7px;border:none;background:#e07a5f;color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:all .12s;margin-top:8px}
 .btn-next:hover{transform:translateY(-1px)}
 
+@media (max-width: 600px){
+  body{overflow-x:hidden}
+  .app{max-width:none;padding:12px}
+  .subtitle-card,.reveal-panel,.summary-panel{padding:14px;margin-bottom:12px}
+  .tier-buttons{gap:8px}
+  .btn-tier{flex:1 1 100%;min-width:0}
+  .btn-tag{flex:1 1 calc(50% - 6px);padding:7px 8px;text-align:center}
+  .btn-next{width:100%}
+}
+
 /* Summary */
 .summary-panel{background:#16213e;border:1px solid #2a2a4a;border-radius:10px;padding:20px;margin-bottom:18px}
 .summary-panel h3{font-size:14px;color:#f0f0f0;margin-bottom:12px}
@@ -213,6 +223,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#1a1a2e;color:#e0e0e
         <div class="tag-section" data-testid="tag-section">
           <div class="tag-label">Quality tags (optional)</div>
           <div class="tag-buttons">
+            <button class="btn-tag" :class="{ active: currentTags.includes('interesting') }" @click="toggleTag('interesting')" data-testid="tag-interesting">✨ Interesting <kbd>I</kbd></button>
+            <button class="btn-tag" :class="{ active: currentTags.includes('realistic') }" @click="toggleTag('realistic')" data-testid="tag-realistic">✅ Realistic <kbd>L</kbd></button>
             <button class="btn-tag" :class="{ active: currentTags.includes('funny') }" @click="toggleTag('funny')" data-testid="tag-funny">😂 Funny <kbd>F</kbd></button>
             <button class="btn-tag" :class="{ active: currentTags.includes('boring') }" @click="toggleTag('boring')" data-testid="tag-boring">🥱 Boring <kbd>B</kbd></button>
             <button class="btn-tag" :class="{ active: currentTags.includes('broken') }" @click="toggleTag('broken')" data-testid="tag-broken">🪦 Broken <kbd>R</kbd></button>

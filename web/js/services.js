@@ -58,6 +58,9 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
       });
       const durationMs = Math.round(performance.now() - t0);
       trackMetric("JacketDuration", durationMs, { dryRun: String(dryRun), model: model || "gpt-5.4-mini" });
+      if (dryRun && !result.error) {
+        trackMetric("BuildPrompt", 1, { model: model || "gpt-5.4-mini", durationMs: String(durationMs) });
+      }
       return result;
     },
 

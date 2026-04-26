@@ -110,6 +110,14 @@ async def test():
         assert "active" not in funny_class, f"Expected funny tag inactive after toggle"
         # Toggle on again for the submission
         await page.locator('[data-testid="tag-funny"]').click()
+        await page.keyboard.press("i")
+        interesting_btn = page.locator('[data-testid="tag-interesting"]')
+        interesting_class = await interesting_btn.get_attribute("class")
+        assert "active" in interesting_class, f"Expected interesting tag active, got class: {interesting_class}"
+        await page.keyboard.press("l")
+        realistic_btn = page.locator('[data-testid="tag-realistic"]')
+        realistic_class = await realistic_btn.get_attribute("class")
+        assert "active" in realistic_class, f"Expected realistic tag active, got class: {realistic_class}"
         print(f"  PASS: tags toggle correctly")
 
         # Advance to next

@@ -11,6 +11,7 @@ import json
 import random
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +55,17 @@ def make_test_db() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def make_test_db_file() -> str:
+    """Create a temporary SQLite DB file with the feedback test schema."""
+    path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    src = make_test_db()
+    dst = sqlite3.connect(path)
+    src.backup(dst)
+    dst.close()
+    src.close()
+    return path
 
 
 class RobotGrader:
@@ -287,11 +299,11 @@ def test_cli_review_mock():
     prompt_responses = []
     for sub in subtitles:
         grade = grader.grade(sub)
-        # Simulate: thumbs prompt, tone prompt, comment prompt
+        # Simulate: thumbs prompt, tone prompt, comment prompt, tags prompt
         thumbs_str = "y" if grade["thumbs"] == 1 else "n"
         tone_str = grade["tone_override"][0]  # p, m, or n
         comment_str = grade["comment"] or ""
-        prompt_responses.extend([thumbs_str, tone_str, comment_str])
+        prompt_responses.extend([thumbs_str, tone_str, comment_str, ""])
 
     call_idx = [0]
 
@@ -352,6 +364,38 @@ def test_idempotent_table_creation():
     conn.close()
 
 
+def test_handle_rate_accepts_quality_tags():
+    """API validation accepts the full shared quality-tag set."""
+    from subtitle_generator.handlers import handle_rate
+
+    db_path = make_test_db_file()
+    with patch("subtitle_generator.handlers.get_db", side_effect=lambda: sqlite3.connect(db_path)):
+        status, body = handle_rate({
+            "subtitle": "A, B, and the C of D",
+            "tags": ["interesting", "realistic", "funny"],
+        })
+
+    assert status == 200, body
+    conn = sqlite3.connect(db_path)
+    tags_json = conn.execute("SELECT tags FROM human_ratings").fetchone()[0]
+    conn.close()
+    Path(db_path).unlink(missing_ok=True)
+    assert json.loads(tags_json) == ["interesting", "realistic", "funny"]
+
+    db_path = make_test_db_file()
+    with patch("subtitle_generator.handlers.get_db", side_effect=lambda: sqlite3.connect(db_path)):
+        status, body = handle_rate({
+            "subtitle": "A, B, and the C of D",
+            "tags": ["grammar"],
+        })
+
+    assert status == 400
+    assert "Invalid tags" in body["error"]
+    Path(db_path).unlink(missing_ok=True)
+
+    print("  PASS: handle_rate_accepts_quality_tags")
+
+
 def test_empty_summary():
     """get_summary() returns None when no ratings exist."""
     from subtitle_generator.feedback import ensure_ratings_table, get_summary
@@ -376,6 +420,7 @@ if __name__ == "__main__":
         ("robot_grader_batch", test_robot_grader_batch),
         ("cli_review_mock", test_cli_review_mock),
         ("idempotent_table_creation", test_idempotent_table_creation),
+        ("handle_rate_accepts_quality_tags", test_handle_rate_accepts_quality_tags),
         ("empty_summary", test_empty_summary),
     ]
 

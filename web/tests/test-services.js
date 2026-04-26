@@ -105,6 +105,23 @@ await test("jacket sends correct body for full generation", async () => {
   assert(capturedBody.dry_run === false, "dry_run false");
 });
 
+await test("jacket dry_run tracks BuildPrompt engagement metric", async () => {
+  const metrics = [];
+  globalThis.window = {
+    appInsights: {
+      trackMetric: (metric, props) => metrics.push({ metric, props }),
+    },
+  };
+  const api = createApi("", mockFetch(200, { prompt: "...", tone_tier: "pop", result: null }));
+  await api.jacket({ subtitle: "test subtitle", model: "gpt-4.1", dryRun: true });
+  delete globalThis.window;
+
+  assert(
+    metrics.some(m => m.metric.name === "BuildPrompt" && m.metric.average === 1),
+    "BuildPrompt metric tracked",
+  );
+});
+
 // ── baseUrl ──
 
 await test("baseUrl is prepended to paths", async () => {

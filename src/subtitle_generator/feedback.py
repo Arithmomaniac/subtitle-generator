@@ -16,6 +16,15 @@ from pydantic import BaseModel
 
 from subtitle_generator.config import load_tuning_config
 
+VALID_RATING_TAGS = frozenset({
+    "funny",
+    "boring",
+    "broken",
+    "nonsense",
+    "realistic",
+    "interesting",
+})
+
 # ---------------------------------------------------------------------------
 # Pydantic schemas
 # ---------------------------------------------------------------------------
@@ -83,7 +92,7 @@ def store_rating(
         thumbs: 1 = good, -1 = bad, None = skipped.
         tone_override: What the human thinks the tone should be (p/m/n).
         free_text: Optional free-text comment.
-        tags: Quality tags like ["funny", "grammar", "contradiction", "boring"].
+        tags: Quality tags like ["interesting", "realistic", "funny", "boring"].
         source: Origin of this rating ("spot_check", "web_user", "pull_ratings").
     """
     ensure_ratings_table(conn)
