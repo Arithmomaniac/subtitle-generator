@@ -25,11 +25,13 @@ REQUIRED_SECTIONS = [
     "## Back Cover",
     "## Review 1",
     "## Review 2",
-    "## Blurb 1",
-    "## Blurb 2",
 ]
 
 MAX_RETRIES = 2
+
+INLINE_BLURB_RE = re.compile(
+    r'(?m)^\s*["“][^"“”\n]+["”]\s+—\s+[^,\n]+,\s+.+$'
+)
 
 # --- Accessibility scoring & tone tiers ---
 
@@ -182,6 +184,16 @@ The publisher's marketing copy for the back of the book. 2-3 paragraphs (~250 wo
 Open with a hook question or provocative claim. End with an emotional/intellectual payoff.
 Tone: urgent, seductive, intellectually intriguing.
 
+Immediately below the back cover copy, include exactly TWO endorsement blurbs as separate
+paragraphs before the Review 1 header. Do NOT create separate blurb headers or blockquotes.
+For each blurb, use web_search to find a real person (author, academic, journalist, public
+intellectual) or real publication whose expertise aligns with this book's subject matter,
+then search for examples of their actual writing or past blurbs to understand their
+distinctive voice. At least one blurb must be from a real individual person. Format each
+blurb exactly like this:
+
+"[A single compelling endorsement sentence written in their authentic voice and style]" — [Full Name], [brief credential, e.g. author of The Looming Tower]
+
 ## Review 1
 Pick the most appropriate trade publication for this book from the roster below. Write
 the review in that publication's AUTHENTIC house style — match their real tone, vocabulary,
@@ -224,21 +236,6 @@ Format:
 ## Review 2
 Pick a second- or third-most appropriate publication from the roster above. Same approach — write in THEIR
 authentic house style with their specific format conventions.
-
-## Blurb 1
-Use web_search to find a real person (author, academic, journalist, public intellectual)
-whose expertise aligns with this book's subject matter. Then search for examples of their
-actual writing or past blurbs to understand their distinctive voice — their vocabulary,
-sentence rhythm, rhetorical habits, and tone. The blurb should sound like THEM, not like
-generic marketing copy. Format:
-
-**[Full Name]** ([brief credential, e.g. "author of The Looming Tower"])
-> "[A single compelling endorsement sentence written in their authentic voice and style]"
-
-## Blurb 2
-Find a SECOND real person (or a real publication/newspaper that covers this topic).
-Same approach — web_search for their writing style, then compose the blurb in their voice.
-At least one of the two blurbs must be from a real individual person.
 
 ---
 
@@ -288,14 +285,36 @@ def build_jacket_prompt(
 
 
 def _validate_jacket(content: str) -> list[str]:
-    """Check that all required sections are present. Returns list of missing section names."""
+    """Check required section headers and inline back-cover blurbs.
+
+    Returns a list of missing or invalid format requirements.
+    """
     missing = []
     for section in REQUIRED_SECTIONS:
         # Case-insensitive header check (model may vary casing)
         pattern = re.compile(re.escape(section), re.IGNORECASE)
         if not pattern.search(content):
             missing.append(section)
+    if "## Back Cover" not in missing:
+        back_cover = _extract_section(content, "## Back Cover")
+        inline_blurbs = list(INLINE_BLURB_RE.finditer(back_cover))
+        if len(inline_blurbs) != 2:
+            missing.append("exactly two inline Back Cover blurbs")
+        elif not back_cover[:inline_blurbs[0].start()].strip():
+            missing.append("Back Cover description before inline blurbs")
+    if re.search(r"^##\s+Blurb\s+\d+\s*$", content, re.IGNORECASE | re.MULTILINE):
+        missing.append("remove separate ## Blurb sections")
     return missing
+
+
+def _extract_section(content: str, section: str) -> str:
+    """Return the body for a markdown H2 section, or an empty string if absent."""
+    pattern = re.compile(
+        rf"^\s*{re.escape(section)}\s*\n(?P<body>.*?)(?=^\s*##\s+|\Z)",
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(content)
+    return match.group("body") if match else ""
 
 
 DEFAULT_MODEL = "gpt-5.4-mini"
@@ -356,10 +375,14 @@ async def _generate_jacket_async(
 
                 if attempt <= MAX_RETRIES:
                     missing_names = ", ".join(missing)
-                    _progress(f"Attempt {attempt}: missing {missing_names}, retrying...")
+                    _progress(f"Attempt {attempt}: format issues: {missing_names}, retrying...")
                     prompt = (
-                        f"Your previous response was missing these required sections: {missing_names}.\n"
-                        f"Please regenerate the COMPLETE book jacket with ALL sections. "
+                        f"Your previous response did not satisfy these required sections "
+                        f"or format requirements: {missing_names}.\n"
+                        f"Please regenerate the COMPLETE book jacket with ALL sections and "
+                        f"place the two endorsement blurbs inline inside the Back Cover section, "
+                        f"directly below the description and before Review 1. Do not use separate "
+                        f"## Blurb sections. "
                         f"The subtitle is:\n\n{subtitle}"
                     )
                 else:
