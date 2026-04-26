@@ -1,0 +1,40 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+      - pyproject.toml
+      - uv.lock
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+      - pyproject.toml
+      - uv.lock
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra e2e
+
+      - name: Install Playwright Chromium
+        run: uv run playwright install --with-deps chromium

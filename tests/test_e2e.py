@@ -7,13 +7,15 @@ Supports both local and deployed modes via BASE_URL env var:
 
 import asyncio
 import os
+from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8742")
 
 
 async def test():
-    is_local = "localhost" in BASE_URL
+    host = urlparse(BASE_URL).hostname
+    is_local = host in {"localhost", "127.0.0.1", "::1"}
     print(f"Testing against: {BASE_URL} ({'local' if is_local else 'deployed'})\n")
 
     async with async_playwright() as p:

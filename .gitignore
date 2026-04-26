@@ -11,3 +11,4 @@ __pycache__/
 !api/data/*.csv
 
 results.tsv
+test-results/

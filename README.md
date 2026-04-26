@@ -85,6 +85,16 @@ The web app provides an interactive UI with:
 
 The frontend is a thin Alpine.js client (`web/index.html`) calling the Python API — all generation logic stays server-side.
 
+### Local browser verification
+
+```bash
+uv sync --extra e2e
+uv run playwright install chromium
+pwsh -File scripts/run-local-e2e.ps1
+```
+
+The local e2e script starts the web app on `http://127.0.0.1:8742`, runs the Playwright tests, captures screenshots, and writes logs/artifacts to `test-results/local-e2e/`.
+
 ### Deployment
 
 The web app supports two modes:

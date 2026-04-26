@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 tune = ["litellm>=1.72.0", "pydantic>=2.0"]
 deploy = ["azure-data-tables>=12.5"]
+e2e = ["playwright>=1.56.0"]
 
 [project.scripts]
 subtitle-gen = "subtitle_generator.cli:cli"
