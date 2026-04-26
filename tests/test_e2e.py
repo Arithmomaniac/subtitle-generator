@@ -7,10 +7,29 @@ Supports both local and deployed modes via BASE_URL env var:
 
 import asyncio
 import os
+import time
 from urllib.parse import urlparse
 from playwright.async_api import async_playwright
 
 BASE_URL = os.environ.get("BASE_URL", "http://localhost:8742")
+AI_TRACK_PATH = "/v2/track"
+AI_INGEST_HOSTS = (
+    "applicationinsights.azure.com",
+    "dc.services.visualstudio.com",
+)
+
+
+def is_app_insights_track_url(url: str) -> bool:
+    return AI_TRACK_PATH in url and any(host in url for host in AI_INGEST_HOSTS)
+
+
+async def wait_for_telemetry(predicate, label: str, timeout: float = 20.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.25)
+    raise AssertionError(f"Timed out waiting for App Insights telemetry: {label}")
 
 
 async def test():
@@ -21,6 +40,19 @@ async def test():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
+        telemetry_posts: list[str] = []
+        telemetry_statuses: list[int] = []
+
+        def capture_telemetry_request(request):
+            if request.method == "POST" and is_app_insights_track_url(request.url):
+                telemetry_posts.append(request.post_data or "")
+
+        def capture_telemetry_response(response):
+            if is_app_insights_track_url(response.url):
+                telemetry_statuses.append(response.status)
+
+        page.on("request", capture_telemetry_request)
+        page.on("response", capture_telemetry_response)
 
         # 1. Load page
         print("TEST 1: Load page")
@@ -39,6 +71,15 @@ async def test():
         expected_mode = "Local" if is_local else "Web"
         assert expected_mode in badge_text, f"Expected {expected_mode} mode, got: {badge_text}"
         print(f"  PASS: {badge_text}")
+
+        if not is_local:
+            print("TEST 2b: App Insights page view telemetry")
+            await wait_for_telemetry(
+                lambda: any("PageviewData" in post for post in telemetry_posts)
+                and any(200 <= status < 300 for status in telemetry_statuses),
+                "page view",
+            )
+            print("  PASS: page view telemetry posted")
 
         # 3. Click Generate (with cold-start retry)
         print("TEST 3: Generate subtitle")
@@ -68,6 +109,18 @@ async def test():
             slot_texts.append(txt)
         print(f"  Slots ({slots}): {slot_texts}")
         print("  PASS: subtitle generated")
+
+        if not is_local:
+            print("TEST 3b: App Insights generate telemetry")
+            await wait_for_telemetry(
+                lambda: any(
+                    "GenerateSuccess" in post or "GenerateDuration" in post
+                    for post in telemetry_posts
+                ),
+                "GenerateSuccess/GenerateDuration",
+                timeout=30.0,
+            )
+            print("  PASS: generate telemetry posted")
 
         # 4. Check sources appear
         print("TEST 4: Sources panel")
