@@ -14,7 +14,6 @@ import json
 import pathlib
 import re
 import sqlite3
-import subprocess
 import sys
 
 import click
@@ -31,6 +30,12 @@ from subtitle_generator.eval_harness import (
     structured_completion,
 )
 from subtitle_generator.feedback import store_rating
+from subtitle_generator.tuning_state import (
+    ConfigChange,
+    apply_config_change,
+    record_decision,
+    revert_config_change,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,6 +63,28 @@ def _needs_repopulate(param: str) -> bool:
 def _needs_calibrate(param: str) -> bool:
     """Check if changing this param requires recalibrating thresholds/tier centers."""
     return param in _REPOPULATE_PARAMS or param in _CALIBRATE_ONLY_PARAMS
+
+
+def _proposal_change(
+    proposal: ParamProposal,
+    current_params: dict[str, float],
+    bounds: dict[str, tuple[float, float]],
+) -> tuple[ConfigChange, float | None]:
+    """Create a rollback-capable config change, applying bounds if present."""
+
+    new_value = proposal.new_value
+    clamped_from = None
+    if proposal.param in bounds:
+        lo, hi = bounds[proposal.param]
+        clamped = max(lo, min(hi, new_value))
+        if clamped != new_value:
+            clamped_from = new_value
+            new_value = clamped
+    return ConfigChange(
+        param=proposal.param,
+        old_value=current_params[proposal.param],
+        new_value=new_value,
+    ), clamped_from
 
 
 def _run_calibrate_thresholds(conn: sqlite3.Connection) -> None:
@@ -187,7 +214,7 @@ def _score_in_memory(conn: sqlite3.Connection):
     import time as _time
 
     t0 = _time.time()
-    data = _load_pop_data()
+    _load_pop_data()
     cfg = load_tuning_config(conn)
 
     w_spl = cfg.get("pop_weight_spl", 0.7)
@@ -271,8 +298,6 @@ def _score_in_memory(conn: sqlite3.Connection):
             composite = min(composite, 0.5)
 
         work_composites[work] = composite
-
-    t1 = _time.time()
 
     # Compute filler scores from in-memory composites (top-3 mean)
     filler_works, filler_freq = _load_filler_works(conn)
@@ -411,7 +436,7 @@ def _load_results_history(results_file: str, max_lines: int = 20) -> str:
         return "\n".join(lines)
     # Always include the header + any regime-change lines + last max_lines
     header = lines[0]
-    regime_lines = [l for l in lines[1:-max_lines] if "[regime change]" in l]
+    regime_lines = [line for line in lines[1:-max_lines] if "[regime change]" in line]
     recent = lines[-max_lines:]
     parts = [header] + regime_lines + recent
     return "\n".join(parts)
@@ -898,12 +923,12 @@ def review_ratings(
         "",
         "### Mismatch patterns:",
     ]
-    for (sys, felt), count in mismatch_directions.most_common():
-        summary_lines.append(f"  target={sys} -> felt={felt}: {count}x")
+    for (system_tone, felt), count in mismatch_directions.most_common():
+        summary_lines.append(f"  target={system_tone} -> felt={felt}: {count}x")
     summary_lines.append("")
     summary_lines.append("### Mismatch examples:")
-    for sys, felt, sub in mismatch_examples:
-        summary_lines.append(f"  [{sys}->{felt}] {sub}")
+    for system_tone, felt, sub in mismatch_examples:
+        summary_lines.append(f"  [{system_tone}->{felt}] {sub}")
     if tag_counts:
         summary_lines.append("")
         summary_lines.append(f"### Quality tags: {dict(tag_counts.most_common())}")
@@ -1182,19 +1207,16 @@ scores — treat those results as unreliable.
             )
             continue
 
-        old_value = current_params[proposal.param]
-        new_value = proposal.new_value
+        change, clamped_from = _proposal_change(proposal, current_params, bounds)
+        old_value = change.old_value
+        new_value = change.new_value
 
-        # Clamp to bounds
-        if proposal.param in bounds:
+        if clamped_from is not None:
             lo, hi = bounds[proposal.param]
-            clamped = max(lo, min(hi, new_value))
-            if clamped != new_value:
-                click.echo(
-                    f"  ! clamping {proposal.param} "
-                    f"{new_value} -> {clamped} (bounds [{lo}, {hi}])"
-                )
-                new_value = clamped
+            click.echo(
+                f"  ! clamping {proposal.param} "
+                f"{clamped_from} -> {new_value} (bounds [{lo}, {hi}])"
+            )
 
         click.echo(
             f"  proposal: {proposal.param} {old_value} -> {new_value}"
@@ -1210,13 +1232,7 @@ scores — treat those results as unreliable.
             )
             continue
 
-        # Apply the change
-        conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-            (proposal.param, str(new_value)),
-        )
-        conn.commit()
-        invalidate_config_cache()
+        apply_config_change(conn, change)
 
         # Re-run populate-popularity if this is a weight/exponent param
         if _needs_repopulate(proposal.param):
@@ -1224,16 +1240,7 @@ scores — treat those results as unreliable.
                 _run_repopulate(conn)
             except RuntimeError:
                 click.echo("  -> SKIP (repopulate failed)\n")
-                # Revert the config change
-                if old_value == ALL_TUNABLE_PARAMS[proposal.param]:
-                    conn.execute("DELETE FROM config WHERE key = ?", (proposal.param,))
-                else:
-                    conn.execute(
-                        "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-                        (proposal.param, str(old_value)),
-                    )
-                conn.commit()
-                invalidate_config_cache()
+                revert_config_change(conn, change)
                 _append_result(
                     results_file, i, proposal.param, old_value, new_value,
                     quality, separation, current_score,
@@ -1251,6 +1258,8 @@ scores — treat those results as unreliable.
         )
 
         delta = new_score - current_score
+        before_scores = (quality, separation, current_score)
+        after_scores = (new_quality, new_separation, new_score)
 
         if new_score > current_score:
             status = "keep"
@@ -1276,18 +1285,7 @@ scores — treat those results as unreliable.
                 click.echo(f"  [snapshot] new best composite {current_score:.4f} saved")
         else:
             status = "discard"
-            # Revert: restore old value or remove if it was a default
-            if old_value == ALL_TUNABLE_PARAMS[proposal.param]:
-                conn.execute(
-                    "DELETE FROM config WHERE key = ?", (proposal.param,)
-                )
-            else:
-                conn.execute(
-                    "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-                    (proposal.param, str(old_value)),
-                )
-            conn.commit()
-            invalidate_config_cache()
+            revert_config_change(conn, change)
             # Restore old filler scores in memory (no full DB write needed)
             if _needs_repopulate(proposal.param):
                 _run_repopulate(conn)
@@ -1300,10 +1298,18 @@ scores — treat those results as unreliable.
             )
             click.echo(f"  -> DISCARD ({delta:+.3f})\n")
 
+        decision = record_decision(
+            change=change,
+            reasoning=proposal.reasoning,
+            status=status,
+            before=before_scores,
+            after=after_scores,
+        )
         _append_result(
-            results_file, i, proposal.param, old_value, new_value,
-            new_quality, new_separation, new_score,
-            status, proposal.reasoning,
+            results_file, i, decision.change.param,
+            decision.change.old_value, decision.change.new_value,
+            decision.quality_after, decision.separation_after,
+            decision.composite_after, decision.status, decision.reasoning,
         )
 
     final_params = load_tuning_config(conn)

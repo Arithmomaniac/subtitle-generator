@@ -2,13 +2,10 @@
 
 import json
 import sqlite3
-from collections import Counter
-from pathlib import Path
 
 import click
 import spacy
 
-from subtitle_generator.extract import DB_PATH
 
 # Function words to keep literal in templates (lowercased)
 LITERAL_TOKENS = {

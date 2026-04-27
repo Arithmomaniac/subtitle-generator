@@ -29,8 +29,9 @@ Celebrity Culture, Theology, and the Collapse of New England
 2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication)
 3. **Pattern match** subtitles matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation
 4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing. Articles (a/an/the) are stripped and stored separately for re-insertion at generation time.
-5. **Generate** by randomly drawing one filler per slot — weighted by sqrt(corpus frequency). Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
-6. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with trade journal reviews and endorsement blurbs from real people
+5. **Score and tune** fillers with popularity, tone, article, and remix parameters stored in SQLite config rows with Python contract views.
+6. **Generate** by randomly drawing one filler per slot — weighted by corpus frequency, popularity, and tone targets. Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
+7. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with trade journal reviews and endorsement blurbs from real people
 
 ## Setup
 
@@ -52,7 +53,32 @@ uv run subtitle-gen extract-ol                  # parse + deduplicate
 uv run subtitle-gen build-slots                 # extract slot fillers
 uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, etc.
 uv run subtitle-gen populate-popularity         # compute composite scores
+uv run subtitle-gen validate-pipeline           # read-only readiness checks
 ```
+
+### Pipeline contracts and validation
+
+The pipeline has explicit contract modules for the cross-stage state that feeds generation and serving:
+
+| Stage | Inputs | Outputs / contracts |
+|---|---|---|
+| Source ingestion | LOC MARC files and Open Library dumps | `subtitles` rows with ISBN/source metadata |
+| Slot extraction | Subtitle patterns plus spaCy validation | `pattern_matches` and strict `slot_fillers` candidates |
+| Popularity scoring | SPL, Open Library, Goodreads, NYT, Ottawa/library, and corpus frequency signals | `popularity_data.composite_score`, filler `popularity_score`, and calibrated threshold config values |
+| Remix precompute | Strict of-object fillers, spaCy vectors, article statistics | remix classifications, vector/scalar columns, embedding config keys |
+| Tuning | Generated samples, human ratings, LLM ratings, and strict proposal schemas | accepted config changes, rollback-capable proposal records, and rating snapshots |
+| Runtime/serving | Validated SQLite state and request parameters | `GeneratedSubtitle`, `subtitle_to_dict()`, CLI output, local HTTP, and Azure Functions payloads |
+
+Use `uv run subtitle-gen validate-pipeline` before tuning, serving, or exporting. It is read-only and fails non-zero when required tables/columns, config values, remix precompute state, popularity coverage, model IDs, or serving handlers are not ready.
+
+Model and weight state is grouped by purpose rather than treated as one loose dictionary:
+
+| Family | Examples |
+|---|---|
+| LLM models | rating model `github_copilot/gpt-5.4-mini`, proposal model `github_copilot/gpt-5.4`, jacket model `gpt-5.4-mini`, responses-only model family |
+| Sampling and tone | weighted sample spread, bias floor, tone targets, tier centers, accessibility thresholds |
+| Popularity | source weights for SPL/Open Library/Goodreads/NYT/library/frequency, exponent, blend defaults, slot multipliers |
+| Article and remix | article frequency thresholds, remix heuristic threshold, double-`of` rejection toggle, calibrated remix probability and similarity thresholds |
 
 ## Usage
 
@@ -140,7 +166,7 @@ Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM
 
 ### Tuning
 
-The system includes an autoresearch-inspired tuning loop that uses LLM evaluation to optimize 20 tunable parameters (tone targets, sampling spread, article thresholds, etc.):
+The system includes an autoresearch-inspired tuning loop that uses LLM evaluation to optimize tunable parameters (tone targets, sampling spread, popularity weights, article thresholds, etc.):
 
 ```bash
 uv run subtitle-gen tune                        # full pipeline (remix + tone)
@@ -182,6 +208,7 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `slots` | Show available slot fillers |
 | `download-popularity` | Download all popularity data sources (SPL, Goodreads, Ottawa, NYT) |
 | `populate-popularity` | Build ISBN mappings + compute composite popularity scores |
+| `validate-pipeline` | Run read-only pipeline readiness checks |
 
 ## Architecture
 
@@ -197,6 +224,11 @@ src/subtitle_generator/
   feedback.py          # human feedback collection + summarization for tuning
   serve.py             # local HTTP server (stdlib)
   export_db.py         # mini DB export for deployment
+  parameter_state.py   # typed views over model IDs and tunable parameter families
+  pipeline_validation.py # read-only pipeline readiness checks
+  remix_state.py       # remix precompute contracts and runtime context
+  schema_contracts.py  # stage-aware SQLite schema contracts
+  tuning_state.py      # tuning proposal, decision, and rollback state records
   cli.py               # Click CLI entry point
 api/
   function_app.py      # Azure Functions v2 (same Python modules)

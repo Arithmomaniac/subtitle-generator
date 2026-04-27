@@ -8,9 +8,7 @@ import asyncio
 import json
 import os
 import random
-import sqlite3
 import uuid
-from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +16,6 @@ from pathlib import Path
 from subtitle_generator.generate import GeneratedSubtitle, generate_subtitle
 from subtitle_generator.handlers import (
     get_db as _get_db,
-    build_sources as _build_sources,
     handle_generate as _handle_generate,
     handle_health as _handle_health,
     handle_jacket as _handle_jacket,

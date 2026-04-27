@@ -587,7 +587,7 @@ def _build_article_stats(
     of_with = sum(1 for arts in of_stats.values() if any(a for a in arts if a))
     act_with = sum(1 for arts in action_stats.values()
                    if any(a for a in arts if a and a != "the"))
-    click.echo(f"\nBuilding article statistics...")
+    click.echo("\nBuilding article statistics...")
     click.echo(f"  of_object: {of_with:,} fillers with articles ({len(of_stats):,} total)")
     click.echo(f"  action_noun: {act_with:,} fillers with non-\"the\" articles ({len(action_stats):,} total)")
 

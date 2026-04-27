@@ -11,24 +11,28 @@ import asyncio
 import json
 import math
 import sqlite3
+import warnings
 
 import click
 import litellm
 from pydantic import BaseModel
 
-# Suppress noisy litellm coroutine warnings
-import warnings
-warnings.filterwarnings("ignore", message="coroutine.*was never awaited")
-
 from subtitle_generator.config import get_tone_targets
 from subtitle_generator.generate import generate_subtitle
+from subtitle_generator.parameter_state import (
+    DEFAULT_PROPOSER_MODEL as DEFAULT_PROPOSER_MODEL,
+    DEFAULT_RATER_MODEL,
+    RESPONSES_ONLY_MODELS,
+)
+
+# Suppress noisy litellm coroutine warnings
+warnings.filterwarnings("ignore", message="coroutine.*was never awaited")
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_RATER_MODEL = "github_copilot/gpt-5.4-mini"
-DEFAULT_PROPOSER_MODEL = "github_copilot/gpt-5.4"
+_RESPONSES_ONLY_MODELS = RESPONSES_ONLY_MODELS
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -54,10 +58,6 @@ class ParamProposal(BaseModel):
 # ---------------------------------------------------------------------------
 # structured_completion — auto-dispatch structured output
 # ---------------------------------------------------------------------------
-
-# Models that require the /responses API (not /chat/completions)
-_RESPONSES_ONLY_MODELS = {"gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"}
-
 
 def _needs_responses_api(model: str) -> bool:
     """Check if this model needs the /responses API."""

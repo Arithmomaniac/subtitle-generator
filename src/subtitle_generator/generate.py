@@ -3,7 +3,6 @@
 import json
 import math
 import random
-import re
 import sqlite3
 from dataclasses import dataclass, field
 
@@ -12,6 +11,10 @@ import inflect
 from titlecase import titlecase as _lib_titlecase
 
 from subtitle_generator.config import DEFAULT_TONE_TARGETS, load_tuning_config
+from subtitle_generator.remix_state import (
+    RemixRuntimeContext,
+    assert_remix_precompute_state,
+)
 
 _inflect_engine = inflect.engine()
 
@@ -42,6 +45,23 @@ class GeneratedSubtitle:
     remix_similarity: float | None = None
     of_article: str = ""
     action_article: str = "the"
+
+
+@dataclass(frozen=True)
+class GenerationCandidates:
+    list_rows: list[tuple]
+    action_rows: list[tuple]
+    obj_rows: list[tuple]
+
+
+@dataclass
+class SelectedSubtitleParts:
+    items: list[str]
+    action_noun: str
+    of_object: str
+    remixed: bool
+    remix_parts: dict
+    remix_similarity: float | None
 
 
 def _weighted_sample(
@@ -108,7 +128,7 @@ TONE_TARGETS = DEFAULT_TONE_TARGETS
 # --- Remix infrastructure ---
 
 # Module-level cache for remix context (lazy-loaded)
-_remix_ctx: dict | None = None
+_remix_ctx: RemixRuntimeContext | None = None
 
 # Sentinel for embedding precompute version checks
 _EMBEDDING_VERSION = "2"
@@ -291,7 +311,7 @@ def precompute_remix_data(conn: sqlite3.Connection) -> dict:
     return stats
 
 
-def _load_remix_context(conn: sqlite3.Connection) -> dict:
+def _load_remix_context(conn: sqlite3.Connection) -> RemixRuntimeContext:
     """Lazy-load remix context from pre-computed scalar decomposition in DB.
 
     Requires precompute_remix_data() to have been run first (version 2+).
@@ -304,6 +324,7 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
     # Check for pre-computed embeddings
     row = conn.execute("SELECT value FROM config WHERE key = 'embedding_version'").fetchone()
     if row is not None and int(row[0]) >= 2:
+        assert_remix_precompute_state(conn, _EMBEDDING_VERSION)
         # Version 2+: scalar decomposition (no numpy needed)
         centroid_norm_row = conn.execute(
             "SELECT value FROM config WHERE key = 'centroid_norm'"
@@ -351,16 +372,16 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
             elif key == "article_stats_action_noun":
                 article_stats_action = parsed
 
-        _remix_ctx = {
-            "centroid_norm": centroid_norm,
-            "avg_cross_sim_t1": avg_cross_sim_t1,
-            "avg_cross_sim_t2": avg_cross_sim_t2,
-            "filler_scalars": filler_scalars,
-            "config": config,
-            "precomputed": True,
-            "article_stats_of": article_stats_of,
-            "article_stats_action": article_stats_action,
-        }
+        _remix_ctx = RemixRuntimeContext(
+            precomputed=True,
+            centroid_norm=centroid_norm,
+            avg_cross_sim_t1=avg_cross_sim_t1,
+            avg_cross_sim_t2=avg_cross_sim_t2,
+            filler_scalars=filler_scalars,
+            config=config,
+            article_stats_of=article_stats_of,
+            article_stats_action=article_stats_action,
+        )
         return _remix_ctx
 
     if row is not None:
@@ -404,11 +425,14 @@ def _load_remix_context(conn: sqlite3.Connection) -> dict:
         elif key == "article_stats_action_noun":
             article_stats_action = parsed
 
-    _remix_ctx = {
-        "nlp": nlp, "centroid": centroid, "config": config, "precomputed": False,
-        "article_stats_of": article_stats_of,
-        "article_stats_action": article_stats_action,
-    }
+    _remix_ctx = RemixRuntimeContext(
+        precomputed=False,
+        nlp=nlp,
+        centroid=centroid,
+        config=config,
+        article_stats_of=article_stats_of,
+        article_stats_action=article_stats_action,
+    )
     return _remix_ctx
 
 
@@ -714,136 +738,187 @@ def _infer_of_article(
     return ""
 
 
-def generate_subtitle(
-    conn: sqlite3.Connection, seed: int | None = None,
-    tone_target: dict[str, float] | None = None,
-    remix_prob: float = 0.0, min_sim: float = 0.0,
-    locks: dict[str, str] | None = None,
-) -> GeneratedSubtitle:
-    """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
+def _make_rng(seed: int | None) -> random.Random | None:
+    return random.Random(seed) if seed is not None else None
 
-    tone_target maps slot_type → log10 target score for filler biasing.
-    remix_prob: probability of remixing a multi-word of-object (0.0 = never, 1.0 = always).
-    min_sim: minimum cosine similarity for embedding coherence filter.
-    locks: optional dict mapping slot keys to locked values.
-        Supported keys: item1, item2, action_noun, of_object,
-        of_modifier, of_head, of_topic, of_complement.
-    """
-    rng = None
-    if seed is not None:
-        rng = random.Random(seed)
 
-    # Validate lock combinations
-    if locks:
-        type1_keys = {"of_modifier", "of_head"}
-        type2_keys = {"of_topic", "of_complement"}
-        has_type1 = bool(type1_keys & locks.keys())
-        has_type2 = bool(type2_keys & locks.keys())
-        if has_type1 and has_type2:
-            raise ValueError("Cannot mix Type 1 (of_modifier/of_head) and Type 2 (of_topic/of_complement) locks")
-        sub_part_keys = type1_keys | type2_keys
-        if "of_object" in locks and (sub_part_keys & locks.keys()):
-            raise ValueError("Cannot combine of_object lock with sub-part locks")
+def _validate_generation_locks(locks: dict[str, str] | None) -> None:
+    if not locks:
+        return
+    type1_keys = {"of_modifier", "of_head"}
+    type2_keys = {"of_topic", "of_complement"}
+    has_type1 = bool(type1_keys & locks.keys())
+    has_type2 = bool(type2_keys & locks.keys())
+    if has_type1 and has_type2:
+        raise ValueError("Cannot mix Type 1 (of_modifier/of_head) and Type 2 (of_topic/of_complement) locks")
+    sub_part_keys = type1_keys | type2_keys
+    if "of_object" in locks and (sub_part_keys & locks.keys()):
+        raise ValueError("Cannot combine of_object lock with sub-part locks")
 
-    list_rows = conn.execute(
-        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item' AND mode = 'strict'"
-    ).fetchall()
-    action_rows = conn.execute(
-        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'action_noun' AND mode = 'strict'"
-    ).fetchall()
-    obj_rows = conn.execute(
-        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
-    ).fetchall()
 
-    # Adjust required-row checks based on locks
+def _load_generation_candidates(conn: sqlite3.Connection) -> GenerationCandidates:
+    return GenerationCandidates(
+        list_rows=conn.execute(
+            "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item' AND mode = 'strict'"
+        ).fetchall(),
+        action_rows=conn.execute(
+            "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'action_noun' AND mode = 'strict'"
+        ).fetchall(),
+        obj_rows=conn.execute(
+            "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
+        ).fetchall(),
+    )
+
+
+def _has_enough_candidates(
+    candidates: GenerationCandidates,
+    locks: dict[str, str] | None,
+) -> bool:
     list_needed = 2 - sum(1 for k in ("item1", "item2") if locks and k in locks)
     action_needed = not (locks and "action_noun" in locks)
     obj_needed = not (locks and "of_object" in locks)
+    return (
+        len(candidates.list_rows) >= list_needed
+        and (not action_needed or bool(candidates.action_rows))
+        and (not obj_needed or bool(candidates.obj_rows))
+    )
 
-    if (len(list_rows) < list_needed) or \
-       (action_needed and not action_rows) or \
-       (obj_needed and not obj_rows):
-        return GeneratedSubtitle(
-            text="(not enough fillers — run 'build-slots' first)",
-            item1="", item2="", action_noun="", of_object="",
-        )
 
-    list_target = tone_target.get("list_item") if tone_target else None
-    action_target = tone_target.get("action_noun") if tone_target else None
-    obj_target = tone_target.get("of_object") if tone_target else None
+def _not_enough_fillers_subtitle() -> GeneratedSubtitle:
+    return GeneratedSubtitle(
+        text="(not enough fillers — run 'build-slots' first)",
+        item1="", item2="", action_noun="", of_object="",
+    )
 
-    # Apply per-slot popularity multipliers to tone targets
-    if tone_target is not None:
-        cfg = load_tuning_config(conn)
-        if list_target is not None:
-            list_target *= cfg.get("pop_slot_mult_list_item", 1.0)
-        if action_target is not None:
-            action_target *= cfg.get("pop_slot_mult_action_noun", 1.0)
-        if obj_target is not None:
-            obj_target *= cfg.get("pop_slot_mult_of_object", 1.0)
 
-    # Build adjusted tone_target dict with per-slot multipliers applied
-    # (used for remix path which receives the dict, not individual scalars)
-    adjusted_tone_target = None
-    if tone_target is not None:
-        adjusted_tone_target = {
-            "list_item": list_target,
-            "action_noun": action_target,
-            "of_object": obj_target,
-        }
+def _adjust_tone_targets(
+    conn: sqlite3.Connection,
+    tone_target: dict[str, float] | None,
+) -> dict[str, float] | None:
+    if tone_target is None:
+        return None
+    cfg = load_tuning_config(conn)
+    return {
+        "list_item": (
+            tone_target.get("list_item") * cfg.get("pop_slot_mult_list_item", 1.0)
+            if tone_target.get("list_item") is not None else None
+        ),
+        "action_noun": (
+            tone_target.get("action_noun") * cfg.get("pop_slot_mult_action_noun", 1.0)
+            if tone_target.get("action_noun") is not None else None
+        ),
+        "of_object": (
+            tone_target.get("of_object") * cfg.get("pop_slot_mult_of_object", 1.0)
+            if tone_target.get("of_object") is not None else None
+        ),
+    }
 
-    # Draw or lock list items (avoid duplicates with locked value)
+
+def _pick_list_items(
+    list_rows: list[tuple],
+    rng: random.Random | None,
+    list_target: float | None,
+    conn: sqlite3.Connection,
+    locks: dict[str, str] | None,
+) -> list[str]:
     if locks and "item1" in locks and "item2" in locks:
-        items = [locks["item1"], locks["item2"]]
-    elif locks and "item1" in locks:
+        return [locks["item1"], locks["item2"]]
+    if locks and "item1" in locks:
         pool = [(f, w) for f, w in list_rows if f != locks["item1"]]
         if not pool:
             pool = list_rows
-        items = [locks["item1"], _weighted_sample(pool, 1, rng, list_target, conn)[0]]
-    elif locks and "item2" in locks:
+        return [locks["item1"], _weighted_sample(pool, 1, rng, list_target, conn)[0]]
+    if locks and "item2" in locks:
         pool = [(f, w) for f, w in list_rows if f != locks["item2"]]
         if not pool:
             pool = list_rows
-        items = [_weighted_sample(pool, 1, rng, list_target, conn)[0], locks["item2"]]
-    else:
-        items = _weighted_sample(list_rows, 2, rng, list_target, conn)
+        return [_weighted_sample(pool, 1, rng, list_target, conn)[0], locks["item2"]]
+    return _weighted_sample(list_rows, 2, rng, list_target, conn)
 
-    # Draw or lock action noun
+
+def _pick_action_noun(
+    action_rows: list[tuple],
+    rng: random.Random | None,
+    action_target: float | None,
+    conn: sqlite3.Connection,
+    locks: dict[str, str] | None,
+) -> str:
     if locks and "action_noun" in locks:
-        action_noun = locks["action_noun"]
-    else:
-        action_noun = _weighted_sample(action_rows, 1, rng, action_target, conn)[0]
+        return locks["action_noun"]
+    return _weighted_sample(action_rows, 1, rng, action_target, conn)[0]
 
-    # Draw or lock of-object
+
+def _pick_of_object_and_remix(
+    conn: sqlite3.Connection,
+    obj_rows: list[tuple],
+    rng: random.Random | None,
+    adjusted_tone_target: dict[str, float] | None,
+    remix_prob: float,
+    min_sim: float,
+    locks: dict[str, str] | None,
+) -> tuple[str, bool, dict, float | None]:
+    obj_target = adjusted_tone_target.get("of_object") if adjusted_tone_target else None
     remix_similarity = None
     if locks and "of_object" in locks:
-        of_object = locks["of_object"]
-        remixed = False
-        remix_parts = {}
-    else:
-        of_object = _weighted_sample(obj_rows, 1, rng, obj_target, conn)[0]
-        remixed = False
-        remix_parts = {}
+        return locks["of_object"], False, {}, remix_similarity
 
-        # Check for sub-part locks that force remix
-        sub_part_keys = {"of_modifier", "of_head", "of_topic", "of_complement"}
-        sub_locks = {k: v for k, v in (locks or {}).items() if k in sub_part_keys}
+    of_object = _weighted_sample(obj_rows, 1, rng, obj_target, conn)[0]
+    remixed = False
+    remix_parts = {}
 
-        if sub_locks:
-            result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim,
-                                locked_parts=sub_locks)
+    sub_part_keys = {"of_modifier", "of_head", "of_topic", "of_complement"}
+    sub_locks = {k: v for k, v in (locks or {}).items() if k in sub_part_keys}
+
+    if sub_locks:
+        result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim,
+                            locked_parts=sub_locks)
+        if result:
+            of_object, remix_parts, remix_similarity = result
+            remixed = True
+    elif remix_prob > 0 and len(of_object.split()) >= 2:
+        should_remix = (rng or random).random() < remix_prob
+        if should_remix:
+            result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim)
             if result:
                 of_object, remix_parts, remix_similarity = result
                 remixed = True
-        elif remix_prob > 0 and len(of_object.split()) >= 2:
-            should_remix = (rng or random).random() < remix_prob
-            if should_remix:
-                result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim)
-                if result:
-                    of_object, remix_parts, remix_similarity = result
-                    remixed = True
 
-    # Resolve articles from corpus stats
+    return of_object, remixed, remix_parts, remix_similarity
+
+
+def _select_subtitle_parts(
+    conn: sqlite3.Connection,
+    candidates: GenerationCandidates,
+    rng: random.Random | None,
+    adjusted_tone_target: dict[str, float] | None,
+    remix_prob: float,
+    min_sim: float,
+    locks: dict[str, str] | None,
+) -> SelectedSubtitleParts:
+    list_target = adjusted_tone_target.get("list_item") if adjusted_tone_target else None
+    action_target = adjusted_tone_target.get("action_noun") if adjusted_tone_target else None
+    items = _pick_list_items(candidates.list_rows, rng, list_target, conn, locks)
+    action_noun = _pick_action_noun(candidates.action_rows, rng, action_target, conn, locks)
+    of_object, remixed, remix_parts, remix_similarity = _pick_of_object_and_remix(
+        conn, candidates.obj_rows, rng, adjusted_tone_target, remix_prob, min_sim, locks,
+    )
+    return SelectedSubtitleParts(
+        items=items,
+        action_noun=action_noun,
+        of_object=of_object,
+        remixed=remixed,
+        remix_parts=remix_parts,
+        remix_similarity=remix_similarity,
+    )
+
+
+def _resolve_articles(
+    conn: sqlite3.Connection,
+    action_noun: str,
+    of_object: str,
+    remixed: bool,
+    remix_parts: dict,
+) -> tuple[str, str]:
     ctx = _load_remix_context(conn)
     cfg = load_tuning_config(conn)
     of_min_freq = cfg.get("article_of_min_freq", 3.0)
@@ -866,32 +941,80 @@ def generate_subtitle(
             of_object, ctx.get("article_stats_of", {}), of_min_freq,
         )
 
-    # Correct a/an using phonetic analysis
     action_article = _fix_a_an(action_article, action_noun)
     if of_article:
         of_article = _fix_a_an(of_article, of_object)
+    return action_article, of_article
 
-    # Assemble raw text, then title-case once
+
+def _assemble_generated_subtitle(
+    parts: SelectedSubtitleParts,
+    action_article: str,
+    of_article: str,
+) -> GeneratedSubtitle:
     of_prefix = f"{of_article} " if of_article else ""
-    text = f"{items[0]}, {items[1]}, and {action_article} {action_noun} of {of_prefix}{of_object}"
-    text = _title_case(text)
-
-    # Title-case remix_parts for display
+    text = (
+        f"{parts.items[0]}, {parts.items[1]}, and "
+        f"{action_article} {parts.action_noun} of {of_prefix}{parts.of_object}"
+    )
+    remix_parts = parts.remix_parts
     if remix_parts:
         remix_parts = {k: _title_case(v) for k, v in remix_parts.items()}
 
     return GeneratedSubtitle(
-        text=text,
-        item1=_title_case(items[0]),
-        item2=_title_case(items[1]),
-        action_noun=_title_case(action_noun),
-        of_object=_title_case(of_object),
-        remixed=remixed,
+        text=_title_case(text),
+        item1=_title_case(parts.items[0]),
+        item2=_title_case(parts.items[1]),
+        action_noun=_title_case(parts.action_noun),
+        of_object=_title_case(parts.of_object),
+        remixed=parts.remixed,
         remix_parts=remix_parts,
-        remix_similarity=remix_similarity,
+        remix_similarity=parts.remix_similarity,
         of_article=of_article,
         action_article=action_article,
     )
+
+
+def generate_subtitle(
+    conn: sqlite3.Connection, seed: int | None = None,
+    tone_target: dict[str, float] | None = None,
+    remix_prob: float = 0.0, min_sim: float = 0.0,
+    locks: dict[str, str] | None = None,
+) -> GeneratedSubtitle:
+    """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
+
+    tone_target maps slot_type → log10 target score for filler biasing.
+    remix_prob: probability of remixing a multi-word of-object (0.0 = never, 1.0 = always).
+    min_sim: minimum cosine similarity for embedding coherence filter.
+    locks: optional dict mapping slot keys to locked values.
+        Supported keys: item1, item2, action_noun, of_object,
+        of_modifier, of_head, of_topic, of_complement.
+    """
+    rng = _make_rng(seed)
+    _validate_generation_locks(locks)
+
+    candidates = _load_generation_candidates(conn)
+    if not _has_enough_candidates(candidates, locks):
+        return _not_enough_fillers_subtitle()
+
+    adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
+    parts = _select_subtitle_parts(
+        conn,
+        candidates,
+        rng,
+        adjusted_tone_target,
+        remix_prob,
+        min_sim,
+        locks,
+    )
+    action_article, of_article = _resolve_articles(
+        conn,
+        parts.action_noun,
+        parts.of_object,
+        parts.remixed,
+        parts.remix_parts,
+    )
+    return _assemble_generated_subtitle(parts, action_article, of_article)
 
 
 def _try_remix(

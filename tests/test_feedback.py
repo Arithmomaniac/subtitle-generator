@@ -283,7 +283,7 @@ def test_robot_grader_batch():
 
 def test_cli_review_mock():
     """Test _prompt_review with mocked click.prompt using robot grader."""
-    from subtitle_generator.feedback import ensure_ratings_table, get_summary
+    from subtitle_generator.feedback import ensure_ratings_table
 
     conn = make_test_db()
     ensure_ratings_table(conn)

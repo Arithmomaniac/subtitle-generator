@@ -72,7 +72,7 @@ async def test():
         # Verify rate request was sent
         assert len(rate_requests) == 1, f"Expected 1 rate request, got {len(rate_requests)}"
         assert rate_requests[0].get("felt_tier") == "pop", f"Expected felt_tier=pop, got {rate_requests[0]}"
-        print(f"  PASS: rated as pop, reveal shown")
+        print("  PASS: rated as pop, reveal shown")
 
         # ── TEST 4: Advance with Next button ──
         print("TEST 4: Click Next to advance")
@@ -83,7 +83,7 @@ async def test():
         )
         progress = await page.locator('[data-testid="progress-text"]').text_content()
         assert "2 / 3" in progress, f"Expected '2 / 3', got: {progress}"
-        print(f"  PASS: advanced to item 2")
+        print("  PASS: advanced to item 2")
 
         # ── TEST 5: Keyboard shortcut (press 'n' for niche) ──
         print("TEST 5: Keyboard shortcut (n for niche)")
@@ -95,7 +95,7 @@ async def test():
         )
         assert len(rate_requests) == 1, f"Expected 1 rate request, got {len(rate_requests)}"
         assert rate_requests[0].get("felt_tier") == "niche", f"Expected felt_tier=niche, got {rate_requests[0]}"
-        print(f"  PASS: rated as niche via keyboard")
+        print("  PASS: rated as niche via keyboard")
 
         # ── TEST 6: Toggle tags during reveal ──
         print("TEST 6: Toggle tags during reveal")
@@ -107,7 +107,7 @@ async def test():
         # Toggle off
         await page.keyboard.press("f")
         funny_class = await funny_btn.get_attribute("class")
-        assert "active" not in funny_class, f"Expected funny tag inactive after toggle"
+        assert "active" not in funny_class, "Expected funny tag inactive after toggle"
         # Toggle on again for the submission
         await page.locator('[data-testid="tag-funny"]').click()
         await page.keyboard.press("i")
@@ -118,7 +118,7 @@ async def test():
         realistic_btn = page.locator('[data-testid="tag-realistic"]')
         realistic_class = await realistic_btn.get_attribute("class")
         assert "active" in realistic_class, f"Expected realistic tag active, got class: {realistic_class}"
-        print(f"  PASS: tags toggle correctly")
+        print("  PASS: tags toggle correctly")
 
         # Advance to next
         await page.keyboard.press("Enter")
@@ -139,7 +139,7 @@ async def test():
         assert rate_requests[0].get("skipped") is True, f"Expected skipped=true, got {rate_requests[0]}"
         skip_text = await page.locator('[data-testid="reveal-skip"]').text_content()
         assert "Skipped" in skip_text, f"Expected skip reveal, got: {skip_text}"
-        print(f"  PASS: skipped, reveal shows target")
+        print("  PASS: skipped, reveal shows target")
 
         # Advance — should go to summary
         await page.keyboard.press("Enter")
@@ -165,7 +165,7 @@ async def test():
         )
         progress = await page.locator('[data-testid="progress-text"]').text_content()
         assert "1 / 3" in progress, f"Expected '1 / 3' after load more, got: {progress}"
-        print(f"  PASS: new batch loaded, progress reset")
+        print("  PASS: new batch loaded, progress reset")
 
         # ── TEST 10: Keyboard hints visible ──
         print("TEST 10: Keyboard hints")
@@ -173,7 +173,7 @@ async def test():
         assert await hints.is_visible(), "Keyboard hints not visible"
         hints_text = await hints.text_content()
         assert "Pop" in hints_text and "Mainstream" in hints_text, f"Missing hint text: {hints_text}"
-        print(f"  PASS: keyboard hints visible")
+        print("  PASS: keyboard hints visible")
 
         # ── TEST 11: Back link ──
         print("TEST 11: Back link")
@@ -181,7 +181,7 @@ async def test():
         assert await back_link.is_visible(), "No back link"
         href = await back_link.get_attribute("href")
         assert href == "/", f"Back link should go to /, got: {href}"
-        print(f"  PASS: back link present")
+        print("  PASS: back link present")
 
         print()
         print(f"ALL 11 TESTS PASSED ({BASE_URL})")

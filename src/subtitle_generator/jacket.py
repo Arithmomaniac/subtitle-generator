@@ -10,6 +10,7 @@ from collections.abc import Callable
 import click
 
 from subtitle_generator.config import load_tuning_config
+from subtitle_generator.parameter_state import DEFAULT_JACKET_MODEL
 
 try:
     from copilot import CopilotClient
@@ -317,7 +318,7 @@ def _extract_section(content: str, section: str) -> str:
     return match.group("body") if match else ""
 
 
-DEFAULT_MODEL = "gpt-5.4-mini"
+DEFAULT_MODEL = DEFAULT_JACKET_MODEL
 
 
 async def _generate_jacket_async(
@@ -340,13 +341,9 @@ async def _generate_jacket_async(
     )
 
     if tone_override:
-        _progress(f"Tone: override")
+        _progress("Tone: override")
     else:
         _, score = compute_accessibility(subtitle, conn)
-        cfg = load_tuning_config(conn)
-        pop_thresh = cfg["accessibility_threshold_pop"]
-        main_thresh = cfg["accessibility_threshold_mainstream"]
-        natural = "pop" if score > pop_thresh else ("mainstream" if score >= main_thresh else "niche")
         _progress(f"Tone: {tone_tier} (score: {score:.2f})")
 
     _progress(f"Connecting to {model}...")

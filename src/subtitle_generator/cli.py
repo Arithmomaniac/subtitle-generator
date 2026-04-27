@@ -1,5 +1,6 @@
 """CLI entry point for subtitle-generator."""
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -17,8 +18,9 @@ from subtitle_generator.export_db import build_mini_db, export_data, export_mini
 from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, precompute_remix_data, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
-    compute_accessibility, generate_jacket, sample_tone,
+    compute_accessibility, generate_jacket,
 )
+from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
 from subtitle_generator.slots import build_slots, ensure_slot_tables
 
 
@@ -1090,6 +1092,24 @@ def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, exponent, skip_cali
     subprocess.run(args, check=True)
 
     click.echo("\nDone! Popularity scores updated.")
+
+
+@cli.command("validate-pipeline")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to validate.")
+@click.option("--embedding-version", default="2", show_default=True, help="Expected remix embedding version.")
+def validate_pipeline_cmd(db_path: Path, embedding_version: str):
+    """Run read-only pipeline readiness checks."""
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        report = validate_pipeline(conn, expected_embedding_version=embedding_version)
+    finally:
+        conn.close()
+    click.echo(format_validation_report(report))
+    if not report.ok:
+        raise click.exceptions.Exit(1)
 
 
 if __name__ == "__main__":

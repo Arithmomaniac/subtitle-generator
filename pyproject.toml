@@ -33,3 +33,20 @@ packages = ["src/subtitle_generator"]
 [tool.uv.sources]
 en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "ruff>=0.15.12",
+    "ty>=0.0.32",
+]
+
+[tool.ty.src]
+include = [
+    "src/subtitle_generator/parameter_state.py",
+    "src/subtitle_generator/pipeline_validation.py",
+    "src/subtitle_generator/remix_state.py",
+    "src/subtitle_generator/schema_contracts.py",
+    "src/subtitle_generator/tuning_state.py",
+    "tests/test_pipeline_characterization.py",
+]
