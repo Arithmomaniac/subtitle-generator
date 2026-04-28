@@ -19,7 +19,7 @@ from subtitle_generator.eval_harness import (
     DEFAULT_RATER_MODEL,
     rate_batch_raw,
 )
-from subtitle_generator.generate import generate_subtitle, _load_remix_context
+from subtitle_generator.generate import generate_subtitle
 
 
 def _compute_subtitle_centroid(conn: sqlite3.Connection, nlp) -> np.ndarray | None:
@@ -102,7 +102,7 @@ def run_calibration(
     click.echo(f"  Baseline similarity to real subtitles: "
                f"mean={baseline['mean']:.3f}, std={baseline['std']:.3f}, "
                f"p10={baseline['p10']:.3f}")
-    click.echo(f"  (Remixed subtitles will be somewhat lower — that's expected)\n")
+    click.echo("  (Remixed subtitles will be somewhat lower — that's expected)\n")
 
     # --- Phase 1: Sweep min_sim at remix_prob=1.0 ---
     click.echo("Phase 1: Finding optimal embedding threshold (min_sim)")
@@ -204,8 +204,8 @@ def run_calibration(
     )
     conn.commit()
 
-    click.echo(f"\n=== Calibration Complete ===")
+    click.echo("\n=== Calibration Complete ===")
     click.echo(f"  Optimal min_sim:    {best_min_sim:.2f}")
     click.echo(f"  Optimal remix_prob: {best_remix_prob:.1f}")
     click.echo(f"  Baseline sim:       {baseline['mean']:.3f} (±{baseline['std']:.3f})")
-    click.echo(f"\nThese values are now the defaults for 'generate --remix'.")
+    click.echo("\nThese values are now the defaults for 'generate --remix'.")

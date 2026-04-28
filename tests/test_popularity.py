@@ -200,7 +200,7 @@ def test_export_import_roundtrip():
                 f"Missing popularity_score column. Headers: {list(first_row.keys())}"
             )
             assert first_row["popularity_score"] != "", (
-                f"popularity_score should not be empty for Race"
+                "popularity_score should not be empty for Race"
             )
 
         # Import into mini DB
@@ -231,8 +231,8 @@ def test_jacket_accessibility_blend():
     )
     assert score0 > 0, f"Expected positive score, got {score0}"
 
-    # With blend=1, should use popularity only
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_tone_blend', '1.0')")
+    # With classification blend=1, should use popularity only
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '1.0')")
     conn.commit()
     from subtitle_generator.config import invalidate_config_cache
     invalidate_config_cache()

@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 
 import click
 
-from subtitle_generator.extract import DATA_DIR, _clean_subtitle
+from subtitle_generator.extract import DATA_DIR
 
 OL_DUMP_URL = "https://openlibrary.org/data/ol_dump_editions_latest.txt.gz"
 OL_DUMP_FILENAME = "ol_dump_editions_latest.txt.gz"

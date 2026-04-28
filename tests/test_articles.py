@@ -3,9 +3,8 @@
 Run:  uv run python tests/test_articles.py
 """
 
-import json
-import sqlite3
 import sys
+import re
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -114,8 +113,6 @@ def test_infer_deterministic():
 # ---------------------------------------------------------------------------
 # Article stripping in extraction (regex-based)
 # ---------------------------------------------------------------------------
-
-import re
 
 _ARTICLE_RE = re.compile(r"^(a|an|the)\s+", re.IGNORECASE)
 
@@ -243,7 +240,6 @@ def test_double_of_non_of_prep():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import inspect
     test_fns = [obj for name, obj in globals().items()
                 if name.startswith("test_") and callable(obj)]
     for fn in test_fns:

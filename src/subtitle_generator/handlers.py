@@ -10,7 +10,6 @@ import sqlite3
 from pathlib import Path
 
 from subtitle_generator.generate import (
-    TONE_TARGETS,
     GeneratedSubtitle,
     find_source,
     generate_subtitle,

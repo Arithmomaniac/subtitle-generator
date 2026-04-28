@@ -8,9 +8,7 @@ import asyncio
 import json
 import os
 import random
-import sqlite3
 import uuid
-from functools import partial
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,13 +16,12 @@ from pathlib import Path
 from subtitle_generator.generate import GeneratedSubtitle, generate_subtitle
 from subtitle_generator.handlers import (
     get_db as _get_db,
-    build_sources as _build_sources,
     handle_generate as _handle_generate,
     handle_health as _handle_health,
     handle_jacket as _handle_jacket,
     handle_rate as _handle_rate,
 )
-from subtitle_generator.jacket import build_jacket_prompt, generate_jacket
+from subtitle_generator.jacket import build_jacket_prompt, generate_jacket_from_prompt
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _WEB_DIR = _PROJECT_ROOT / "web"
@@ -410,9 +407,10 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             system_prompt, user_prompt, tone_tier = build_jacket_prompt(subtitle, conn=conn)
             prompt_text = f"{system_prompt}\n\n---\n\n{user_prompt}"
+            on_progress(f"Tone: {tone_tier}")
 
-            result_text = generate_jacket(
-                subtitle, model=model, conn=conn,
+            result_text = generate_jacket_from_prompt(
+                subtitle, system_prompt, user_prompt, model=model,
                 on_progress=on_progress,
             )
 

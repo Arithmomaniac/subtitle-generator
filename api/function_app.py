@@ -1,7 +1,8 @@
 """Azure Functions v2 (Python) app wrapping subtitle-generator."""
 
+# ruff: noqa: E402
+
 import json
-import os
 import sys
 from pathlib import Path
 
