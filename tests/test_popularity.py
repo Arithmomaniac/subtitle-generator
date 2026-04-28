@@ -214,6 +214,8 @@ def test_export_import_roundtrip():
         ).fetchone()
         assert row is not None and row[0] is not None, "popularity_score lost in import"
         assert abs(row[0] - 1.8) < 0.01, f"Expected ~1.8, got {row[0]}"
+        columns = {r[1] for r in mini.execute("PRAGMA table_info(slot_fillers)")}
+        assert "vector_sum" in columns, "mini DB must preserve the remix runtime schema"
         mini.close()
 
     print("  PASS: export_import_roundtrip")

@@ -99,6 +99,7 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
             remix_type TEXT,
             remix_prep TEXT,
             remix_word_count INTEGER,
+            vector_sum BLOB,
             centroid_dot REAL,
             norm_sq REAL,
             token_count INTEGER,
@@ -121,13 +122,14 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
                 row.get("remix_type") or None,
                 row.get("remix_prep") or None,
                 int(row["remix_word_count"]) if row.get("remix_word_count") else None,
+                None,
                 centroid_dot,
                 norm_sq,
                 int(row["token_count"]) if row.get("token_count") else None,
                 popularity_score,
             ))
         conn.executemany(
-            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
         )
         stats["slot_fillers"] = len(rows)
 
