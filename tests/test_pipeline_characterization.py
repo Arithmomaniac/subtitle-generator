@@ -8,6 +8,7 @@ subtitle text byte-for-byte.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sqlite3
 import sys
@@ -670,6 +671,41 @@ def test_jacket_generation_uses_prepared_prompt_once(monkeypatch):
     }
     assert "## Internal Concept" not in result
     assert "## Title" in result
+
+
+def test_jacket_stream_reports_tone_progress(monkeypatch):
+    from subtitle_generator import serve
+
+    class DummyConn:
+        def close(self):
+            pass
+
+    def fake_build_jacket_prompt(subtitle, **kwargs):
+        assert subtitle == "Race, Power, and the Pursuit of Happiness"
+        assert isinstance(kwargs["conn"], DummyConn)
+        return "system prompt", "user prompt", "mainstream"
+
+    def fake_generate_jacket_from_prompt(*_args, on_progress=None, **_kwargs):
+        assert on_progress is not None
+        on_progress("Generating jacket...")
+        return "## Title\nVisible"
+
+    handler = object.__new__(serve._Handler)
+    handler.wfile = io.BytesIO()
+    handler.send_response = lambda _status: None
+    handler.send_header = lambda _name, _value: None
+    handler._cors_headers = lambda: None
+    handler.end_headers = lambda: None
+    monkeypatch.setattr(serve, "_get_db", lambda: DummyConn())
+    monkeypatch.setattr(serve, "build_jacket_prompt", fake_build_jacket_prompt)
+    monkeypatch.setattr(serve, "generate_jacket_from_prompt", fake_generate_jacket_from_prompt)
+
+    handler._handle_jacket_stream({"subtitle": "Race, Power, and the Pursuit of Happiness"})
+
+    body = handler.wfile.getvalue().decode("utf-8")
+    assert "event: progress\ndata: Tone: mainstream\n\n" in body
+    assert "event: progress\ndata: Generating jacket...\n\n" in body
+    assert "event: result\n" in body
 
 
 def test_rating_config_snapshot_preserves_defaults_and_overrides():

@@ -53,6 +53,7 @@ uv run subtitle-gen extract-ol                  # parse + deduplicate
 uv run subtitle-gen build-slots                 # extract slot fillers
 uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, etc.
 uv run subtitle-gen populate-popularity         # compute composite scores
+uv run subtitle-gen precompute-vectors          # remix scalar/vector state
 uv run subtitle-gen validate-pipeline           # read-only readiness checks
 ```
 

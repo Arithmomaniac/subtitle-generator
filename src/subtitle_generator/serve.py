@@ -407,6 +407,7 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             system_prompt, user_prompt, tone_tier = build_jacket_prompt(subtitle, conn=conn)
             prompt_text = f"{system_prompt}\n\n---\n\n{user_prompt}"
+            on_progress(f"Tone: {tone_tier}")
 
             result_text = generate_jacket_from_prompt(
                 subtitle, system_prompt, user_prompt, model=model,
