@@ -26,8 +26,8 @@ Celebrity Culture, Theology, and the Collapse of New England
 ## How it works
 
 1. **Download** ~25M MARC records from the LOC bulk distribution (43 files, ~9 GB) and/or ~35M edition records from Open Library (~9.2 GB)
-2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication)
-3. **Pattern match** subtitles matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation
+2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication and repair of repeated title/subtitle corruption)
+3. **Pattern match** subtitles matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation. Source subtitles may contribute either two or three list clauses; generated subtitles still use two list slots.
 4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing. Articles (a/an/the) are stripped and stored separately for re-insertion at generation time.
 5. **Score and tune** fillers with popularity, tone, article, and remix parameters stored in SQLite config rows with Python contract views.
 6. **Generate** by randomly drawing one filler per slot — weighted by corpus frequency, popularity, and tone targets. Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
@@ -71,6 +71,23 @@ The pipeline has explicit contract modules for the cross-stage state that feeds 
 | Runtime/serving | Validated SQLite state and request parameters | `GeneratedSubtitle`, `subtitle_to_dict()`, CLI output, local HTTP, and Azure Functions payloads |
 
 Use `uv run subtitle-gen validate-pipeline` before tuning, serving, or exporting. It is read-only and fails non-zero when required tables/columns, config values, remix precompute state, popularity coverage, model IDs, or serving handlers are not ready.
+
+### Slot extraction quality gates
+
+`build-slots` treats the broad regex match as a candidate, not as proof that a
+subtitle is usable. A candidate is accepted only after these gates:
+
+| Gate | Behavior |
+|---|---|
+| List shape | Accept exactly two or three original list clauses before the final `and the/a/an ... of ...` clause. Reject four or more clauses. |
+| List item validation | Reject the whole candidate if any original list clause fails cleanup, artifact, weak/jargon, truncation, or spaCy noun/name validation. The pipeline no longer silently drops bad list items and keeps the rest. |
+| Action/object validation | Reject weak action nouns, malformed of-objects, and SEO/prepositional object starts such as `using`, `with`, or `for`. |
+| Title/subtitle repair | Repair common `Title: Subtitle` duplication before validation. `Title: Subtitle Title: Subtitle` and `Title: Subtitle Subtitle` are uncorrupted to `Title` / `Subtitle` when possible; unrepairable repeated rows are rejected. |
+
+`pattern_matches` contains the clean NLP-validated matches that survived these
+gates. Downstream source attribution, filler popularity, article statistics,
+calibration, remix precompute, export, and serving should be rebuilt from that
+clean set after slot-filter changes.
 
 Model and weight state is grouped by purpose rather than treated as one loose dictionary:
 
@@ -194,13 +211,13 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `extract` | Parse MARC files into SQLite |
 | `extract-ol` | Parse Open Library dump (deduplicates against LOC) |
 | `analyze` | POS-tag subtitles, extract structural templates |
-| `build-slots` | Extract slot fillers (regex + NLP validated) + precompute vectors |
+| `build-slots` | Extract clean slot fillers (regex + NLP validated), article stats, and remix sub-parts |
 | `generate` | Random subtitle generation (+ optional jacket, review) |
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
 | `tune` | Autoresearch tuning loop (remix + tone parameters) |
 | `review` | Interactive subtitle rating session |
-| `precompute-vectors` | Recompute remix vector decomposition (included in `build-slots`) |
+| `precompute-vectors` | Recompute remix vector/scalar state after slot extraction changes |
 | `serve` | Start the web app locally |
 | `export-db` | Export mini SQLite directly from full DB |
 | `export-data` | Export slot data as CSV files (for Git) |
@@ -218,6 +235,7 @@ src/subtitle_generator/
   generate.py          # subtitle generation with remix + locked slots + article logic
   jacket.py            # jacket prompt construction + LLM execution
   slots.py             # slot extraction + decomposition + article stats
+  source_validation.py # shared title/subtitle repair and source corruption checks
   config.py            # centralized tuning parameters (20 params, DB-overridable)
   calibrate.py         # LLM-based remix parameter tuning
   tune.py              # autoresearch tuning loop (Karpathy-inspired)

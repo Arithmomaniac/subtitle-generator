@@ -7,6 +7,8 @@ from pathlib import Path
 import click
 from pymarc import MARCReader
 
+from subtitle_generator.source_validation import clean_title_and_subtitle
+
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 DB_PATH = DATA_DIR / "db" / "subtitles.db"
 
@@ -24,11 +26,20 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
             subtitle TEXT NOT NULL,
             lang TEXT,
             lccn TEXT,
-            source_file TEXT
+            source_file TEXT,
+            isbn TEXT
         )
     """)
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(subtitles)").fetchall()
+    }
+    if "isbn" not in cols:
+        conn.execute("ALTER TABLE subtitles ADD COLUMN isbn TEXT")
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_subtitles_lang ON subtitles(lang)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_subtitles_isbn ON subtitles(isbn)
     """)
     conn.commit()
     return conn
@@ -97,6 +108,10 @@ def extract_from_file(
 
             title = field_245.get("a", "")
             title = re.sub(r"[\s]*[/:;.]\s*$", "", title).strip()
+            cleaned = clean_title_and_subtitle(title, subtitle)
+            if cleaned is None:
+                continue
+            title, subtitle = cleaned
 
             lccn_field = record.get("010")
             lccn = lccn_field.get("a", "").strip() if lccn_field else None

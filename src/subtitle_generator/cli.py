@@ -6,6 +6,7 @@ from pathlib import Path
 
 import click
 
+from subtitle_generator import __version__
 from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
@@ -141,7 +142,7 @@ def cli():
 @cli.command()
 def version():
     """Show version."""
-    click.echo("subtitle-generator 0.1.0")
+    click.echo(f"subtitle-generator {__version__}")
 
 
 @cli.command()

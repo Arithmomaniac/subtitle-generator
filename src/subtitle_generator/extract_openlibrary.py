@@ -9,14 +9,16 @@ from urllib.request import Request, urlopen
 
 import click
 
+from subtitle_generator import __version__
 from subtitle_generator.extract import DATA_DIR
+from subtitle_generator.source_validation import clean_title_and_subtitle
 
 OL_DUMP_URL = "https://openlibrary.org/data/ol_dump_editions_latest.txt.gz"
 OL_DUMP_FILENAME = "ol_dump_editions_latest.txt.gz"
 OL_RAW_DIR = DATA_DIR / "raw"
 OL_DUMP_PATH = OL_RAW_DIR / OL_DUMP_FILENAME
 
-USER_AGENT = "subtitle-generator/0.1.0 (research project; Open Library bulk data)"
+USER_AGENT = f"subtitle-generator/{__version__} (research project; Open Library bulk data)"
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 BATCH_SIZE = 5000
 
@@ -204,6 +206,10 @@ def extract_from_ol_dump(
                 continue
 
             title = (data.get("title") or "").strip()
+            cleaned = clean_title_and_subtitle(title, subtitle)
+            if cleaned is None:
+                continue
+            title, subtitle = cleaned
 
             # Extract identifiers
             lccn_list = data.get("lccn", [])

@@ -7,9 +7,12 @@ validate that each slot filler is the right type of phrase.
 import json
 import re
 import sqlite3
+from collections import Counter
 
 import click
 import spacy
+
+from subtitle_generator.source_validation import clean_title_and_subtitle
 
 # Regex to match: "A, B[,] and the/a/an C of D"
 PATTERN_RE = re.compile(
@@ -18,6 +21,7 @@ PATTERN_RE = re.compile(
 )
 
 NOISE_WORDS = {"hearing", "subcommittee", "committee", "congress", "session"}
+ALLOWED_LIST_ITEM_COUNTS = {2, 3}
 
 # Generic/bland words that don't carry pop-nonfiction punch
 _WEAK_FILLERS = {
@@ -125,6 +129,11 @@ def _split_list_items(list_part: str) -> list[str]:
     return [item.strip() for item in list_part.split(",") if item.strip()]
 
 
+def _clean_list_item(item: str) -> str:
+    cleaned = re.sub(r"[\s]*[/:;,.]\s*$", "", item).strip()
+    return _normalize_spacing(cleaned)
+
+
 def _is_valid_action(phrase: str, nlp) -> bool:
     """Action noun must be a process/event noun (making, rise, collapse, etc.)."""
     words = phrase.lower().split()
@@ -185,13 +194,16 @@ def _is_valid_list_item(phrase: str, nlp) -> bool:
 
 # POS tags rejected in of-objects (more permissive than list items since
 # prepositional modifiers like "knowledge in Late Antiquity" are valid)
-_OF_OBJECT_REJECTED_POS = {"DET", "CCONJ", "SCONJ", "VERB", "AUX", "PRON", "INTJ", "X"}
+_OF_OBJECT_REJECTED_POS = {"DET", "CCONJ", "SCONJ", "VERB", "AUX", "PRON", "INTJ", "SYM", "X"}
+_OF_OBJECT_REJECTED_STARTS = {"using", "with", "for", "by", "via", "through"}
 
 
 def _is_valid_object(phrase: str, nlp) -> bool:
     """The 'of X' part should be a meaningful NP, 1-5 words."""
     words = phrase.split()
     if not (1 <= len(words) <= 5):
+        return False
+    if words[0].lower().strip(".,:;") in _OF_OBJECT_REJECTED_STARTS:
         return False
     # Orthographic checks (can't express via POS)
     if re.search(r"\d{4}", phrase):
@@ -311,7 +323,10 @@ def _decompose_prepositional(phrase: str, doc) -> tuple[str, str, str, str, str]
     return topic, topic_pos, prep, complement, complement_pos
 
 
-def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
+def extract_pattern_matches(
+    conn: sqlite3.Connection,
+    rejection_counts: Counter | None = None,
+) -> list[dict]:
     """Find all subtitles matching X, Y, and [the/a/an] Z of W.
 
     Open Library records without any institutional identifier (ISBN, LCCN)
@@ -334,7 +349,15 @@ def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
 
     matches = []
     for sid, title, subtitle in rows:
+        cleaned = clean_title_and_subtitle(title, subtitle)
+        if cleaned is None:
+            if rejection_counts is not None:
+                rejection_counts["rejected_repeated_title_subtitle"] += 1
+            continue
+        title, subtitle = cleaned
         if _is_noise(subtitle):
+            if rejection_counts is not None:
+                rejection_counts["rejected_noise"] += 1
             continue
         m = PATTERN_RE.match(subtitle)
         if not m:
@@ -354,7 +377,9 @@ def extract_pattern_matches(conn: sqlite3.Connection) -> list[dict]:
             of_article = ""
 
         items = _split_list_items(list_part)
-        if len(items) < 2:
+        if len(items) not in ALLOWED_LIST_ITEM_COUNTS:
+            if rejection_counts is not None:
+                rejection_counts["rejected_list_count"] += 1
             continue
 
         matches.append({
@@ -446,22 +471,9 @@ def build_slots(conn: sqlite3.Connection):
     nlp = _load_nlp()
 
     click.echo("Finding pattern matches...")
-    matches = extract_pattern_matches(conn)
+    rejection_counts: Counter[str] = Counter()
+    matches = extract_pattern_matches(conn, rejection_counts)
     click.echo(f"Found {len(matches):,} raw matches")
-
-    conn.executemany(
-        "INSERT OR IGNORE INTO pattern_matches "
-        "(subtitle_id, title, subtitle, list_items_json, action_noun, of_object, "
-        "action_article, of_article) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (m["subtitle_id"], m["title"], m["subtitle"],
-             json.dumps(m["list_items"]), m["action_noun"], m["of_object"],
-             m["action_article"], m["of_article"])
-            for m in matches
-        ],
-    )
-    conn.commit()
 
     # NLP-validated slot extraction
     list_items_seen: dict[str, tuple[int, int]] = {}  # filler → (source_subtitle_id, count)
@@ -471,33 +483,48 @@ def build_slots(conn: sqlite3.Connection):
     of_article_counts: dict[str, dict[str, int]] = {}
     action_article_counts: dict[str, dict[str, int]] = {}
     clean_matches = 0
+    validated_matches = []
 
     for i, m in enumerate(matches):
         action = _normalize_spacing(m["action_noun"])
         obj = _normalize_spacing(m["of_object"])
 
         if _has_encoding_artifacts(action) or _is_truncated(action) or _is_weak_or_jargon(action):
+            rejection_counts["rejected_action_artifact"] += 1
             continue
         if not _is_valid_action(action, nlp):
+            rejection_counts["rejected_action_validation"] += 1
             continue
         if _has_encoding_artifacts(obj) or _is_truncated(obj) or _is_weak_or_jargon(obj):
+            rejection_counts["rejected_object_artifact"] += 1
             continue
         if not _is_valid_object(obj, nlp):
+            rejection_counts["rejected_object_structure"] += 1
             continue
 
         valid_items = []
         for item in m["list_items"]:
-            cleaned = re.sub(r"[\s]*[/:;,.]\s*$", "", item).strip()
-            cleaned = _normalize_spacing(cleaned)
+            cleaned = _clean_list_item(item)
             if not cleaned or _has_encoding_artifacts(cleaned) or _is_truncated(cleaned) or _is_weak_or_jargon(cleaned):
-                continue
-            if _is_valid_list_item(cleaned, nlp):
-                valid_items.append(cleaned)
+                rejection_counts["rejected_list_item_validation"] += 1
+                valid_items = []
+                break
+            if not _is_valid_list_item(cleaned, nlp):
+                rejection_counts["rejected_list_item_validation"] += 1
+                valid_items = []
+                break
+            valid_items.append(cleaned)
 
-        if len(valid_items) < 2:
+        if len(valid_items) not in ALLOWED_LIST_ITEM_COUNTS:
             continue
 
         clean_matches += 1
+        validated_matches.append({
+            **m,
+            "list_items": valid_items,
+            "action_noun": action,
+            "of_object": obj,
+        })
         sid = m["subtitle_id"]
         for item in valid_items:
             prev = list_items_seen.get(item)
@@ -519,6 +546,24 @@ def build_slots(conn: sqlite3.Connection):
             click.echo(f"  ...validated {i + 1:,} / {len(matches):,}")
 
     click.echo(f"Clean matches (NLP-validated): {clean_matches:,}")
+    if rejection_counts:
+        click.echo("Rejected candidates:")
+        for reason, count in sorted(rejection_counts.items()):
+            click.echo(f"  {reason}: {count:,}")
+
+    conn.executemany(
+        "INSERT OR IGNORE INTO pattern_matches "
+        "(subtitle_id, title, subtitle, list_items_json, action_noun, of_object, "
+        "action_article, of_article) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (m["subtitle_id"], m["title"], m["subtitle"],
+             json.dumps(m["list_items"]), m["action_noun"], m["of_object"],
+             m["action_article"], m["of_article"])
+            for m in validated_matches
+        ],
+    )
+    conn.commit()
 
     filler_rows = (
         [("list_item", x, "strict", sid, freq) for x, (sid, freq) in list_items_seen.items()]
