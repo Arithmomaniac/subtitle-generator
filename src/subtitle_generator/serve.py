@@ -21,7 +21,7 @@ from subtitle_generator.handlers import (
     handle_jacket as _handle_jacket,
     handle_rate as _handle_rate,
 )
-from subtitle_generator.jacket import build_jacket_prompt, generate_jacket
+from subtitle_generator.jacket import build_jacket_prompt, generate_jacket_from_prompt
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _WEB_DIR = _PROJECT_ROOT / "web"
@@ -408,8 +408,8 @@ class _Handler(BaseHTTPRequestHandler):
             system_prompt, user_prompt, tone_tier = build_jacket_prompt(subtitle, conn=conn)
             prompt_text = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
-            result_text = generate_jacket(
-                subtitle, model=model, conn=conn,
+            result_text = generate_jacket_from_prompt(
+                subtitle, system_prompt, user_prompt, model=model,
                 on_progress=on_progress,
             )
 

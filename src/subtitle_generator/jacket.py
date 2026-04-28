@@ -321,32 +321,45 @@ def _extract_section(content: str, section: str) -> str:
 DEFAULT_MODEL = DEFAULT_JACKET_MODEL
 
 
-async def _generate_jacket_async(
-    subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
+def _progress(msg: str, on_progress: Callable[[str], None] | None = None) -> None:
+    click.echo(f"  {msg}")
+    if on_progress:
+        on_progress(msg)
+
+
+def _prepare_jacket_prompt(
+    subtitle: str,
     conn: sqlite3.Connection | None = None,
-    tone_override: str | None = None, allowed_tiers: set[str] | None = None,
+    tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> tuple[str, str, str]:
+    system_prompt, user_prompt, tone_tier = build_jacket_prompt(
+        subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+    )
+
+    if tone_override:
+        _progress("Tone: override", on_progress)
+    else:
+        _, score = compute_accessibility(subtitle, conn)
+        _progress(f"Tone: {tone_tier} (score: {score:.2f})", on_progress)
+
+    return system_prompt, user_prompt, tone_tier
+
+
+async def _generate_jacket_from_prompt_async(
+    subtitle: str,
+    system_prompt: str,
+    user_prompt: str,
+    model: str = DEFAULT_MODEL,
+    timeout: float = 120.0,
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Call the Copilot SDK to generate a full book jacket with validation and retry."""
     if not _HAS_COPILOT_SDK:
         raise RuntimeError("Copilot SDK not available. Use dry_run=true for prompt-only mode.")
 
-    def _progress(msg: str) -> None:
-        click.echo(f"  {msg}")
-        if on_progress:
-            on_progress(msg)
-
-    system_prompt, user_prompt, tone_tier = build_jacket_prompt(
-        subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
-    )
-
-    if tone_override:
-        _progress("Tone: override")
-    else:
-        _, score = compute_accessibility(subtitle, conn)
-        _progress(f"Tone: {tone_tier} (score: {score:.2f})")
-
-    _progress(f"Connecting to {model}...")
+    _progress(f"Connecting to {model}...", on_progress)
 
     async with CopilotClient() as client:
         async with await client.create_session(
@@ -355,24 +368,24 @@ async def _generate_jacket_async(
             infinite_sessions={"enabled": False},
         ) as session:
             prompt = system_prompt + "\n\n---\n\n" + user_prompt
-            _progress("Generating jacket...")
+            _progress("Generating jacket...", on_progress)
 
             for attempt in range(1, MAX_RETRIES + 2):
                 result = await session.send_and_wait(prompt, timeout=timeout)
                 content = (result.data.content or "") if result and result.data else ""
 
                 if not content:
-                    _progress(f"Attempt {attempt}: empty response, retrying...")
+                    _progress(f"Attempt {attempt}: empty response, retrying...", on_progress)
                     continue
 
                 missing = _validate_jacket(content)
                 if not missing:
-                    _progress("Complete")
+                    _progress("Complete", on_progress)
                     return content
 
                 if attempt <= MAX_RETRIES:
                     missing_names = ", ".join(missing)
-                    _progress(f"Attempt {attempt}: format issues: {missing_names}, retrying...")
+                    _progress(f"Attempt {attempt}: format issues: {missing_names}, retrying...", on_progress)
                     prompt = (
                         f"Your previous response did not satisfy these required sections "
                         f"or format requirements: {missing_names}.\n"
@@ -383,10 +396,45 @@ async def _generate_jacket_async(
                         f"The subtitle is:\n\n{subtitle}"
                     )
                 else:
-                    _progress(f"Best effort after {attempt} attempts")
+                    _progress(f"Best effort after {attempt} attempts", on_progress)
                     return content
 
             return "(No valid response after retries)"
+
+
+async def _generate_jacket_async(
+    subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
+    conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None, allowed_tiers: set[str] | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> str:
+    system_prompt, user_prompt, _ = _prepare_jacket_prompt(
+        subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+        on_progress=on_progress,
+    )
+    return await _generate_jacket_from_prompt_async(
+        subtitle, system_prompt, user_prompt, model=model, timeout=timeout,
+        on_progress=on_progress,
+    )
+
+
+def generate_jacket_from_prompt(
+    subtitle: str,
+    system_prompt: str,
+    user_prompt: str,
+    model: str = DEFAULT_MODEL,
+    timeout: float = 120.0,
+    show_concept: bool = False,
+    on_progress: Callable[[str], None] | None = None,
+) -> str:
+    """Synchronous wrapper for jacket generation from a prebuilt prompt."""
+    content = asyncio.run(_generate_jacket_from_prompt_async(
+        subtitle, system_prompt, user_prompt, model=model, timeout=timeout,
+        on_progress=on_progress,
+    ))
+    if not show_concept:
+        content = _strip_internal_concept(content)
+    return content
 
 
 def _strip_internal_concept(content: str) -> str:
@@ -404,11 +452,11 @@ def generate_jacket(
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
-    content = asyncio.run(_generate_jacket_async(
-        subtitle, model=model, timeout=timeout,
-        conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+    system_prompt, user_prompt, _ = _prepare_jacket_prompt(
+        subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
         on_progress=on_progress,
-    ))
-    if not show_concept:
-        content = _strip_internal_concept(content)
-    return content
+    )
+    return generate_jacket_from_prompt(
+        subtitle, system_prompt, user_prompt, model=model, timeout=timeout,
+        show_concept=show_concept, on_progress=on_progress,
+    )

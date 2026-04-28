@@ -197,9 +197,43 @@ export function createApp() {
           body,
         });
 
+        if (!response.ok) {
+          const message = await response.text();
+          throw new Error(message || response.statusText);
+        }
+        if (!response.body) {
+          throw new Error("Jacket generation returned no response body.");
+        }
+
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
+        let receivedTerminalEvent = false;
+        let terminalError = null;
+        const processEventBlock = (block) => {
+          if (!block.trim()) return;
+          let eventType = null;
+          const dataLines = [];
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event: ")) eventType = line.slice(7);
+            else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+            else if (line.startsWith("data:")) dataLines.push(line.slice(5));
+          }
+          if (!eventType || dataLines.length === 0) return;
+          const data = dataLines.join("\n");
+          if (eventType === "progress") {
+            this.jacketProgress = data;
+          } else if (eventType === "result") {
+            const parsed = JSON.parse(data);
+            this.prompt = parsed.prompt;
+            this.toneTier = parsed.tone_tier;
+            this._setJacket(parsed.result);
+            receivedTerminalEvent = true;
+          } else if (eventType === "error") {
+            receivedTerminalEvent = true;
+            terminalError = new Error(data);
+          }
+        };
 
         while (true) {
           const { done, value } = await reader.read();
@@ -211,29 +245,19 @@ export function createApp() {
           const blocks = buffer.split("\n\n");
           buffer = blocks.pop(); // keep incomplete block
           for (const block of blocks) {
-            if (!block.trim()) continue;
-            let eventType = null;
-            const dataLines = [];
-            for (const line of block.split("\n")) {
-              if (line.startsWith("event: ")) eventType = line.slice(7);
-              else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
-              else if (line.startsWith("data:")) dataLines.push(line.slice(5));
-            }
-            if (!eventType || dataLines.length === 0) continue;
-            const data = dataLines.join("\n");
-            if (eventType === "progress") {
-              this.jacketProgress = data;
-            } else if (eventType === "result") {
-              try {
-                const parsed = JSON.parse(data);
-                this.prompt = parsed.prompt;
-                this.toneTier = parsed.tone_tier;
-                this._setJacket(parsed.result);
-              } catch { /* partial JSON, wait for more */ }
-            } else if (eventType === "error") {
-              alert("Error: " + data);
-            }
+            processEventBlock(block);
+            if (receivedTerminalEvent) break;
           }
+          if (receivedTerminalEvent) {
+            await reader.cancel();
+            break;
+          }
+        }
+
+        if (buffer.trim() && !receivedTerminalEvent) processEventBlock(buffer);
+        if (terminalError) throw terminalError;
+        if (!receivedTerminalEvent) {
+          throw new Error("Jacket generation ended before returning a result.");
         }
       } catch (e) {
         alert("Failed: " + e.message);

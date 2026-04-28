@@ -639,6 +639,39 @@ def test_handle_rate_contract_persists_rating(tmp_path, monkeypatch):
     assert row == (1, "pop", '["interesting"]', "contract-test")
 
 
+def test_jacket_generation_uses_prepared_prompt_once(monkeypatch):
+    from subtitle_generator import jacket
+
+    calls = []
+    captured = {}
+
+    def fake_build_jacket_prompt(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "system prompt", "user prompt", "mainstream"
+
+    async def fake_generate(subtitle, system_prompt, user_prompt, **kwargs):
+        captured.update({
+            "subtitle": subtitle,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+        })
+        return "## Internal Concept\nhidden\n\n## Title\nVisible"
+
+    monkeypatch.setattr(jacket, "build_jacket_prompt", fake_build_jacket_prompt)
+    monkeypatch.setattr(jacket, "_generate_jacket_from_prompt_async", fake_generate)
+
+    result = jacket.generate_jacket("Race, Power, and the Pursuit of Happiness")
+
+    assert len(calls) == 1
+    assert captured == {
+        "subtitle": "Race, Power, and the Pursuit of Happiness",
+        "system_prompt": "system prompt",
+        "user_prompt": "user prompt",
+    }
+    assert "## Internal Concept" not in result
+    assert "## Title" in result
+
+
 def test_rating_config_snapshot_preserves_defaults_and_overrides():
     from subtitle_generator.feedback import store_rating
 
