@@ -7,9 +7,11 @@ from urllib.request import Request, urlopen
 
 import click
 
+from subtitle_generator import __version__
+
 BASE_URL = "https://www.loc.gov/cds/downloads/MDSConnect"
 DATA_DIR = Path(__file__).parent.parent.parent / "data" / "raw"
-USER_AGENT = "subtitle-generator/0.1.0 (research project; LOC MARC open-access)"
+USER_AGENT = f"subtitle-generator/{__version__} (research project; LOC MARC open-access)"
 
 # 2016 retrospective: 43 parts, UTF-8 encoding
 TOTAL_PARTS = 43

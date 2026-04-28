@@ -133,6 +133,8 @@ analysis.
 ### Subtitle extraction
 
 Extraction turns LOC/Open Library records into normalized `subtitles` rows.
+It also applies source-level cleanup for repeated title/subtitle corruption
+before rows enter the corpus.
 
 Important fields include:
 
@@ -141,9 +143,12 @@ Important fields include:
 - `lang`
 - source metadata such as `lccn`, `source_file`, and `isbn`
 
-This stage does not decide whether a subtitle is usable for generation. It
-preserves source material so downstream stages can match, filter, and attribute
-results.
+This stage does not decide whether a subtitle is usable for generation, but it
+does repair obvious metadata corruption when a real title/subtitle split can be
+recovered. Common repairable shapes include `Title: Subtitle` with a duplicated
+subtitle field, `Title: Subtitle Title: Subtitle`, and `Title: Subtitle
+Subtitle`. Rows whose title/subtitle repetition cannot be repaired are skipped
+or later rejected by the candidate-stage guard.
 
 ### Pattern matching and slot extraction
 
@@ -153,16 +158,29 @@ results.
 X, Y, and [the/a/an] Z of [the/a/an] W
 ```
 
-The regex match is only the first gate. `slots.py` then uses spaCy and
-orthographic filters to reject catalog noise, weak/jargon fillers, truncation,
-encoding artifacts, all-caps MARC leakage, implausible action nouns, and bad
-of-objects.
+The regex match is only the first gate. `slots.py` then repairs source
+title/subtitle duplication when possible, requires exactly two or three original
+list clauses, and uses spaCy plus orthographic filters to reject catalog noise,
+weak/jargon fillers, truncation, encoding artifacts, all-caps MARC leakage,
+implausible action nouns, and bad of-objects.
+
+Accepted three-clause source subtitles enrich the `list_item` pool, but runtime
+generation still emits two list slots. Four-or-more-clause records are rejected
+instead of being trimmed into plausible-looking fragments. Likewise, if any
+original list clause fails validation, the whole candidate is rejected; the
+pipeline no longer silently drops the failed item and keeps the remaining list
+items.
+
+`of_object` validation includes a small guard against SEO/prepositional starts
+such as `using`, `with`, `for`, `by`, `via`, and `through`. This guard sits on
+top of the existing noun-phrase/POS checks so valid noun phrases with internal
+prepositions can still pass.
 
 Outputs:
 
 | Table | Meaning |
 |---|---|
-| `pattern_matches` | Source subtitle decomposed into list items, action noun, of-object, and observed articles. |
+| `pattern_matches` | Clean NLP-validated source subtitle decomposed into list items, action noun, of-object, and observed articles. |
 | `slot_fillers` | Deduplicated filler inventory by slot type with frequency and later scoring/precompute columns. |
 | `slot_filler_sources` | Many-to-many link from filler to source subtitle; used for attribution and popularity scoring. |
 
@@ -174,6 +192,13 @@ Slot types include:
 - remix sub-parts: `of_modifier`, `of_head`, `of_topic`, `of_complement`
 
 The generator samples only `mode = 'strict'` fillers.
+
+Because `pattern_matches` is now clean-only, rebuilding slots after a validation
+change changes more than the slot table. Re-run popularity population,
+calibration, remix vector precompute, and `validate-pipeline` so
+`slot_filler_sources`, filler scores, tone thresholds, article statistics,
+remix constants, exports, and serving all agree with the same filtered candidate
+universe.
 
 ### Popularity scoring
 
@@ -727,7 +752,7 @@ When behavior looks wrong, identify which concern owns the symptom:
 |---|---|
 | `data\db\subtitles.db` | Full local SQLite database built from source data. |
 | `subtitles` | Extracted source subtitle records plus title/source metadata. |
-| `pattern_matches` | Raw matched subtitles decomposed into list/action/of-object fields. |
+| `pattern_matches` | Clean validated subtitles decomposed into list/action/of-object fields. |
 | `slot_fillers` | Canonical runtime filler inventory, including frequency, popularity, remix, vector, and scalar state. |
 | `slot_filler_sources` | Links fillers back to source subtitles/books for attribution and popularity scoring. |
 | `popularity_data` | Work-level demand/supply signals and `composite_score`. |
