@@ -42,22 +42,34 @@ _SUBTITLE_RE = re.compile(
 )
 
 TONE_HIGH = """\
-This is an airport bookstore book. Think Malcolm Gladwell, Michael Pollan, Mary Roach,
-or Bill Bryson. The reader grabs it on impulse. Prioritize bestselling trade nonfiction,
-podcasts, magazine features, and pop-culture references in your research. Keep the tone
-accessible, narrative-driven, and full of surprising anecdotes."""
+BOOK TYPE: POP / mass-market commercial.
+High-concept, instantly legible, and built for casual readers, gift buyers,
+BookTok/Bookstagram discovery, airport tables, Target/Costco displays, and library hold
+lists. Think celebrity memoir, self-help, pop science/history, or Malcolm Gladwell /
+Mary Roach / Atomic Habits-style nonfiction. Research recent bestseller lists, publisher
+pages, retailer copy, BookTok-friendly comps, podcasts, magazine features, and pop-culture
+flashpoints from the last 18-24 months. The hook should land in five seconds and promise
+surprise, suspense, empowerment, escape, or transformation."""
 
 TONE_MEDIUM = """\
-This is a quality indie bookstore book. Think Rebecca Solnit, Pankaj Mishra, or Merlin
-Sheldrake. The reader is curious and educated but not specialist. Blend trade nonfiction,
-longform journalism, and accessible academic work. The tone should be essayistic and
-intellectually engaging without being dense."""
+BOOK TYPE: MAINSTREAM / broad trade, book-club, literary-commercial.
+Accessible but substantial general-readership trade work for indie bookstore staff picks,
+NPR listeners, LibraryReads, book clubs, NYT Book Review coverage, and public-library
+new-book shelves. Think Ann Patchett, Erik Larson, Tara Westover, Rebecca Solnit, Patrick
+Radden Keefe, or narrative nonfiction from Knopf, Riverhead, FSG, Scribner, Norton, or
+Ecco. Research trade publisher copy, newspaper/book-section reviews, longform journalism,
+author interviews, and accessible scholarship. Promise emotional involvement plus
+something to think about, never pure hype or academic dryness."""
 
 TONE_LOW = """\
-This is a smart university press crossover — think Princeton's 'Lives of Great Ideas'
-series or Yale's cultural history list. The reader is intellectually adventurous. Blend
-academic depth with essayistic flair, referencing both specialist scholarship and trade
-nonfiction for context. Rigorous but never dry."""
+BOOK TYPE: NICHE / scholarly, specialty, small-press, or deep-genre.
+For a clearly defined audience: specialists, students, practitioners, hobbyists, genre
+devotees, course adopters, or acquiring librarians. Think university-press monographs and
+academic trade crossovers from Princeton, Yale, Chicago, Duke, MIT, Verso, or Oxford;
+specialty nonfiction; translated/small-press literary work; technical books; or
+deep-genre titles. Research publisher catalog pages, Choice/ACRL-style reviews,
+field-specific journals, author bios, scholarly debates, specialist blogs, and prior
+books in the same series or subfield. The hook is authority and contribution."""
 
 
 def _parse_subtitle_fillers(subtitle: str) -> list[str]:
@@ -181,62 +193,42 @@ treatment of the topic.
 This anchors everything else — both reviews must describe the SAME book.
 
 ## Back Cover
-The publisher's marketing copy for the back of the book. 2-3 paragraphs (~250 words).
-Open with a hook question or provocative claim. End with an emotional/intellectual payoff.
-Tone: urgent, seductive, intellectually intriguing.
+Write the publisher's marketing copy for the back of the book.
+
+{back_cover_guidance}
 
 Immediately below the back cover copy, include exactly TWO endorsement blurbs as separate
 paragraphs before the Review 1 header. Do NOT create separate blurb headers or blockquotes.
-For each blurb, use web_search to find a real person (author, academic, journalist, public
-intellectual) or real publication whose expertise aligns with this book's subject matter,
-then search for examples of their actual writing or past blurbs to understand their
-distinctive voice. At least one blurb must be from a real individual person. Format each
-blurb exactly like this:
+Use exactly these preselected blurb source types, in order. Do not substitute different
+source types, and do not label the source type in the final output.
+
+{blurb_instructions}
+
+For each blurb, use web_search to find a real person or real publication whose expertise
+aligns with this book's subject matter, then search for examples of their actual writing
+or past blurbs to understand their distinctive voice. At least one blurb must be from a
+real individual person. Format each blurb exactly like this:
 
 "[A single compelling endorsement sentence written in their authentic voice and style]" — [Full Name], [brief credential, e.g. author of The Looming Tower]
 
 ## Review 1
-Pick the most appropriate trade publication for this book from the roster below. Write
-the review in that publication's AUTHENTIC house style — match their real tone, vocabulary,
-sentence structure, and evaluative habits. Each publication has a distinct editorial voice:
+Review 1 must be for **{review_1_name}**. Write in that publication's AUTHENTIC house
+style — match its real tone, vocabulary, sentence structure, coverage assumptions, and
+evaluative habits.
 
-- **Publishers Weekly** — Neutral, polished, incisive. No first person. Crisp active
-  sentences, rarely exceeding 200 words. Balances praise with measured critique. Notes
-  commercial appeal and audience. Light wit permitted, never gushy. Closes with an
-  implied recommendation. Typical phrasing: "a vivid, propulsive account", "the prose
-  occasionally strains", "will appeal to readers of..."
+## Review 2
+Review 2 must be for **{review_2_name}**. Same approach — write in THEIR authentic house
+style with their specific format conventions.
 
-- **Kirkus Reviews** — Direct, authoritative, wry. Can be acerbic. The "literary snob"
-  that values narrative craft above all. Punchy closing verdict sentence. Professional
-  skepticism even when praising. 250-350 words. Typical: "atmospheric and ambitious,
-  but uneven", "a masterful blend of suspense and literary style", "earnest, but
-  ultimately exhausting."
+The two review outlets for this jacket have already been selected by weighted
+tier-specific sampling. Do not substitute a different publication.
 
-- **Library Journal** — Written FOR librarians making purchase decisions. Practical,
-  utilitarian tone. Ends with a one-line "VERDICT:" that is a direct acquisition
-  recommendation with audience/collection context. Typical: "Highly recommended for
-  public libraries", "A solid choice where demand exists", "Essential for university
-  libraries supporting programs in..."
-
-- **BookLife (by Publishers Weekly)** — Indie/niche specialist. Three paragraphs:
-  summary → critique → audience/comp titles. Ends with a one-sentence "Takeaway:" and
-  letter grades for production elements (Cover, Editing, etc. on A+ to C scale).
-  Warmer and more encouraging than main PW, but still professional.
-
-- **Choice (ACRL)** — Scholarly, concise (190-250 words), aimed at academic librarians.
-  Situates the book within its discipline. Ends with "Summing Up:" followed by a level
-  recommendation and audience (e.g., "Essential. Upper-division undergraduates through
-  faculty."). Diplomatic even when critical. Typical: "fills a significant gap in the
-  literature", "the author makes a significant contribution to..."
+{review_instructions}
 
 Format:
 **[Publication Name]**
 [Full review in their authentic house style, including their specific closing format
 (Verdict/Takeaway/Summing Up as appropriate)]
-
-## Review 2
-Pick a second- or third-most appropriate publication from the roster above. Same approach — write in THEIR
-authentic house style with their specific format conventions.
 
 ---
 
@@ -249,12 +241,189 @@ The subtitle is:
 _TONE_TO_TIER: dict[str, str] = {TONE_HIGH: "pop", TONE_MEDIUM: "mainstream", TONE_LOW: "niche"}
 _TIER_TO_TONE: dict[str, str] = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
 
+REVIEW_OUTLET_WEIGHTS: dict[str, dict[str, int]] = {
+    "pop": {
+        "Publishers Weekly": 55,
+        "Kirkus Reviews": 30,
+        "Library Journal": 15,
+    },
+    "mainstream": {
+        "Publishers Weekly": 40,
+        "Kirkus Reviews": 35,
+        "Library Journal": 25,
+    },
+    "niche": {
+        "Choice (ACRL)": 30,
+        "BookLife (by Publishers Weekly)": 25,
+        "Library Journal": 25,
+        "Kirkus Reviews": 20,
+    },
+}
+
+BLURB_SOURCE_WEIGHTS: dict[str, dict[str, int]] = {
+    "pop": {
+        "Celebrity or pop public intellectual": 40,
+        "Bestselling trade author": 35,
+        "Journalist or critic": 20,
+        "Institution or publication": 5,
+    },
+    "mainstream": {
+        "Bestselling trade author": 40,
+        "Journalist or critic": 30,
+        "Celebrity or pop public intellectual": 15,
+        "Institution or publication": 10,
+        "Domain expert or academic": 5,
+    },
+    "niche": {
+        "Domain expert or academic": 45,
+        "Bestselling trade author": 20,
+        "Journalist or critic": 20,
+        "Institution or publication": 15,
+    },
+}
+
+BACK_COVER_GUIDANCE: dict[str, str] = {
+    "pop": (
+        "POP back-cover style: 120-180 words, third person, present tense, 3 short "
+        "paragraphs. Open with a punchy one-sentence hook: question, shock, trope, danger, "
+        "wish fulfillment, or binary stakes. Then introduce the central person, problem, "
+        "conflict, or nonfiction promise in plain, vivid language. Escalate to a "
+        "cliffhanger or transformation promise without spoilers; add one concrete detail "
+        "and one broad comp/category signal when useful. Avoid plot summary, abstract "
+        "themes, specialist terminology, old/obscure comps, and book-report tone."
+    ),
+    "mainstream": (
+        "MAINSTREAM back-cover style: 180-280 words, third person, present tense, 2-3 "
+        "polished paragraphs. Open with an elegant premise, dilemma, image, historical "
+        "moment, relationship, or moral question. Give concrete details about setting, "
+        "inciting situation, conflict, or argument, then widen into resonance: family, "
+        "identity, ambition, justice, memory, grief, discovery, or belonging. Promise "
+        "emotional involvement plus intellectual reward. Avoid cheap hype, vague "
+        "'unforgettable journey' language, overplotting, spoilers past the inciting "
+        "incident, and more than two comps."
+    ),
+    "niche": (
+        "NICHE back-cover style: 200-320 words, third person, present tense, precise and "
+        "authoritative rather than hard-selling. Open by naming the exact subject, problem, "
+        "debate, method, trope, field, or community. Explain the contribution: new evidence, "
+        "fresh argument, practical expertise, rare access, specialized worldbuilding, or a "
+        "distinctive angle. For scholarly/professional books, include field context, method "
+        "or evidence (archives, fieldwork, datasets, case studies), significance, audience, "
+        "and a one-sentence author credential. Avoid bestseller hype, vague generalities, "
+        "unsupported 'groundbreaking' claims, decorative jargon, and universal-audience claims."
+    ),
+}
+
+REVIEW_OUTLET_SPECS: dict[str, str] = {
+    "Publishers Weekly": (
+        "Covers frontlist trade books with clear bookstore distribution: commercial and "
+        "literary fiction, narrative nonfiction, memoir, lifestyle, comics, religion, and "
+        "children's/YA. Voice: unsigned, third-person, polished, crisp, and balanced; "
+        "150-200 words; open with premise, assess craft and market appeal, avoid spoilers, "
+        "and close with an implied recommendation or comp-audience note."
+    ),
+    "Kirkus Reviews": (
+        "Covers broad trade publishing and some indie titles, with emphasis on narrative "
+        "craft. Voice: brisk, authoritative, candid, and sometimes acerbic; 250-350 words; "
+        "interleave summary and critique, maintain professional skepticism, and end with a "
+        "punchy verdict sentence."
+    ),
+    "Library Journal": (
+        "Covers adult books through the lens of public and academic library collection "
+        "development. Voice: practical, librarian-facing, utilitarian, and acquisition-minded; "
+        "150-250 words; include audience, readalikes or collection context, and end with a "
+        "one-line VERDICT: purchase recommendation."
+    ),
+    "BookLife (by Publishers Weekly)": (
+        "Covers indie, self-published, and small-press books rather than mainstream trade "
+        "frontlist. Voice: PW-adjacent, professional, warmer, and indie-market aware; "
+        "200-300 words in three movements: summary, critique, and audience/comp titles; "
+        "end with Takeaway: plus production-style letter grades."
+    ),
+    "Choice (ACRL)": (
+        "Covers scholarly monographs, academic crossover nonfiction, and reference works for "
+        "college and research libraries. Voice: concise, objective, disciplinary, and "
+        "diplomatic; 190-250 words; situate the work in its field and end with Summing Up: "
+        "plus a recommendation level and academic audience."
+    ),
+}
+
+BLURB_SOURCE_SPECS: dict[str, str] = {
+    "Celebrity or pop public intellectual": (
+        "Find a famous, culturally fluent person with mass-audience credibility for the "
+        "book's subject. The blurb should be punchy, quotable, and emotionally immediate."
+    ),
+    "Bestselling trade author": (
+        "Find a bestselling author in an adjacent trade category or genre. The blurb should "
+        "sound like jacket copy from a peer author and foreground narrative appeal."
+    ),
+    "Journalist or critic": (
+        "Find a journalist, critic, essayist, or magazine writer who covers the book's "
+        "themes. The blurb should be observant, stylish, and culturally specific."
+    ),
+    "Institution or publication": (
+        "Find a real publication, association, book club, or institution aligned with the "
+        "subject. Write the blurb as a concise review pull quote attributed to that outlet."
+    ),
+    "Domain expert or academic": (
+        "Find a scholar, scientist, policy expert, historian, or other titled domain expert. "
+        "The blurb should stress authority, contribution, and field-level significance."
+    ),
+}
+
+
+def _weighted_sample_without_replacement(
+    weights_by_name: dict[str, int],
+    count: int,
+    rng: random.Random | None = None,
+) -> list[str]:
+    """Sample unique keys according to integer percentage weights."""
+    names = list(weights_by_name)
+    weights = [weights_by_name[name] for name in names]
+    chosen: list[str] = []
+    chooser = rng.choices if rng is not None else random.choices
+
+    for _ in range(min(count, len(names))):
+        pick = chooser(names, weights=weights, k=1)[0]
+        idx = names.index(pick)
+        chosen.append(pick)
+        names.pop(idx)
+        weights.pop(idx)
+    return chosen
+
+
+def _select_review_outlets(tone_tier: str, rng: random.Random | None = None) -> list[str]:
+    """Select exactly two review outlets for a tone tier."""
+    weights = REVIEW_OUTLET_WEIGHTS.get(tone_tier, REVIEW_OUTLET_WEIGHTS["mainstream"])
+    return _weighted_sample_without_replacement(weights, 2, rng)
+
+
+def _select_blurb_source_types(tone_tier: str, rng: random.Random | None = None) -> list[str]:
+    """Select exactly two endorsement-source types for a tone tier."""
+    weights = BLURB_SOURCE_WEIGHTS.get(tone_tier, BLURB_SOURCE_WEIGHTS["mainstream"])
+    return _weighted_sample_without_replacement(weights, 2, rng)
+
+
+def _format_review_instructions(review_outlets: list[str]) -> str:
+    lines = ["Selected review outlets:"]
+    for i, outlet in enumerate(review_outlets, start=1):
+        lines.append(f"{i}. **{outlet}** — {REVIEW_OUTLET_SPECS[outlet]}")
+    return "\n".join(lines)
+
+
+def _format_blurb_instructions(source_types: list[str]) -> str:
+    lines = ["Selected blurb source types:"]
+    for i, source_type in enumerate(source_types, start=1):
+        lines.append(f"{i}. **{source_type}** — {BLURB_SOURCE_SPECS[source_type]}")
+    return "\n".join(lines)
+
 
 def build_jacket_prompt(
     subtitle: str,
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    rng: random.Random | None = None,
 ) -> tuple[str, str, str]:
     """Construct the jacket generation prompts without calling the LLM.
 
@@ -270,7 +439,18 @@ def build_jacket_prompt(
         _, score = compute_accessibility(subtitle, conn)
         tone_tier, tone = sample_tone(score, allowed_tiers, conn)
 
-    full_prompt = JACKET_PROMPT.format(subtitle=subtitle, tone=tone)
+    review_outlets = _select_review_outlets(tone_tier, rng)
+    blurb_source_types = _select_blurb_source_types(tone_tier, rng)
+
+    full_prompt = JACKET_PROMPT.format(
+        subtitle=subtitle,
+        tone=tone,
+        back_cover_guidance=BACK_COVER_GUIDANCE[tone_tier],
+        blurb_instructions=_format_blurb_instructions(blurb_source_types),
+        review_1_name=review_outlets[0],
+        review_2_name=review_outlets[1],
+        review_instructions=_format_review_instructions(review_outlets),
+    )
 
     # Split at the --- separator into system (instructions) and user (subtitle) parts
     sep = "\n\n---\n\n"
