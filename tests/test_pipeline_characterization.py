@@ -117,6 +117,8 @@ def make_runtime_db(path: Path | None = None) -> sqlite3.Connection:
             centroid_dot REAL,
             norm_sq REAL,
             popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
             UNIQUE(slot_type, filler)
         )
         """
@@ -134,8 +136,11 @@ def make_runtime_db(path: Path | None = None) -> sqlite3.Connection:
     ]
     conn.executemany(
         """
-        INSERT INTO slot_fillers (slot_type, filler, freq, popularity_score)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO slot_fillers (
+            slot_type, filler, freq, popularity_score,
+            popularity_level, popularity_confidence
+        )
+        VALUES (?, ?, ?, ?, 1, 1.0)
         """,
         rows,
     )
@@ -342,6 +347,27 @@ def test_schema_contract_validator_reports_stage_context(tmp_path):
         assert "popularity_data" in str(exc)
     else:
         raise AssertionError("partial schema should not validate")
+
+
+def test_ensure_slot_tables_creates_current_popularity_evidence_columns():
+    from subtitle_generator.slots import ensure_slot_tables
+
+    conn = sqlite3.connect(":memory:")
+
+    ensure_slot_tables(conn)
+
+    assert _columns(conn, "slot_fillers") >= {
+        "popularity_score", "popularity_level", "popularity_confidence",
+    }
+    defaults = conn.execute(
+        """
+        SELECT dflt_value
+        FROM pragma_table_info('slot_fillers')
+        WHERE name IN ('popularity_level', 'popularity_confidence')
+        ORDER BY name
+        """
+    ).fetchall()
+    assert defaults == [("0.0",), ("0",)]
 
 
 def test_current_model_ids_and_tunable_defaults_are_characterized():
@@ -878,5 +904,9 @@ def test_pipeline_validation_reports_readiness_failures_without_generation():
     assert not report.ok
     assert any("missing required table 'subtitles'" in message for message in messages)
     assert any("missing required config key 'embedding_version'" in message for message in messages)
+    assert any(
+        "missing columns: popularity_confidence, popularity_level" in message
+        for message in messages
+    )
     assert any("strict slot fillers lack popularity_score" in message for message in messages)
     assert any("no strict 'action_noun' candidates" in message for message in messages)

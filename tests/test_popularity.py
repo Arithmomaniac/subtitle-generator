@@ -32,6 +32,8 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
             norm_sq REAL,
             token_count INTEGER,
             popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
             UNIQUE(slot_type, filler)
         )
     """)
@@ -52,9 +54,11 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
             ps = pop_scores[filler]
         for slot_type in ("list_item", "action_noun", "of_object"):
             conn.execute(
-                "INSERT INTO slot_fillers (slot_type, filler, mode, freq, popularity_score) "
-                "VALUES (?, ?, 'strict', ?, ?)",
-                (slot_type, filler, freq, ps),
+                "INSERT INTO slot_fillers ("
+                "slot_type, filler, mode, freq, popularity_score, "
+                "popularity_level, popularity_confidence"
+                ") VALUES (?, ?, 'strict', ?, ?, ?, ?)",
+                (slot_type, filler, freq, ps, 1 if ps is not None else 0, 1.0 if ps is not None else 0.0),
             )
     conn.commit()
     return conn
@@ -166,11 +170,12 @@ def test_half_blend():
 
 
 def test_export_import_roundtrip():
-    """popularity_score survives export → CSV → import cycle."""
+    """Popularity evidence survives export -> CSV -> import cycle."""
     import csv
     import tempfile
 
     from subtitle_generator.export_db import export_data, build_mini_db
+    from subtitle_generator.schema_contracts import MINI_DB_SCHEMA_CONTRACTS, validate_schema
 
     conn = _make_test_db()
     # export_data joins on subtitles table for sources — create a minimal one
@@ -192,12 +197,18 @@ def test_export_import_roundtrip():
         stats = export_data(conn, tmp_path)
         assert stats["slot_fillers.csv"] > 0
 
-        # Verify CSV has popularity_score column
+        # Verify CSV has popularity evidence columns
         with open(tmp_path / "slot_fillers.csv", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             first_row = next(reader)
             assert "popularity_score" in first_row, (
                 f"Missing popularity_score column. Headers: {list(first_row.keys())}"
+            )
+            assert "popularity_level" in first_row, (
+                f"Missing popularity_level column. Headers: {list(first_row.keys())}"
+            )
+            assert "popularity_confidence" in first_row, (
+                f"Missing popularity_confidence column. Headers: {list(first_row.keys())}"
             )
             assert first_row["popularity_score"] != "", (
                 "popularity_score should not be empty for Race"
@@ -210,12 +221,19 @@ def test_export_import_roundtrip():
         # Verify imported data
         mini = sqlite3.connect(str(mini_path))
         row = mini.execute(
-            "SELECT popularity_score FROM slot_fillers WHERE filler = 'Race' LIMIT 1"
+            """
+            SELECT popularity_score, popularity_level, popularity_confidence
+            FROM slot_fillers WHERE filler = 'Race' LIMIT 1
+            """
         ).fetchone()
         assert row is not None and row[0] is not None, "popularity_score lost in import"
         assert abs(row[0] - 1.8) < 0.01, f"Expected ~1.8, got {row[0]}"
+        assert row[1:] == (1, 1.0)
         columns = {r[1] for r in mini.execute("PRAGMA table_info(slot_fillers)")}
         assert "vector_sum" in columns, "mini DB must preserve the remix runtime schema"
+        assert "popularity_level" in columns
+        assert "popularity_confidence" in columns
+        assert validate_schema(mini, MINI_DB_SCHEMA_CONTRACTS) == []
         mini.close()
 
     print("  PASS: export_import_roundtrip")

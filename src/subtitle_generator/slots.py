@@ -418,6 +418,9 @@ def ensure_slot_tables(conn: sqlite3.Connection):
             freq INTEGER NOT NULL DEFAULT 1,
             pos_tag TEXT,
             prep TEXT,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 0,
+            popularity_confidence REAL DEFAULT 0.0,
             UNIQUE(slot_type, filler)
         )
     """)
