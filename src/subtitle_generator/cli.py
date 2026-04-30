@@ -15,14 +15,16 @@ from subtitle_generator.extract_openlibrary import (
     ensure_isbn_column,
     extract_from_ol_dump,
 )
+from subtitle_generator.config import get_tone_targets
 from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
-from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, precompute_remix_data, slot_stats
+from subtitle_generator.generate import format_sources, generate_subtitle, precompute_remix_data, slot_stats
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
-    compute_accessibility, generate_jacket,
+    generate_jacket,
 )
 from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
 from subtitle_generator.slots import build_slots, ensure_slot_tables
+from subtitle_generator.tiering import compute_tier_evidence
 
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
@@ -32,14 +34,8 @@ _TONE_OVERRIDE_MAP = {"p": "pop", "m": "mainstream", "n": "niche"}
 
 def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
     """Compute system tone tier and score for a subtitle."""
-    from subtitle_generator.config import load_tuning_config
-    _, score = compute_accessibility(subtitle, conn)
-    cfg = load_tuning_config(conn)
-    if score > cfg["accessibility_threshold_pop"]:
-        return "pop", score
-    elif score >= cfg["accessibility_threshold_mainstream"]:
-        return "mainstream", score
-    return "niche", score
+    evidence = compute_tier_evidence(subtitle, conn)
+    return evidence.tier, evidence.accessibility_score
 
 
 _TAG_MAP = {
@@ -389,9 +385,10 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     # Compute per-slot tone targets (average across requested tiers)
     tone_target = None
     if tone_set:
+        targets = get_tone_targets(conn)
         merged = {}
         for slot in ["list_item", "action_noun", "of_object"]:
-            merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
+            merged[slot] = sum(targets[t][slot] for t in tone_set) / len(tone_set)
         tone_target = merged
 
     reviewed_count = 0
@@ -462,9 +459,10 @@ def review(count: int, tone: str | None):
 
     tone_target = None
     if tone_set:
+        targets = get_tone_targets(conn)
         merged = {}
         for slot in ["list_item", "action_noun", "of_object"]:
-            merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
+            merged[slot] = sum(targets[t][slot] for t in tone_set) / len(tone_set)
         tone_target = merged
 
     click.echo(f"Review session: {count} subtitles" + (f" (tone: {tone})" if tone else ""))
@@ -1111,6 +1109,23 @@ def validate_pipeline_cmd(db_path: Path, embedding_version: str):
     click.echo(format_validation_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)
+
+
+@cli.command("tier-diagnostic")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to inspect.")
+def tier_diagnostic_cmd(db_path: Path):
+    """Report real-title pop/mainstream/niche fixture classification."""
+
+    from subtitle_generator.tier_diagnostics import format_real_title_tier_report
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        click.echo(format_real_title_tier_report(conn))
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

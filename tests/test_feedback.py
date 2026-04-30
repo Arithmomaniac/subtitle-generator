@@ -29,7 +29,7 @@ def make_test_db() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     # Config table (needed by load_tuning_config)
     conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
-    # Slot fillers (needed by compute_accessibility via _lookup_freq)
+    # Slot fillers (needed by tier evidence classification)
     conn.execute("""
         CREATE TABLE slot_fillers (
             filler TEXT, slot_type TEXT, freq INTEGER,
@@ -230,16 +230,8 @@ def test_robot_grader_batch():
 
     for sub in subtitles:
         # Compute system tone
-        from subtitle_generator.jacket import compute_accessibility
-        _, score = compute_accessibility(sub, conn)
-        from subtitle_generator.config import load_tuning_config
-        cfg = load_tuning_config(conn)
-        if score > cfg["accessibility_threshold_pop"]:
-            sys_tone = "pop"
-        elif score >= cfg["accessibility_threshold_mainstream"]:
-            sys_tone = "mainstream"
-        else:
-            sys_tone = "niche"
+        from subtitle_generator.tiering import compute_tier_evidence
+        sys_tone = compute_tier_evidence(sub, conn).tier
         system_tones.append(sys_tone)
 
         # Robot grader decides

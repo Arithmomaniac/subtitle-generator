@@ -68,6 +68,15 @@ class TierThresholdParameters:
 
 
 @dataclass(frozen=True)
+class TierClassifierParameters:
+    pop_min_demand_confidence: float
+    pop_min_lower_tail: float
+    pop_min_accessibility_margin: float
+    mainstream_demand_relief: float
+    source_label_weight: float
+
+
+@dataclass(frozen=True)
 class ToneTargets:
     pop: dict[str, float]
     mainstream: dict[str, float]
@@ -163,6 +172,19 @@ def get_tier_threshold_parameters(
         center_niche=cfg["tier_center_niche"],
         accessibility_pop=cfg["accessibility_threshold_pop"],
         accessibility_mainstream=cfg["accessibility_threshold_mainstream"],
+    )
+
+
+def get_tier_classifier_parameters(
+    conn: sqlite3.Connection | None = None,
+) -> TierClassifierParameters:
+    cfg = _cfg(conn)
+    return TierClassifierParameters(
+        pop_min_demand_confidence=cfg["tier_pop_min_demand_confidence"],
+        pop_min_lower_tail=cfg["tier_pop_min_lower_tail"],
+        pop_min_accessibility_margin=cfg["tier_pop_min_accessibility_margin"],
+        mainstream_demand_relief=cfg["tier_mainstream_demand_relief"],
+        source_label_weight=cfg["tier_source_label_weight"],
     )
 
 

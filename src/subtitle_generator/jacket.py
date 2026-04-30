@@ -11,6 +11,7 @@ import click
 
 from subtitle_generator.config import load_tuning_config
 from subtitle_generator.parameter_state import DEFAULT_JACKET_MODEL
+from subtitle_generator.tiering import TierEvidence, compute_tier_evidence, parse_subtitle_slots
 
 try:
     from copilot import CopilotClient
@@ -35,11 +36,6 @@ INLINE_BLURB_RE = re.compile(
 )
 
 # --- Accessibility scoring & tone tiers ---
-
-_SUBTITLE_RE = re.compile(
-    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+the\s+(?P<action>.+?)\s+of\s+(?P<object>.+)$",
-    re.IGNORECASE,
-)
 
 TONE_HIGH = """\
 BOOK TYPE: POP / mass-market commercial.
@@ -74,14 +70,7 @@ books in the same series or subfield. The hook is authority and contribution."""
 
 def _parse_subtitle_fillers(subtitle: str) -> list[str]:
     """Extract the slot fillers from a subtitle string."""
-    m = _SUBTITLE_RE.match(subtitle)
-    if not m:
-        return []
-    list_part = m.group("list_part")
-    action = m.group("action").strip()
-    obj = re.sub(r"[\s]*[/:;,.]\s*$", "", m.group("object")).strip()
-    items = [item.strip() for item in list_part.split(",") if item.strip()]
-    return items + [action, obj]
+    return [slot.filler for slot in parse_subtitle_slots(subtitle)]
 
 
 def _lookup_freq(conn: sqlite3.Connection, filler: str) -> tuple[int, float | None]:
@@ -96,42 +85,15 @@ def _lookup_freq(conn: sqlite3.Connection, filler: str) -> tuple[int, float | No
 
 
 def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None) -> tuple[str, float]:
-    """Compute an accessibility tier for a subtitle based on filler scores.
+    """Compute the jacket tone and accessibility score for a subtitle.
 
-    Returns (tone_text, score) where score is a blend of mean(log10(1+freq))
-    and mean(popularity_score) per pop_tone_blend config.
+    Returns ``(tone_text, score)`` for compatibility with older callers. The
+    score is still the mean blended accessibility score, while the tone now
+    comes from the evidence-aware tier classifier. Do not infer a tier from the
+    returned score; use ``compute_tier_evidence`` when the tier decision matters.
     """
-    fillers = _parse_subtitle_fillers(subtitle)
-    if not fillers or conn is None:
-        return TONE_MEDIUM, 0.0
-
-    cfg = load_tuning_config(conn)
-    blend_tone = cfg.get("pop_classification_blend", 0.9)
-    pop_default = cfg.get("pop_missing_default", 0.1)
-
-    filler_data = [_lookup_freq(conn, f) for f in fillers]
-    blended_scores = []
-    for freq, pop_score in filler_data:
-        score_freq = math.log10(1 + freq)
-        ps = pop_score if pop_score is not None else pop_default
-        blended_scores.append((1 - blend_tone) * score_freq + blend_tone * ps)
-    score = sum(blended_scores) / len(blended_scores)
-
-    pop_thresh = cfg["accessibility_threshold_pop"]
-    main_thresh = cfg["accessibility_threshold_mainstream"]
-
-    # Thresholds tuned to the distribution:
-    # score > pop_thresh → fillers avg freq ~10+ (pop staples like Race, Power, America)
-    # score main_thresh-pop_thresh → fillers avg freq ~2-10 (mainstream nonfiction)
-    # score < main_thresh → fillers avg freq ~1-2 (niche/academic)
-    if score > pop_thresh:
-        tone = TONE_HIGH
-    elif score >= main_thresh:
-        tone = TONE_MEDIUM
-    else:
-        tone = TONE_LOW
-
-    return tone, score
+    evidence = compute_tier_evidence(subtitle, conn)
+    return _TIER_TO_TONE[evidence.tier], evidence.accessibility_score
 
 
 
@@ -418,26 +380,38 @@ def _format_blurb_instructions(source_types: list[str]) -> str:
     return "\n".join(lines)
 
 
-def build_jacket_prompt(
+def _select_jacket_tone(
+    subtitle: str,
+    conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
+) -> tuple[str, str, TierEvidence, bool]:
+    evidence = compute_tier_evidence(subtitle, conn)
+    if tone_override:
+        tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
+        return tone_tier, tone_override, evidence, tone_tier != evidence.tier
+
+    if allowed_tiers and evidence.tier not in allowed_tiers:
+        tone_tier, tone = sample_tone(evidence.accessibility_score, allowed_tiers, conn)
+        return tone_tier, tone, evidence, True
+
+    tone_tier = evidence.tier
+    return tone_tier, _TIER_TO_TONE[tone_tier], evidence, False
+
+
+def _build_jacket_prompt_with_evidence(
     subtitle: str,
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
     rng: random.Random | None = None,
-) -> tuple[str, str, str]:
-    """Construct the jacket generation prompts without calling the LLM.
-
-    Returns (system_prompt, user_prompt, tone_tier) where:
-    - system_prompt contains role instructions, format requirements, and tone context
-    - user_prompt contains the subtitle framing
-    - tone_tier is "pop", "mainstream", or "niche"
-    """
-    if tone_override:
-        tone = tone_override
-        tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
-    else:
-        _, score = compute_accessibility(subtitle, conn)
-        tone_tier, tone = sample_tone(score, allowed_tiers, conn)
+) -> tuple[str, str, str, TierEvidence, bool]:
+    tone_tier, tone, evidence, forced_tier = _select_jacket_tone(
+        subtitle,
+        conn=conn,
+        tone_override=tone_override,
+        allowed_tiers=allowed_tiers,
+    )
 
     review_outlets = _select_review_outlets(tone_tier, rng)
     blurb_source_types = _select_blurb_source_types(tone_tier, rng)
@@ -461,6 +435,31 @@ def build_jacket_prompt(
     else:
         system_prompt = full_prompt
         user_prompt = subtitle
+
+    return system_prompt, user_prompt, tone_tier, evidence, forced_tier
+
+
+def build_jacket_prompt(
+    subtitle: str,
+    conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
+    rng: random.Random | None = None,
+) -> tuple[str, str, str]:
+    """Construct the jacket generation prompts without calling the LLM.
+
+    Returns (system_prompt, user_prompt, tone_tier) where:
+    - system_prompt contains role instructions, format requirements, and tone context
+    - user_prompt contains the subtitle framing
+    - tone_tier is "pop", "mainstream", or "niche"
+    """
+    system_prompt, user_prompt, tone_tier, _, _ = _build_jacket_prompt_with_evidence(
+        subtitle,
+        conn=conn,
+        tone_override=tone_override,
+        allowed_tiers=allowed_tiers,
+        rng=rng,
+    )
 
     return system_prompt, user_prompt, tone_tier
 
@@ -514,15 +513,21 @@ def _prepare_jacket_prompt(
     allowed_tiers: set[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, str, str]:
-    system_prompt, user_prompt, tone_tier = build_jacket_prompt(
+    system_prompt, user_prompt, tone_tier, evidence, forced_tier = _build_jacket_prompt_with_evidence(
         subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
     )
 
     if tone_override:
         _progress("Tone: override", on_progress)
     else:
-        _, score = compute_accessibility(subtitle, conn)
-        _progress(f"Tone: {tone_tier} (score: {score:.2f})", on_progress)
+        forced_note = f", forced from {evidence.tier}" if forced_tier else ""
+        _progress(
+            f"Tone: {tone_tier}{forced_note} "
+            f"(accessibility: {evidence.accessibility_score:.2f}, "
+            f"tail: {evidence.lower_tail_score:.2f}, "
+            f"demand: {evidence.demand_confidence:.2f})",
+            on_progress,
+        )
 
     return system_prompt, user_prompt, tone_tier
 

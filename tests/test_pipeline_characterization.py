@@ -13,6 +13,7 @@ import json
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -51,6 +52,11 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_tone_blend": 0.5,
     "pop_classification_blend": 0.9,
     "pop_missing_default": 0.1,
+    "tier_pop_min_demand_confidence": 0.25,
+    "tier_pop_min_lower_tail": 0.35,
+    "tier_pop_min_accessibility_margin": 0.35,
+    "tier_mainstream_demand_relief": 0.1,
+    "tier_source_label_weight": 0.25,
     "pop_slot_mult_list_item": 0.8,
     "pop_slot_mult_action_noun": 0.9,
     "pop_slot_mult_of_object": 1.0,
@@ -349,25 +355,48 @@ def test_schema_contract_validator_reports_stage_context(tmp_path):
         raise AssertionError("partial schema should not validate")
 
 
-def test_ensure_slot_tables_creates_current_popularity_evidence_columns():
+def test_ensure_slot_tables_migrates_legacy_popularity_evidence_conservatively():
     from subtitle_generator.slots import ensure_slot_tables
 
     conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1,
+            popularity_score REAL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO slot_fillers (slot_type, filler, mode, freq, popularity_score)
+        VALUES
+            ('list_item', 'money', 'strict', 10, 0.8),
+            ('list_item', 'fallback', 'strict', 1, NULL)
+        """
+    )
+    conn.commit()
 
     ensure_slot_tables(conn)
 
     assert _columns(conn, "slot_fillers") >= {
         "popularity_score", "popularity_level", "popularity_confidence",
     }
-    defaults = conn.execute(
+    rows = conn.execute(
         """
-        SELECT dflt_value
-        FROM pragma_table_info('slot_fillers')
-        WHERE name IN ('popularity_level', 'popularity_confidence')
-        ORDER BY name
+        SELECT filler, popularity_level, popularity_confidence
+        FROM slot_fillers
+        ORDER BY filler
         """
     ).fetchall()
-    assert defaults == [("0.0",), ("0",)]
+    assert rows == [
+        ("fallback", 0, 0.0),
+        ("money", 0, 0.0),
+    ]
 
 
 def test_current_model_ids_and_tunable_defaults_are_characterized():
@@ -391,6 +420,7 @@ def test_parameter_views_preserve_defaults_and_db_overrides():
         get_popularity_parameters,
         get_runtime_generation_parameters,
         get_slot_multiplier_parameters,
+        get_tier_classifier_parameters,
         get_tier_threshold_parameters,
         get_tone_targets,
     )
@@ -413,6 +443,7 @@ def test_parameter_views_preserve_defaults_and_db_overrides():
     assert runtime.popularity_blends == blends
     assert runtime.slot_multipliers.of_object == 1.4
     assert get_tier_threshold_parameters(conn).accessibility_pop == 0.6
+    assert get_tier_classifier_parameters(conn).pop_min_demand_confidence == 0.25
     assert get_tone_targets(conn).pop["list_item"] == 0.78
 
 
@@ -674,7 +705,13 @@ def test_jacket_generation_uses_prepared_prompt_once(monkeypatch):
 
     def fake_build_jacket_prompt(*args, **kwargs):
         calls.append((args, kwargs))
-        return "system prompt", "user prompt", "mainstream"
+        evidence = SimpleNamespace(
+            tier="mainstream",
+            accessibility_score=0.5,
+            lower_tail_score=0.4,
+            demand_confidence=1.0,
+        )
+        return "system prompt", "user prompt", "mainstream", evidence, False
 
     async def fake_generate(subtitle, system_prompt, user_prompt, **kwargs):
         captured.update({
@@ -684,7 +721,7 @@ def test_jacket_generation_uses_prepared_prompt_once(monkeypatch):
         })
         return "## Internal Concept\nhidden\n\n## Title\nVisible"
 
-    monkeypatch.setattr(jacket, "build_jacket_prompt", fake_build_jacket_prompt)
+    monkeypatch.setattr(jacket, "_build_jacket_prompt_with_evidence", fake_build_jacket_prompt)
     monkeypatch.setattr(jacket, "_generate_jacket_from_prompt_async", fake_generate)
 
     result = jacket.generate_jacket("Race, Power, and the Pursuit of Happiness")
@@ -860,7 +897,7 @@ def test_pipeline_validation_passes_for_minimal_ready_db(tmp_path):
             slot_type, filler, mode, freq, popularity_score,
             popularity_level, popularity_confidence
         )
-        VALUES (?, ?, 'strict', ?, ?, 'pop', 1.0)
+        VALUES (?, ?, 'strict', ?, ?, 1, 1.0)
         """,
         [
             ("list_item", "race", 10, 1.0),
@@ -904,9 +941,6 @@ def test_pipeline_validation_reports_readiness_failures_without_generation():
     assert not report.ok
     assert any("missing required table 'subtitles'" in message for message in messages)
     assert any("missing required config key 'embedding_version'" in message for message in messages)
-    assert any(
-        "missing columns: popularity_confidence, popularity_level" in message
-        for message in messages
-    )
+    assert any("missing columns: popularity_confidence, popularity_level" in message for message in messages)
     assert any("strict slot fillers lack popularity_score" in message for message in messages)
     assert any("no strict 'action_noun' candidates" in message for message in messages)

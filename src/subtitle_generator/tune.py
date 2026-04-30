@@ -30,6 +30,7 @@ from subtitle_generator.eval_harness import (
     structured_completion,
 )
 from subtitle_generator.feedback import store_rating
+from subtitle_generator.tier_diagnostics import score_real_title_tier_pop_guardrail
 from subtitle_generator.tuning_state import (
     ConfigChange,
     apply_config_change,
@@ -466,7 +467,8 @@ def _summarize_regime_state(results_file: str) -> dict:
         k for k in ALL_TUNABLE_PARAMS
         if k.startswith(("accessibility_threshold_", "tier_center_", "tone_target_"))
     }
-    available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED
+    METRIC_ONLY = {"tier_source_label_weight"}
+    available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED - METRIC_ONLY
     path = pathlib.Path(results_file)
     if not path.exists():
         return {
@@ -708,8 +710,34 @@ def _evaluate(
 
     separation = measure_tone_separation(conn, seed_base=seed_base + n_samples)
 
-    comp = composite_score(quality, separation, quality_weight=quality_weight)
+    label_guardrail, label_count = score_real_title_tier_pop_guardrail(conn)
+    label_weight = load_tuning_config(conn)["tier_source_label_weight"]
+    output_comp = composite_score(quality, separation, quality_weight=quality_weight)
+    comp = _blend_real_title_tier_guardrail(
+        output_comp, label_guardrail, label_count, label_weight
+    )
+    if label_count:
+        click.echo(
+            f"  source-title tier guardrail: {label_guardrail:.3f} "
+            f"(source_label_weight={label_weight:.2f}, labels={label_count})"
+        )
+    else:
+        click.echo(
+            "  source-title tier guardrail: no labels "
+            f"(source_label_weight={label_weight:.2f}, inactive)"
+        )
     return quality, separation, comp
+
+
+def _blend_real_title_tier_guardrail(
+    output_comp: float,
+    label_guardrail: float,
+    label_count: int,
+    label_weight: float,
+) -> float:
+    if label_count <= 0 or label_weight <= 0:
+        return output_comp
+    return (1.0 - label_weight) * output_comp + label_weight * label_guardrail
 
 
 # ---------------------------------------------------------------------------
@@ -1204,6 +1232,16 @@ scores — treat those results as unreliable.
                 results_file, i, proposal.param, 0, proposal.new_value,
                 quality, separation, current_score,
                 "skip", f"unknown param: {proposal.reasoning}",
+            )
+            continue
+        if proposal.param == "tier_source_label_weight":
+            click.echo(
+                "  ⚠ proposed metric-only param 'tier_source_label_weight' — skipping"
+            )
+            _append_result(
+                results_file, i, proposal.param, 0, proposal.new_value,
+                quality, separation, current_score,
+                "skip", f"metric-only param: {proposal.reasoning}",
             )
             continue
 

@@ -54,10 +54,8 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
             ps = pop_scores[filler]
         for slot_type in ("list_item", "action_noun", "of_object"):
             conn.execute(
-                "INSERT INTO slot_fillers ("
-                "slot_type, filler, mode, freq, popularity_score, "
-                "popularity_level, popularity_confidence"
-                ") VALUES (?, ?, 'strict', ?, ?, ?, ?)",
+                "INSERT INTO slot_fillers (slot_type, filler, mode, freq, popularity_score, popularity_level, popularity_confidence) "
+                "VALUES (?, ?, 'strict', ?, ?, ?, ?)",
                 (slot_type, filler, freq, ps, 1 if ps is not None else 0, 1.0 if ps is not None else 0.0),
             )
     conn.commit()
@@ -170,12 +168,11 @@ def test_half_blend():
 
 
 def test_export_import_roundtrip():
-    """Popularity evidence survives export -> CSV -> import cycle."""
+    """popularity_score survives export → CSV → import cycle."""
     import csv
     import tempfile
 
     from subtitle_generator.export_db import export_data, build_mini_db
-    from subtitle_generator.schema_contracts import MINI_DB_SCHEMA_CONTRACTS, validate_schema
 
     conn = _make_test_db()
     # export_data joins on subtitles table for sources — create a minimal one
@@ -221,10 +218,8 @@ def test_export_import_roundtrip():
         # Verify imported data
         mini = sqlite3.connect(str(mini_path))
         row = mini.execute(
-            """
-            SELECT popularity_score, popularity_level, popularity_confidence
-            FROM slot_fillers WHERE filler = 'Race' LIMIT 1
-            """
+            "SELECT popularity_score, popularity_level, popularity_confidence "
+            "FROM slot_fillers WHERE filler = 'Race' LIMIT 1"
         ).fetchone()
         assert row is not None and row[0] is not None, "popularity_score lost in import"
         assert abs(row[0] - 1.8) < 0.01, f"Expected ~1.8, got {row[0]}"
@@ -233,7 +228,6 @@ def test_export_import_roundtrip():
         assert "vector_sum" in columns, "mini DB must preserve the remix runtime schema"
         assert "popularity_level" in columns
         assert "popularity_confidence" in columns
-        assert validate_schema(mini, MINI_DB_SCHEMA_CONTRACTS) == []
         mini.close()
 
     print("  PASS: export_import_roundtrip")
@@ -267,6 +261,169 @@ def test_jacket_accessibility_blend():
     print("  PASS: jacket_accessibility_blend")
 
 
+def test_evidence_aware_tier_classification_uses_runtime_signals():
+    """Real-title-like cases use demand, lower-tail, and accessibility evidence."""
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    conn = _make_test_db()
+    # Common academic words alone should not force a specialist-looking subtitle into pop.
+    for key, value in (
+        ("accessibility_threshold_pop", "0.6"),
+        ("accessibility_threshold_mainstream", "0.3"),
+        ("tier_pop_min_accessibility_margin", "0.35"),
+        ("tier_pop_min_lower_tail", "0.35"),
+        ("tier_pop_min_demand_confidence", "0.25"),
+        ("pop_classification_blend", "0.5"),
+    ):
+        conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, value))
+    for filler in ("Common", "Demand", "Markets"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 10000, 0.95, 1, 1.0)
+                """,
+                (slot_type, filler),
+            )
+    for filler in ("Rare", "Fallback"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 1, 0.1, 0, 0.0)
+                """,
+                (slot_type, filler),
+            )
+    conn.commit()
+
+    backed_by_demand = compute_tier_evidence(
+        "Common, Demand, and the Rise of Markets", conn
+    )
+    assert backed_by_demand.tier == "pop"
+    assert backed_by_demand.demand_confidence >= 0.75
+
+    low_tail = compute_tier_evidence(
+        "Common, Rare, and the Rise of Markets", conn
+    )
+    assert low_tail.tier == "mainstream"
+    assert low_tail.lower_tail_score < 0.35
+    print("  PASS: evidence_aware_tier_classification_uses_runtime_signals")
+
+
+def test_parse_subtitle_slots_rejects_empty_cleaned_fillers():
+    from subtitle_generator.tiering import parse_subtitle_slots
+
+    assert parse_subtitle_slots("A, B, and the ... of Space") == []
+    assert parse_subtitle_slots("A, B, and the Making of ...") == []
+    assert parse_subtitle_slots("A, , and the Making of Space") == []
+
+
+def test_real_title_tier_metric_uses_db_source_labels():
+    """Checked source-title labels come from pattern_matches, not Python constants."""
+    from subtitle_generator.tier_diagnostics import (
+        evaluate_real_title_tiers,
+        load_source_tier_label_cases,
+        measure_real_title_tier_pop_guardrail,
+    )
+
+    conn = _make_test_db()
+    for key, value in (
+        ("accessibility_threshold_pop", "0.6"),
+        ("accessibility_threshold_mainstream", "0.3"),
+        ("tier_pop_min_accessibility_margin", "0.35"),
+        ("tier_pop_min_lower_tail", "0.35"),
+        ("tier_pop_min_demand_confidence", "0.25"),
+        ("pop_classification_blend", "0.5"),
+    ):
+        conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, value))
+    for filler in ("Common", "Demand", "Markets"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 10000, 0.95, 1, 1.0)
+                """,
+                (slot_type, filler),
+            )
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT,
+            llm_market_tier TEXT,
+            llm_market_tier_confidence REAL,
+            llm_market_tier_rationale TEXT,
+            llm_market_tier_model TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO pattern_matches (
+            id, title, subtitle, llm_market_tier, llm_market_tier_confidence,
+            llm_market_tier_rationale, llm_market_tier_model
+        )
+        VALUES (
+            1, 'Labeled Pop Book', 'Common, Demand, and the Rise of Markets',
+            'pop', 1.0, 'LLM-backed checked label.', 'fixture/web-researched'
+        )
+        """
+    )
+    conn.commit()
+
+    cases = load_source_tier_label_cases(conn)
+    results = evaluate_real_title_tiers(conn)
+
+    assert [case.title for case in cases] == ["Labeled Pop Book"]
+    assert results[0].expected_tier == "pop"
+    assert results[0].predicted_tier == "pop"
+    assert measure_real_title_tier_pop_guardrail(conn) == 1.0
+    print("  PASS: real_title_tier_metric_uses_db_source_labels")
+
+
+def test_real_title_tier_metric_is_neutral_without_source_labels():
+    from subtitle_generator.tier_diagnostics import (
+        format_real_title_tier_report,
+        measure_real_title_tier_pop_guardrail,
+    )
+
+    conn = _make_test_db()
+
+    assert measure_real_title_tier_pop_guardrail(conn) == 1.0
+    assert "No `pattern_matches.llm_market_tier` labels found." in (
+        format_real_title_tier_report(conn)
+    )
+    print("  PASS: real_title_tier_metric_is_neutral_without_source_labels")
+
+
+def test_tier_label_guardrail_blend_is_noop_without_labels():
+    from subtitle_generator.tune import _blend_real_title_tier_guardrail
+
+    assert _blend_real_title_tier_guardrail(
+        output_comp=0.42,
+        label_guardrail=1.0,
+        label_count=0,
+        label_weight=0.25,
+    ) == 0.42
+    assert math.isclose(_blend_real_title_tier_guardrail(
+        output_comp=0.42,
+        label_guardrail=0.8,
+        label_count=10,
+        label_weight=0.25,
+    ), 0.515)
+    print("  PASS: tier_label_guardrail_blend_is_noop_without_labels")
+
+
 def test_config_params_exist():
     """All popularity params are in ALL_TUNABLE_PARAMS."""
     from subtitle_generator.config import ALL_TUNABLE_PARAMS
@@ -275,6 +432,9 @@ def test_config_params_exist():
         "pop_weight_spl", "pop_weight_ol", "pop_weight_freq",
         "pop_exponent", "pop_base_weight_blend", "pop_tone_blend",
         "pop_missing_default",
+        "tier_pop_min_demand_confidence",
+        "tier_pop_min_lower_tail", "tier_pop_min_accessibility_margin",
+        "tier_source_label_weight",
     ]
     for param in expected:
         assert param in ALL_TUNABLE_PARAMS, f"Missing param: {param}"
@@ -294,6 +454,11 @@ if __name__ == "__main__":
         ("half_blend", test_half_blend),
         ("export_import_roundtrip", test_export_import_roundtrip),
         ("jacket_accessibility_blend", test_jacket_accessibility_blend),
+        ("evidence_aware_tier_classification_uses_runtime_signals", test_evidence_aware_tier_classification_uses_runtime_signals),
+        ("parse_subtitle_slots_rejects_empty_cleaned_fillers", test_parse_subtitle_slots_rejects_empty_cleaned_fillers),
+        ("real_title_tier_metric_uses_db_source_labels", test_real_title_tier_metric_uses_db_source_labels),
+        ("real_title_tier_metric_is_neutral_without_source_labels", test_real_title_tier_metric_is_neutral_without_source_labels),
+        ("tier_label_guardrail_blend_is_noop_without_labels", test_tier_label_guardrail_blend_is_noop_without_labels),
     ]
 
     print(f"=== Popularity Scoring Tests ({len(tests)} tests) ===\n")

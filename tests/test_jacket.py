@@ -16,6 +16,7 @@ from subtitle_generator.jacket import (  # noqa: E402
     JACKET_PROMPT,
     REVIEW_OUTLET_WEIGHTS,
     TONE_HIGH,
+    _prepare_jacket_prompt,
     _strip_internal_concept,
     _validate_jacket,
     build_jacket_prompt,
@@ -122,6 +123,20 @@ def test_prompt_preselects_reviews_and_blurb_sources():
     assert "Pick the most appropriate trade publication" not in system_prompt
     assert "BookLife (by Publishers Weekly)" not in system_prompt
     assert "Choice (ACRL)" not in system_prompt
+
+
+def test_prepare_prompt_logs_forced_tier_without_misleading_scores():
+    progress: list[str] = []
+
+    _, _, tone_tier = _prepare_jacket_prompt(
+        "Faith, Commerce, and the Making of Modern Appetite",
+        allowed_tiers={"pop"},
+        on_progress=progress.append,
+    )
+
+    assert tone_tier == "pop"
+    assert progress[-1].startswith("Tone: pop, forced from mainstream")
+    assert "accessibility:" in progress[-1]
 
 
 def test_validate_accepts_inline_back_cover_blurbs():
