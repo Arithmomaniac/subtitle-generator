@@ -18,6 +18,7 @@ RESPONSES_ONLY_MODELS = frozenset({"gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"})
 class SamplingParameters:
     weighted_sample_spread: float
     weighted_sample_bias_floor: float
+    default_generation_tone_target: float
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,7 @@ def get_sampling_parameters(conn: sqlite3.Connection | None = None) -> SamplingP
     return SamplingParameters(
         weighted_sample_spread=cfg["weighted_sample_spread"],
         weighted_sample_bias_floor=cfg["weighted_sample_bias_floor"],
+        default_generation_tone_target=cfg["default_generation_tone_target"],
     )
 
 

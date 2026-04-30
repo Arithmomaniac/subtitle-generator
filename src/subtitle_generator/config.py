@@ -6,8 +6,9 @@ from functools import lru_cache
 # All tunable parameters with their default values.
 # These are used as fallback when the DB config table has no tuned value.
 ALL_TUNABLE_PARAMS: dict[str, float] = {
-    "weighted_sample_spread": 0.4,
+    "weighted_sample_spread": 0.12,
     "weighted_sample_bias_floor": 0.05,
+    "default_generation_tone_target": 2.0,
     "tone_target_pop_list_item": 0.78,
     "tone_target_pop_action_noun": 0.78,
     "tone_target_pop_of_object": 0.78,

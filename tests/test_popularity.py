@@ -431,7 +431,7 @@ def test_config_params_exist():
     expected = [
         "pop_weight_spl", "pop_weight_ol", "pop_weight_freq",
         "pop_exponent", "pop_base_weight_blend", "pop_tone_blend",
-        "pop_missing_default",
+        "pop_missing_default", "default_generation_tone_target",
         "tier_pop_min_demand_confidence",
         "tier_pop_min_lower_tail", "tier_pop_min_accessibility_margin",
         "tier_source_label_weight",

@@ -395,7 +395,7 @@ def _parse_bounds(goals_text: str) -> dict[str, tuple[float, float]]:
     """Extract parameter bounds from the tuning_goals.md table.
 
     Matches rows like:
-      | `weighted_sample_spread` | 0.1 | 1.0 | 0.4 | ... |
+      | `weighted_sample_spread` | 0.1 | 1.0 | 0.12 | ... |
     Also handles wildcard rows like:
       | `tone_target_pop_*` | 0.5 | 2.5 | 1.0–1.5 | ... |
     """

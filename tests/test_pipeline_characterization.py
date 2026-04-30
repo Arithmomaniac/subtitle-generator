@@ -20,8 +20,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 EXPECTED_TUNABLE_PARAMS = {
-    "weighted_sample_spread": 0.4,
+    "weighted_sample_spread": 0.12,
     "weighted_sample_bias_floor": 0.05,
+    "default_generation_tone_target": 2.0,
     "tone_target_pop_list_item": 0.78,
     "tone_target_pop_action_noun": 0.78,
     "tone_target_pop_of_object": 0.78,
@@ -474,6 +475,18 @@ def test_seeded_generation_path_is_stable():
     assert generate_module._remix_ctx.precomputed is True
 
 
+def test_default_generation_uses_configured_tone_target():
+    from subtitle_generator.generate import _adjust_tone_targets
+
+    conn = make_runtime_db()
+
+    assert _adjust_tone_targets(conn, None) == {
+        "list_item": 1.6,
+        "action_noun": 1.8,
+        "of_object": 2.0,
+    }
+
+
 def test_remix_precompute_validator_checks_version_and_columns():
     import subtitle_generator.generate as generate_module
     from subtitle_generator.generate import generate_subtitle
@@ -800,7 +813,7 @@ def test_rating_config_snapshot_preserves_defaults_and_overrides():
 
     assert snapshot.keys() == EXPECTED_TUNABLE_PARAMS.keys()
     assert snapshot["pop_tone_blend"] == 0.25
-    assert snapshot["weighted_sample_spread"] == 0.4
+    assert snapshot["weighted_sample_spread"] == 0.12
     assert json.loads(row[1]) == ["interesting", "realistic"]
     assert row[2] == "characterization"
 

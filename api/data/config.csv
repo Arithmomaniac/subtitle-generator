@@ -1,9 +1,10 @@
 key,value
 weighted_sample_bias_floor,0.01
+default_generation_tone_target,2.0
 pop_tone_blend,0.5
 pop_slot_mult_list_item,0.8
 pop_base_weight_blend,0.5
-weighted_sample_spread,0.1
+weighted_sample_spread,0.12
 pop_classification_blend,0.5
 pop_exponent,1.3
 pop_weight_ol,0.1

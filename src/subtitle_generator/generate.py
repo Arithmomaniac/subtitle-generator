@@ -795,9 +795,16 @@ def _adjust_tone_targets(
     conn: sqlite3.Connection,
     tone_target: dict[str, float] | None,
 ) -> dict[str, float] | None:
-    if tone_target is None:
-        return None
     cfg = load_tuning_config(conn)
+    if tone_target is None:
+        default_target = cfg.get("default_generation_tone_target", 0.0)
+        if default_target <= 0:
+            return None
+        tone_target = {
+            "list_item": default_target,
+            "action_noun": default_target,
+            "of_object": default_target,
+        }
     return {
         "list_item": (
             tone_target.get("list_item") * cfg.get("pop_slot_mult_list_item", 1.0)
