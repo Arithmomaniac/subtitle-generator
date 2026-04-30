@@ -232,7 +232,7 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 
 ```
 src/subtitle_generator/
-  generate.py          # subtitle generation with remix + locked slots + article logic
+  generate.py          # subtitle generation with remix + article logic
   jacket.py            # jacket prompt construction + LLM execution
   slots.py             # slot extraction + decomposition + article stats
   source_validation.py # shared title/subtitle repair and source corruption checks

@@ -429,7 +429,7 @@ decisions remain server-side.
 
 ```mermaid
 flowchart TD
-    request[CLI or API request] --> parse[parse tone, locks, remix params]
+    request[CLI or API request] --> parse[parse tone and remix params]
     parse --> db[(SQLite)]
     db --> candidates[load strict slot candidates]
     db --> cfg[load config params]
@@ -449,13 +449,12 @@ flowchart TD
 `generate_subtitle()` is the stable runtime facade. Internally it:
 
 1. Creates a seeded RNG when a seed is supplied.
-2. Validates lock combinations.
-3. Loads strict candidates for list items, action nouns, and of-objects.
-4. Adjusts requested tone targets with per-slot multipliers.
-5. Samples two list items, one action noun, and one of-object.
-6. Optionally attempts of-object remixing.
-7. Restores action/of-object articles from corpus statistics and heuristics.
-8. Title-cases and returns a `GeneratedSubtitle`.
+2. Loads strict candidates for list items, action nouns, and of-objects.
+3. Adjusts requested tone targets with per-slot multipliers.
+4. Samples two list items, one action noun, and one of-object.
+5. Optionally attempts of-object remixing.
+6. Restores action/of-object articles from corpus statistics and heuristics.
+7. Title-cases and returns a `GeneratedSubtitle`.
 
 ### Sampling weights
 
@@ -489,22 +488,6 @@ $$
 
 "Pop" and "niche" do not select from separate hard-coded lists. They use the
 same candidate pools with different numeric targets.
-
-### Locks and runtime API surface
-
-Locks are a testing/UI affordance. Supported keys are:
-
-- `item1`
-- `item2`
-- `action_noun`
-- `of_object`
-- `of_modifier`
-- `of_head`
-- `of_topic`
-- `of_complement`
-
-The code rejects invalid mixes, such as combining an `of_object` lock with remix
-sub-part locks, or mixing Type 1 and Type 2 remix locks.
 
 ### Jacket generation
 

@@ -539,54 +539,44 @@ def compose_compound(
     tone_target: dict[str, float] | None,
     ctx: dict,
     word_count: int,
-    locked_modifier: str | None = None,
-    locked_head: str | None = None,
 ) -> tuple[str, dict] | None:
     """Compose a Type 1 remixed of-object (modifier + head).
 
     Returns (composed_text, parts_dict) or None if composition fails.
-    When locked_modifier or locked_head is provided, uses the locked value
-    instead of drawing from the pool.
     """
     mod_word_count = word_count - 1  # head is always 1 word
     mod_space_count = mod_word_count - 1
     mod_target = tone_target.get("of_object") if tone_target else None
 
-    if locked_modifier is not None:
-        modifier = locked_modifier
-    else:
-        # Get modifier POS distribution for this bucket
-        config_key = f"remix_mod_pos_{word_count}word"
-        mod_pos_weights = ctx["config"].get(config_key, {})
-        if not mod_pos_weights:
-            return None
+    # Get modifier POS distribution for this bucket
+    config_key = f"remix_mod_pos_{word_count}word"
+    mod_pos_weights = ctx["config"].get(config_key, {})
+    if not mod_pos_weights:
+        return None
 
-        # Sample a modifier POS tag
-        pos_tags = list(mod_pos_weights.keys())
-        pos_freqs = list(mod_pos_weights.values())
-        chosen_mod_pos = (rng or random).choices(pos_tags, weights=pos_freqs, k=1)[0]
+    # Sample a modifier POS tag
+    pos_tags = list(mod_pos_weights.keys())
+    pos_freqs = list(mod_pos_weights.values())
+    chosen_mod_pos = (rng or random).choices(pos_tags, weights=pos_freqs, k=1)[0]
 
-        # Draw modifier with matching POS and word count
-        mod_rows = conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers "
-            "WHERE slot_type = 'of_modifier' AND pos_tag = ? "
-            "AND length(filler) - length(replace(filler, ' ', '')) = ? AND mode = 'strict'",
-            (chosen_mod_pos, mod_space_count),
-        ).fetchall()
-        if not mod_rows:
-            return None
-        modifier = _weighted_sample(mod_rows, 1, rng, mod_target, conn)[0]
+    # Draw modifier with matching POS and word count
+    mod_rows = conn.execute(
+        "SELECT filler, freq, popularity_score FROM slot_fillers "
+        "WHERE slot_type = 'of_modifier' AND pos_tag = ? "
+        "AND length(filler) - length(replace(filler, ' ', '')) = ? AND mode = 'strict'",
+        (chosen_mod_pos, mod_space_count),
+    ).fetchall()
+    if not mod_rows:
+        return None
+    modifier = _weighted_sample(mod_rows, 1, rng, mod_target, conn)[0]
 
-    if locked_head is not None:
-        head = locked_head
-    else:
-        head_rows = conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers "
-            "WHERE slot_type = 'of_head' AND mode = 'strict'",
-        ).fetchall()
-        if not head_rows:
-            return None
-        head = _weighted_sample(head_rows, 1, rng, mod_target, conn)[0]
+    head_rows = conn.execute(
+        "SELECT filler, freq, popularity_score FROM slot_fillers "
+        "WHERE slot_type = 'of_head' AND mode = 'strict'",
+    ).fetchall()
+    if not head_rows:
+        return None
+    head = _weighted_sample(head_rows, 1, rng, mod_target, conn)[0]
 
     composed = f"{modifier} {head}"
     parts = {"modifier": modifier, "head": head}
@@ -600,46 +590,37 @@ def compose_prepositional(
     ctx: dict,
     prep: str,
     word_count: int,
-    locked_topic: str | None = None,
-    locked_complement: str | None = None,
 ) -> tuple[str, dict] | None:
     """Compose a Type 2 remixed of-object (topic + prep + complement).
 
     Returns (composed_text, parts_dict) or None if composition fails.
-    Enforces strict bucket word-count matching unless parts are locked.
+    Enforces strict bucket word-count matching.
     """
     obj_target = tone_target.get("of_object") if tone_target else None
 
-    if locked_topic is not None:
-        topic = locked_topic
-    else:
-        topic_rows = conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers "
-            "WHERE slot_type = 'of_topic' AND prep = ? AND mode = 'strict'",
-            (prep,),
-        ).fetchall()
-        if not topic_rows:
-            return None
-        topic = _weighted_sample(topic_rows, 1, rng, obj_target, conn)[0]
+    topic_rows = conn.execute(
+        "SELECT filler, freq, popularity_score FROM slot_fillers "
+        "WHERE slot_type = 'of_topic' AND prep = ? AND mode = 'strict'",
+        (prep,),
+    ).fetchall()
+    if not topic_rows:
+        return None
+    topic = _weighted_sample(topic_rows, 1, rng, obj_target, conn)[0]
 
-    if locked_complement is not None:
-        complement = locked_complement
-    else:
-        comp_rows = conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers "
-            "WHERE slot_type = 'of_complement' AND prep = ? AND mode = 'strict'",
-            (prep,),
-        ).fetchall()
-        if not comp_rows:
-            return None
-        complement = _weighted_sample(comp_rows, 1, rng, obj_target, conn)[0]
+    comp_rows = conn.execute(
+        "SELECT filler, freq, popularity_score FROM slot_fillers "
+        "WHERE slot_type = 'of_complement' AND prep = ? AND mode = 'strict'",
+        (prep,),
+    ).fetchall()
+    if not comp_rows:
+        return None
+    complement = _weighted_sample(comp_rows, 1, rng, obj_target, conn)[0]
 
     composed = f"{topic} {prep} {complement}"
 
-    # Strict bucket: verify word count matches (skip when parts are locked)
-    if locked_topic is None and locked_complement is None:
-        if len(composed.split()) != word_count:
-            return None
+    # Strict bucket: verify word count matches.
+    if len(composed.split()) != word_count:
+        return None
 
     parts = {"topic": topic, "prep": prep, "complement": complement}
     return composed, parts
@@ -742,20 +723,6 @@ def _make_rng(seed: int | None) -> random.Random | None:
     return random.Random(seed) if seed is not None else None
 
 
-def _validate_generation_locks(locks: dict[str, str] | None) -> None:
-    if not locks:
-        return
-    type1_keys = {"of_modifier", "of_head"}
-    type2_keys = {"of_topic", "of_complement"}
-    has_type1 = bool(type1_keys & locks.keys())
-    has_type2 = bool(type2_keys & locks.keys())
-    if has_type1 and has_type2:
-        raise ValueError("Cannot mix Type 1 (of_modifier/of_head) and Type 2 (of_topic/of_complement) locks")
-    sub_part_keys = type1_keys | type2_keys
-    if "of_object" in locks and (sub_part_keys & locks.keys()):
-        raise ValueError("Cannot combine of_object lock with sub-part locks")
-
-
 def _load_generation_candidates(conn: sqlite3.Connection) -> GenerationCandidates:
     return GenerationCandidates(
         list_rows=conn.execute(
@@ -772,15 +739,11 @@ def _load_generation_candidates(conn: sqlite3.Connection) -> GenerationCandidate
 
 def _has_enough_candidates(
     candidates: GenerationCandidates,
-    locks: dict[str, str] | None,
 ) -> bool:
-    list_needed = 2 - sum(1 for k in ("item1", "item2") if locks and k in locks)
-    action_needed = not (locks and "action_noun" in locks)
-    obj_needed = not (locks and "of_object" in locks)
     return (
-        len(candidates.list_rows) >= list_needed
-        and (not action_needed or bool(candidates.action_rows))
-        and (not obj_needed or bool(candidates.obj_rows))
+        len(candidates.list_rows) >= 2
+        and bool(candidates.action_rows)
+        and bool(candidates.obj_rows)
     )
 
 
@@ -826,20 +789,7 @@ def _pick_list_items(
     rng: random.Random | None,
     list_target: float | None,
     conn: sqlite3.Connection,
-    locks: dict[str, str] | None,
 ) -> list[str]:
-    if locks and "item1" in locks and "item2" in locks:
-        return [locks["item1"], locks["item2"]]
-    if locks and "item1" in locks:
-        pool = [(f, w) for f, w in list_rows if f != locks["item1"]]
-        if not pool:
-            pool = list_rows
-        return [locks["item1"], _weighted_sample(pool, 1, rng, list_target, conn)[0]]
-    if locks and "item2" in locks:
-        pool = [(f, w) for f, w in list_rows if f != locks["item2"]]
-        if not pool:
-            pool = list_rows
-        return [_weighted_sample(pool, 1, rng, list_target, conn)[0], locks["item2"]]
     return _weighted_sample(list_rows, 2, rng, list_target, conn)
 
 
@@ -848,10 +798,7 @@ def _pick_action_noun(
     rng: random.Random | None,
     action_target: float | None,
     conn: sqlite3.Connection,
-    locks: dict[str, str] | None,
 ) -> str:
-    if locks and "action_noun" in locks:
-        return locks["action_noun"]
     return _weighted_sample(action_rows, 1, rng, action_target, conn)[0]
 
 
@@ -862,27 +809,15 @@ def _pick_of_object_and_remix(
     adjusted_tone_target: dict[str, float] | None,
     remix_prob: float,
     min_sim: float,
-    locks: dict[str, str] | None,
 ) -> tuple[str, bool, dict, float | None]:
     obj_target = adjusted_tone_target.get("of_object") if adjusted_tone_target else None
     remix_similarity = None
-    if locks and "of_object" in locks:
-        return locks["of_object"], False, {}, remix_similarity
 
     of_object = _weighted_sample(obj_rows, 1, rng, obj_target, conn)[0]
     remixed = False
     remix_parts = {}
 
-    sub_part_keys = {"of_modifier", "of_head", "of_topic", "of_complement"}
-    sub_locks = {k: v for k, v in (locks or {}).items() if k in sub_part_keys}
-
-    if sub_locks:
-        result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim,
-                            locked_parts=sub_locks)
-        if result:
-            of_object, remix_parts, remix_similarity = result
-            remixed = True
-    elif remix_prob > 0 and len(of_object.split()) >= 2:
+    if remix_prob > 0 and len(of_object.split()) >= 2:
         should_remix = (rng or random).random() < remix_prob
         if should_remix:
             result = _try_remix(conn, rng, adjusted_tone_target, of_object, min_sim)
@@ -900,14 +835,13 @@ def _select_subtitle_parts(
     adjusted_tone_target: dict[str, float] | None,
     remix_prob: float,
     min_sim: float,
-    locks: dict[str, str] | None,
 ) -> SelectedSubtitleParts:
     list_target = adjusted_tone_target.get("list_item") if adjusted_tone_target else None
     action_target = adjusted_tone_target.get("action_noun") if adjusted_tone_target else None
-    items = _pick_list_items(candidates.list_rows, rng, list_target, conn, locks)
-    action_noun = _pick_action_noun(candidates.action_rows, rng, action_target, conn, locks)
+    items = _pick_list_items(candidates.list_rows, rng, list_target, conn)
+    action_noun = _pick_action_noun(candidates.action_rows, rng, action_target, conn)
     of_object, remixed, remix_parts, remix_similarity = _pick_of_object_and_remix(
-        conn, candidates.obj_rows, rng, adjusted_tone_target, remix_prob, min_sim, locks,
+        conn, candidates.obj_rows, rng, adjusted_tone_target, remix_prob, min_sim,
     )
     return SelectedSubtitleParts(
         items=items,
@@ -986,22 +920,17 @@ def generate_subtitle(
     conn: sqlite3.Connection, seed: int | None = None,
     tone_target: dict[str, float] | None = None,
     remix_prob: float = 0.0, min_sim: float = 0.0,
-    locks: dict[str, str] | None = None,
 ) -> GeneratedSubtitle:
     """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
 
     tone_target maps slot_type → log10 target score for filler biasing.
     remix_prob: probability of remixing a multi-word of-object (0.0 = never, 1.0 = always).
     min_sim: minimum cosine similarity for embedding coherence filter.
-    locks: optional dict mapping slot keys to locked values.
-        Supported keys: item1, item2, action_noun, of_object,
-        of_modifier, of_head, of_topic, of_complement.
     """
     rng = _make_rng(seed)
-    _validate_generation_locks(locks)
 
     candidates = _load_generation_candidates(conn)
-    if not _has_enough_candidates(candidates, locks):
+    if not _has_enough_candidates(candidates):
         return _not_enough_fillers_subtitle()
 
     adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
@@ -1012,7 +941,6 @@ def generate_subtitle(
         adjusted_tone_target,
         remix_prob,
         min_sim,
-        locks,
     )
     action_article, of_article = _resolve_articles(
         conn,
@@ -1031,52 +959,16 @@ def _try_remix(
     original_of_object: str,
     min_sim: float,
     max_retries: int = 5,
-    locked_parts: dict[str, str] | None = None,
 ) -> tuple[str, dict, float | None] | None:
     """Attempt to remix an of-object.
 
     Returns (composed_text, parts_dict, similarity_score) or None.
-    When locked_parts is provided, locked values are passed through to
-    compose functions and coherence-filter behavior is adjusted.
 
     Supports both pre-computed scalar decomposition (precomputed=True) and
     live spaCy (precomputed=False, dev fallback).
     """
     ctx = _load_remix_context(conn)
     is_precomputed = ctx.get("precomputed", False)
-
-    has_locks = bool(locked_parts)
-
-    # Check if any locked value is custom (not in slot_fillers)
-    skip_coherence = False
-    if has_locks:
-        _slot_type_map = {
-            "of_modifier": "of_modifier",
-            "of_head": "of_head",
-            "of_topic": "of_topic",
-            "of_complement": "of_complement",
-        }
-        for lock_key, lock_val in locked_parts.items():
-            st = _slot_type_map.get(lock_key)
-            if st is None:
-                continue
-            row = conn.execute(
-                "SELECT 1 FROM slot_fillers WHERE filler = ? AND slot_type = ?",
-                (lock_val, st),
-            ).fetchone()
-            if row is None:
-                skip_coherence = True
-                break
-        if not skip_coherence:
-            max_retries = 20
-
-    # Determine remix classification
-    force_type = None
-    if has_locks:
-        if "of_modifier" in locked_parts or "of_head" in locked_parts:
-            force_type = "type1"
-        elif "of_topic" in locked_parts or "of_complement" in locked_parts:
-            force_type = "type2"
 
     if is_precomputed:
         # Read pre-computed classification from DB
@@ -1097,37 +989,9 @@ def _try_remix(
         doc = nlp(original_of_object)
         orig_classification = _classify_for_remix(original_of_object, doc)
 
-    if force_type == "type1":
-        if "of_modifier" in locked_parts:
-            word_count = len(locked_parts["of_modifier"].split()) + 1
-        elif orig_classification and orig_classification[0] == "type1":
-            word_count = orig_classification[-1]
-        else:
-            word_count = 2
-        classification = ("type1", word_count)
-    elif force_type == "type2":
-        if orig_classification and orig_classification[0] == "type2":
-            _, prep, word_count = orig_classification
-        else:
-            # Infer prep from locked value in slot_fillers
-            prep = None
-            for lk in ("of_topic", "of_complement"):
-                if lk in locked_parts:
-                    row = conn.execute(
-                        "SELECT prep FROM slot_fillers WHERE filler = ? AND slot_type = ? LIMIT 1",
-                        (locked_parts[lk], lk),
-                    ).fetchone()
-                    if row:
-                        prep = row[0]
-                        break
-            if prep is None:
-                return None
-            word_count = 0
-        classification = ("type2", prep, word_count)
-    else:
-        classification = orig_classification
-        if classification is None:
-            return None
+    classification = orig_classification
+    if classification is None:
+        return None
 
     # Reject type-2 remixes where inner prep is "of" (produces double-of)
     cfg = load_tuning_config(conn)
@@ -1135,23 +999,16 @@ def _try_remix(
         if classification[0] == "type2" and classification[1] == "of":
             return None
 
-    best_attempt = None
-    best_sim = -1.0
-
     for _ in range(max_retries):
         if classification[0] == "type1":
             _, word_count = classification
             result = compose_compound(
                 conn, rng, tone_target, ctx, word_count,
-                locked_modifier=locked_parts.get("of_modifier") if has_locks else None,
-                locked_head=locked_parts.get("of_head") if has_locks else None,
             )
         else:
             _, prep, word_count = classification
             result = compose_prepositional(
                 conn, rng, tone_target, ctx, prep, word_count,
-                locked_topic=locked_parts.get("of_topic") if has_locks else None,
-                locked_complement=locked_parts.get("of_complement") if has_locks else None,
             )
 
         if result is None:
@@ -1159,9 +1016,9 @@ def _try_remix(
 
         composed, parts = result
 
-        # Compute similarity when coherence check is active or locks present
+        # Compute similarity when coherence check is active.
         sim = None
-        if min_sim > 0 or has_locks:
+        if min_sim > 0:
             if is_precomputed:
                 sim = _approx_cosine_sim(parts, ctx, classification[0])
             else:
@@ -1176,19 +1033,12 @@ def _try_remix(
                         if norm1 > 0 and norm2 > 0:
                             sim = float(np.dot(centroid, composed_doc.vector) / (norm1 * norm2))
 
-        # Coherence check (skipped for custom locked values)
-        if not skip_coherence and min_sim > 0 and sim is not None:
+        # Coherence check.
+        if min_sim > 0 and sim is not None:
             if sim < min_sim:
-                if has_locks and (best_attempt is None or sim > best_sim):
-                    best_sim = sim
-                    best_attempt = (composed, parts, sim)
                 continue
 
         return composed, parts, sim
-
-    # With locks, fall back to the best attempt seen
-    if has_locks and best_attempt is not None:
-        return best_attempt
 
     return None
 

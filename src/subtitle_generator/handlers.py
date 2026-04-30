@@ -28,10 +28,6 @@ from subtitle_generator.jacket import (
 
 TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
 VALID_TONES = set(TONE_CHOICES.keys())
-VALID_LOCK_KEYS = {
-    "item1", "item2", "action_noun", "of_object",
-    "of_modifier", "of_head", "of_topic", "of_complement",
-}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -118,23 +114,15 @@ def handle_health() -> tuple[int, dict]:
 
 
 def handle_generate(body: dict) -> tuple[int, dict]:
-    """Generate a subtitle. Body may contain tone, remix_prob, min_sim, locks."""
+    """Generate a subtitle. Body may contain tone, remix_prob, and min_sim."""
     tone_str = body.get("tone")
     remix_prob = body.get("remix_prob")
     min_sim = body.get("min_sim")
-    locks = body.get("locks")
 
     try:
         tone_set = parse_tone(tone_str)
     except ValueError as exc:
         return 400, {"error": str(exc)}
-
-    if locks is not None:
-        if not isinstance(locks, dict):
-            return 400, {"error": "locks must be an object mapping slot keys to values"}
-        invalid_keys = set(locks.keys()) - VALID_LOCK_KEYS
-        if invalid_keys:
-            return 400, {"error": f"Invalid lock keys: {', '.join(invalid_keys)}"}
 
     conn = get_db()
     try:
@@ -163,7 +151,6 @@ def handle_generate(body: dict) -> tuple[int, dict]:
             tone_target=tone_target,
             remix_prob=remix_prob,
             min_sim=min_sim,
-            locks=locks,
         )
         sources = build_sources(conn, sub)
         return 200, subtitle_to_dict(sub, sources)

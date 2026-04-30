@@ -538,56 +538,6 @@ def test_remix_precompute_validator_checks_version_and_columns():
         raise AssertionError("missing remix columns should fail before runtime usage")
 
 
-def test_handler_generate_payload_shape_with_locked_values(tmp_path, monkeypatch):
-    from subtitle_generator import handlers
-
-    db_path = tmp_path / "runtime.db"
-    conn = make_runtime_db(db_path)
-    conn.close()
-
-    monkeypatch.setattr(
-        handlers,
-        "get_db",
-        lambda db_path=None: sqlite3.connect(str(db_path or tmp_path / "runtime.db")),
-    )
-
-    status, body = handlers.handle_generate({
-        "locks": {
-            "item1": "race",
-            "item2": "power",
-            "action_noun": "making",
-            "of_object": "modern life",
-        },
-        "remix_prob": 0.0,
-        "min_sim": 0.0,
-    })
-
-    assert status == 200
-    assert set(body) == {
-        "text", "item1", "item2", "action_noun", "of_object", "remixed",
-        "remix_parts", "remix_similarity", "of_article", "action_article",
-        "sources",
-    }
-    assert body == {
-        "text": "Race, Power, and the Making of Modern Life",
-        "item1": "Race",
-        "item2": "Power",
-        "action_noun": "Making",
-        "of_object": "Modern Life",
-        "remixed": False,
-        "remix_parts": {},
-        "remix_similarity": None,
-        "of_article": "",
-        "action_article": "the",
-        "sources": {
-            "item1": {"title": None, "tag": None},
-            "item2": {"title": None, "tag": None},
-            "action_noun": {"title": None, "tag": None},
-            "of_object": {"title": None, "tag": None},
-        },
-    }
-
-
 def test_subtitle_to_dict_contract_is_stable():
     from subtitle_generator.generate import GeneratedSubtitle
     from subtitle_generator.handlers import subtitle_to_dict
@@ -653,7 +603,7 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
     assert body["text"] == "Race, Power, and the Making of Modern Life"
     assert observed["remix_prob"] == 0.33
     assert observed["min_sim"] == 0.44
-    assert observed["locks"] is None
+    assert set(observed) == {"tone_target", "remix_prob", "min_sim"}
 
 
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):
