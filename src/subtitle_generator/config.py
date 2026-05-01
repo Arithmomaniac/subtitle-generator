@@ -18,7 +18,6 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "tone_target_niche_list_item": 0.16,
     "tone_target_niche_action_noun": 0.16,
     "tone_target_niche_of_object": 0.16,
-    "sample_tone_spread": 0.6,
     "tier_center_pop": 0.78,
     "tier_center_mainstream": 0.3,
     "tier_center_niche": 0.16,
@@ -34,18 +33,13 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "pop_weight_gr": 0.2,       # Weight of Goodreads ratings signal
     "pop_weight_nyt": 0.1,      # Weight of NYT bestseller signal
     "pop_weight_library": 0.05, # Weight of other library lists signal
-    "pop_weight_freq": 0.0,
     "pop_exponent": 1.2,
     "pop_base_weight_blend": 0.5,
-    "pop_tone_blend": 0.5,
     "pop_classification_blend": 0.9,
     "pop_missing_default": 0.1,
     # Evidence-aware jacket tier classification params
     "tier_pop_min_demand_confidence": 0.25,
     "tier_pop_min_lower_tail": 0.35,
-    "tier_pop_min_accessibility_margin": 0.35,
-    "tier_mainstream_demand_relief": 0.1,
-    "tier_source_label_weight": 0.25,
     # Per-slot popularity multipliers (applied to tone_target before Gaussian bias)
     "pop_slot_mult_list_item": 0.8,
     "pop_slot_mult_action_noun": 0.9,

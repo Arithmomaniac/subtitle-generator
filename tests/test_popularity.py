@@ -63,12 +63,17 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
 
 
 def test_backward_compat_blend_zero():
-    """With pop_base_weight_blend=0 and pop_tone_blend=0, behavior matches old freq-only."""
+    """With pop blends at 0, behavior matches old freq-only sampling."""
     from subtitle_generator.generate import _weighted_sample
 
     conn = _make_test_db()
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_base_weight_blend', '0.0')")
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '0.0')")
+    conn.commit()
+    from subtitle_generator.config import invalidate_config_cache
+    invalidate_config_cache()
 
-    # With blend=0 (default), popularity_score should be ignored
+    # With both blends at 0, popularity_score should be ignored.
     rows_with_pop = conn.execute(
         "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item'"
     ).fetchall()
@@ -87,11 +92,11 @@ def test_backward_compat_blend_zero():
 
 
 def test_popularity_blend_one():
-    """With pop_tone_blend=1.0, high-popularity low-freq words should be boosted."""
+    """With classification/base blends at 1.0, high-popularity low-freq words are boosted."""
     from subtitle_generator.generate import _weighted_sample
 
     conn = _make_test_db()
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_tone_blend', '1.0')")
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '1.0')")
     conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_base_weight_blend', '1.0')")
     conn.commit()
     from subtitle_generator.config import invalidate_config_cache
@@ -115,7 +120,7 @@ def test_popularity_blend_one():
     )
     # Home (pop=1.56, freq=2) should appear despite low freq
     assert counts.get("Home", 0) > 0, (
-        f"Home (pop=1.56) should appear with pop_tone_blend=1. Counts: {counts}"
+        f"Home (pop=1.56) should appear with full popularity blends. Counts: {counts}"
     )
     print("  PASS: popularity_blend_one")
 
@@ -125,7 +130,7 @@ def test_null_popularity_uses_default():
     from subtitle_generator.generate import _weighted_sample
 
     conn = _make_test_db(pop_scores={"Fraud": None, "Helmontian": None})
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_tone_blend', '1.0')")
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '1.0')")
     conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_base_weight_blend', '1.0')")
     conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_missing_default', '0.1')")
     conn.commit()
@@ -143,17 +148,19 @@ def test_null_popularity_uses_default():
 
 
 def test_half_blend():
-    """With pop_tone_blend=0.5, score should be average of freq-score and pop-score."""
+    """With pop_classification_blend=0.5, score averages freq-score and pop-score."""
     from subtitle_generator.config import load_tuning_config
 
     conn = _make_test_db()
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_tone_blend', '0.5')")
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '0.5')")
     conn.commit()
     from subtitle_generator.config import invalidate_config_cache
     invalidate_config_cache()
 
     cfg = load_tuning_config(conn)
-    assert cfg["pop_tone_blend"] == 0.5, f"Expected 0.5, got {cfg['pop_tone_blend']}"
+    assert cfg["pop_classification_blend"] == 0.5, (
+        f"Expected 0.5, got {cfg['pop_classification_blend']}"
+    )
 
     # Verify blended score calculation manually
     freq = 40  # Race
@@ -270,7 +277,6 @@ def test_evidence_aware_tier_classification_uses_runtime_signals():
     for key, value in (
         ("accessibility_threshold_pop", "0.6"),
         ("accessibility_threshold_mainstream", "0.3"),
-        ("tier_pop_min_accessibility_margin", "0.35"),
         ("tier_pop_min_lower_tail", "0.35"),
         ("tier_pop_min_demand_confidence", "0.25"),
         ("pop_classification_blend", "0.5"),
@@ -336,7 +342,6 @@ def test_real_title_tier_metric_uses_db_source_labels():
     for key, value in (
         ("accessibility_threshold_pop", "0.6"),
         ("accessibility_threshold_mainstream", "0.3"),
-        ("tier_pop_min_accessibility_margin", "0.35"),
         ("tier_pop_min_lower_tail", "0.35"),
         ("tier_pop_min_demand_confidence", "0.25"),
         ("pop_classification_blend", "0.5"),
@@ -429,12 +434,11 @@ def test_config_params_exist():
     from subtitle_generator.config import ALL_TUNABLE_PARAMS
 
     expected = [
-        "pop_weight_spl", "pop_weight_ol", "pop_weight_freq",
-        "pop_exponent", "pop_base_weight_blend", "pop_tone_blend",
+        "pop_weight_spl", "pop_weight_ol",
+        "pop_exponent", "pop_base_weight_blend", "pop_classification_blend",
         "pop_missing_default", "default_generation_tone_target",
         "tier_pop_min_demand_confidence",
-        "tier_pop_min_lower_tail", "tier_pop_min_accessibility_margin",
-        "tier_source_label_weight",
+        "tier_pop_min_lower_tail",
     ]
     for param in expected:
         assert param in ALL_TUNABLE_PARAMS, f"Missing param: {param}"

@@ -30,6 +30,7 @@ from subtitle_generator.eval_harness import (
     structured_completion,
 )
 from subtitle_generator.feedback import store_rating
+from subtitle_generator.generate import TierFilterError
 from subtitle_generator.tier_diagnostics import score_real_title_tier_pop_guardrail
 from subtitle_generator.tuning_state import (
     ConfigChange,
@@ -37,6 +38,8 @@ from subtitle_generator.tuning_state import (
     record_decision,
     revert_config_change,
 )
+
+SOURCE_TIER_LABEL_WEIGHT = 0.25
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -467,8 +470,7 @@ def _summarize_regime_state(results_file: str) -> dict:
         k for k in ALL_TUNABLE_PARAMS
         if k.startswith(("accessibility_threshold_", "tier_center_", "tone_target_"))
     }
-    METRIC_ONLY = {"tier_source_label_weight"}
-    available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED - METRIC_ONLY
+    available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED
     path = pathlib.Path(results_file)
     if not path.exists():
         return {
@@ -711,20 +713,19 @@ def _evaluate(
     separation = measure_tone_separation(conn, seed_base=seed_base + n_samples)
 
     label_guardrail, label_count = score_real_title_tier_pop_guardrail(conn)
-    label_weight = load_tuning_config(conn)["tier_source_label_weight"]
     output_comp = composite_score(quality, separation, quality_weight=quality_weight)
     comp = _blend_real_title_tier_guardrail(
-        output_comp, label_guardrail, label_count, label_weight
+        output_comp, label_guardrail, label_count, SOURCE_TIER_LABEL_WEIGHT
     )
     if label_count:
         click.echo(
             f"  source-title tier guardrail: {label_guardrail:.3f} "
-            f"(source_label_weight={label_weight:.2f}, labels={label_count})"
+            f"(source_label_weight={SOURCE_TIER_LABEL_WEIGHT:.2f}, labels={label_count})"
         )
     else:
         click.echo(
             "  source-title tier guardrail: no labels "
-            f"(source_label_weight={label_weight:.2f}, inactive)"
+            f"(source_label_weight={SOURCE_TIER_LABEL_WEIGHT:.2f}, inactive)"
         )
     return quality, separation, comp
 
@@ -1051,7 +1052,12 @@ def run_tone_tuning(
     # Baseline evaluation
     click.echo("Computing baseline scores …")
     current_params = load_tuning_config(conn)
-    quality, separation, current_score = _evaluate(conn, rater_model)
+    try:
+        quality, separation, current_score = _evaluate(conn, rater_model)
+    except TierFilterError as exc:
+        raise click.ClickException(
+            f"Baseline tier-filter evaluation failed: {exc}"
+        ) from exc
     click.echo(
         f"Baseline — Quality: {quality:.3f}  "
         f"Separation: {separation:.3f}  "
@@ -1095,9 +1101,14 @@ def run_tone_tuning(
                 _run_repopulate_full(conn)
             elif needs_calib:
                 _run_calibrate_thresholds(conn)
-            quality, separation, current_score = _evaluate(
-                conn, rater_model, seed_base=2000 + i * 100,
-            )
+            try:
+                quality, separation, current_score = _evaluate(
+                    conn, rater_model, seed_base=2000 + i * 100,
+                )
+            except TierFilterError as exc:
+                raise click.ClickException(
+                    f"Tier-filter evaluation failed after auto-revert: {exc}"
+                ) from exc
             click.echo(
                 f"  After revert — Quality: {quality:.3f}  "
                 f"Separation: {separation:.3f}  Composite: {current_score:.3f}\n"
@@ -1234,16 +1245,6 @@ scores — treat those results as unreliable.
                 "skip", f"unknown param: {proposal.reasoning}",
             )
             continue
-        if proposal.param == "tier_source_label_weight":
-            click.echo(
-                "  ⚠ proposed metric-only param 'tier_source_label_weight' — skipping"
-            )
-            _append_result(
-                results_file, i, proposal.param, 0, proposal.new_value,
-                quality, separation, current_score,
-                "skip", f"metric-only param: {proposal.reasoning}",
-            )
-            continue
 
         change, clamped_from = _proposal_change(proposal, current_params, bounds)
         old_value = change.old_value
@@ -1291,9 +1292,23 @@ scores — treat those results as unreliable.
             _run_calibrate_thresholds(conn)
 
         # Evaluate with new value
-        new_quality, new_separation, new_score = _evaluate(
-            conn, rater_model, seed_base=1000 + i * 100,
-        )
+        try:
+            new_quality, new_separation, new_score = _evaluate(
+                conn, rater_model, seed_base=1000 + i * 100,
+            )
+        except TierFilterError as exc:
+            click.echo(f"  -> SKIP (tier filter unreachable: {exc})\n")
+            revert_config_change(conn, change)
+            if _needs_repopulate(proposal.param):
+                _run_repopulate(conn)
+            elif _needs_calibrate(proposal.param):
+                _run_calibrate_thresholds(conn)
+            _append_result(
+                results_file, i, proposal.param, old_value, new_value,
+                quality, separation, current_score,
+                "error", f"tier filter unreachable: {proposal.reasoning}; {exc}",
+            )
+            continue
 
         delta = new_score - current_score
         before_scores = (quality, separation, current_score)

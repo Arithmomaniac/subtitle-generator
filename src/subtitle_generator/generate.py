@@ -10,13 +10,18 @@ import click
 import inflect
 from titlecase import titlecase as _lib_titlecase
 
-from subtitle_generator.config import DEFAULT_TONE_TARGETS, load_tuning_config
+from subtitle_generator.config import DEFAULT_TONE_TARGETS, get_tone_targets, load_tuning_config
 from subtitle_generator.remix_state import (
     RemixRuntimeContext,
     assert_remix_precompute_state,
 )
 
 _inflect_engine = inflect.engine()
+MAX_TIER_FILTER_ATTEMPTS = 200
+
+
+class TierFilterError(RuntimeError):
+    """Raised when generation cannot satisfy a requested tier filter."""
 
 
 def _title_case(text: str) -> str:
@@ -950,6 +955,65 @@ def generate_subtitle(
         parts.remix_parts,
     )
     return _assemble_generated_subtitle(parts, action_article, of_article)
+
+
+def _tone_target_for_tiers(
+    conn: sqlite3.Connection,
+    allowed_tiers: set[str] | None,
+) -> dict[str, float] | None:
+    if not allowed_tiers:
+        return None
+    targets = get_tone_targets(conn)
+    return {
+        slot: sum(targets[tier][slot] for tier in allowed_tiers) / len(allowed_tiers)
+        for slot in ("list_item", "action_noun", "of_object")
+    }
+
+
+def generate_subtitle_matching_tiers(
+    conn: sqlite3.Connection,
+    *,
+    allowed_tiers: set[str] | None,
+    seed: int | None = None,
+    remix_prob: float = 0.0,
+    min_sim: float = 0.0,
+    max_attempts: int = MAX_TIER_FILTER_ATTEMPTS,
+) -> GeneratedSubtitle:
+    """Generate a subtitle whose evidence tier satisfies the requested filter."""
+
+    tone_target = _tone_target_for_tiers(conn, allowed_tiers)
+    if not allowed_tiers:
+        return generate_subtitle(
+            conn,
+            seed=seed,
+            tone_target=tone_target,
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    last_tier: str | None = None
+    for attempt in range(max_attempts):
+        attempt_seed = seed + attempt if seed is not None else None
+        subtitle = generate_subtitle(
+            conn,
+            seed=attempt_seed,
+            tone_target=tone_target,
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+        tier = compute_tier_evidence(subtitle.text, conn).tier
+        if tier in allowed_tiers:
+            return subtitle
+        last_tier = tier
+
+    requested = ", ".join(sorted(allowed_tiers))
+    suffix = f"; last generated tier was {last_tier}" if last_tier else ""
+    raise TierFilterError(
+        f"Could not generate a subtitle matching tier filter [{requested}] "
+        f"after {max_attempts} attempts{suffix}."
+    )
 
 
 def _try_remix(

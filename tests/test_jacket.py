@@ -125,18 +125,19 @@ def test_prompt_preselects_reviews_and_blurb_sources():
     assert "Choice (ACRL)" not in system_prompt
 
 
-def test_prepare_prompt_logs_forced_tier_without_misleading_scores():
+def test_prepare_prompt_rejects_tier_filter_mismatch():
     progress: list[str] = []
 
-    _, _, tone_tier = _prepare_jacket_prompt(
-        "Faith, Commerce, and the Making of Modern Appetite",
-        allowed_tiers={"pop"},
-        on_progress=progress.append,
-    )
-
-    assert tone_tier == "pop"
-    assert progress[-1].startswith("Tone: pop, forced from mainstream")
-    assert "accessibility:" in progress[-1]
+    try:
+        _prepare_jacket_prompt(
+            "Faith, Commerce, and the Making of Modern Appetite",
+            allowed_tiers={"pop"},
+            on_progress=progress.append,
+        )
+    except ValueError as exc:
+        assert "does not match allowed tier" in str(exc)
+    else:
+        raise AssertionError("tier filter mismatch should fail instead of forcing tone")
 
 
 def test_validate_accepts_inline_back_cover_blurbs():

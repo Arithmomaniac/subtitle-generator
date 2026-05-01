@@ -221,17 +221,9 @@ def _classify_from_evidence(
 
     has_pop_demand = demand_confidence >= cfg["tier_pop_min_demand_confidence"]
     has_pop_tail = lower_tail_score >= cfg["tier_pop_min_lower_tail"]
-    high_enough_for_pop = (
-        accessibility_score >= pop_threshold + cfg["tier_pop_min_accessibility_margin"]
-    )
-    if high_enough_for_pop and has_pop_demand and has_pop_tail:
+    if accessibility_score >= pop_threshold and has_pop_demand and has_pop_tail:
         return "pop"
 
     if accessibility_score < mainstream_threshold:
-        if (
-            demand_confidence >= cfg["tier_pop_min_demand_confidence"]
-            and accessibility_score >= mainstream_threshold - cfg["tier_mainstream_demand_relief"]
-        ):
-            return "mainstream"
         return "niche"
     return "mainstream"

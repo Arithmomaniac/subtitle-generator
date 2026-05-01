@@ -15,9 +15,14 @@ from subtitle_generator.extract_openlibrary import (
     ensure_isbn_column,
     extract_from_ol_dump,
 )
-from subtitle_generator.config import get_tone_targets
 from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
-from subtitle_generator.generate import format_sources, generate_subtitle, precompute_remix_data, slot_stats
+from subtitle_generator.generate import (
+    TierFilterError,
+    format_sources,
+    generate_subtitle_matching_tiers,
+    precompute_remix_data,
+    slot_stats,
+)
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
     generate_jacket,
@@ -377,19 +382,10 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     effective_remix_prob = remix_prob if remix else 0.0
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
-        click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
+        click.echo(f"Tier filter: {', '.join(sorted(tone_set))}")
     if effective_remix_prob > 0:
         click.echo(f"Remix: prob={effective_remix_prob:.1f}, min_sim={min_sim:.2f}")
     click.echo()
-
-    # Compute per-slot tone targets (average across requested tiers)
-    tone_target = None
-    if tone_set:
-        targets = get_tone_targets(conn)
-        merged = {}
-        for slot in ["list_item", "action_noun", "of_object"]:
-            merged[slot] = sum(targets[t][slot] for t in tone_set) / len(tone_set)
-        tone_target = merged
 
     reviewed_count = 0
     thumbs_up = 0
@@ -397,12 +393,30 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
 
     for i in range(count):
         s = seed + i if seed is not None else None
-        sub = generate_subtitle(conn, seed=s, tone_target=tone_target, remix_prob=effective_remix_prob, min_sim=min_sim)
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                seed=s,
+                remix_prob=effective_remix_prob,
+                min_sim=min_sim,
+            )
+        except TierFilterError as exc:
+            raise click.ClickException(str(exc)) from exc
 
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            md = generate_jacket(sub.text, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
+            try:
+                md = generate_jacket(
+                    sub.text,
+                    show_concept=show_concept,
+                    conn=conn,
+                    allowed_tiers=tone_set,
+                    **kwargs,
+                )
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from exc
             click.echo(md)
             if sources:
                 click.echo(format_sources(conn, sub))
@@ -457,14 +471,6 @@ def review(count: int, tone: str | None):
     row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'").fetchone()
     min_sim = float(row[0]) if row else 0.1
 
-    tone_target = None
-    if tone_set:
-        targets = get_tone_targets(conn)
-        merged = {}
-        for slot in ["list_item", "action_noun", "of_object"]:
-            merged[slot] = sum(targets[t][slot] for t in tone_set) / len(tone_set)
-        tone_target = merged
-
     click.echo(f"Review session: {count} subtitles" + (f" (tone: {tone})" if tone else ""))
     click.echo("Rate each subtitle — all prompts are skippable with Enter.\n")
 
@@ -473,7 +479,15 @@ def review(count: int, tone: str | None):
     thumbs_down = 0
 
     for i in range(count):
-        sub = generate_subtitle(conn, tone_target=tone_target, remix_prob=remix_prob, min_sim=min_sim)
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                remix_prob=remix_prob,
+                min_sim=min_sim,
+            )
+        except TierFilterError as exc:
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"  {i + 1:2d}. {sub.text}")
 
         result = _prompt_review(conn, sub.text)
@@ -513,7 +527,17 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
     conn = get_db()
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
-        md = generate_jacket(subtitle, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
+        try:
+            md = generate_jacket(
+                subtitle,
+                show_concept=show_concept,
+                conn=conn,
+                allowed_tiers=tone_set,
+                **kwargs,
+            )
+        except ValueError as exc:
+            conn.close()
+            raise click.ClickException(str(exc)) from exc
         click.echo(md)
     else:
         stats = slot_stats(conn)
@@ -521,9 +545,27 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
             conn.close()
             raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
         click.echo(f"Slot machine loaded: {stats}\n")
-        sub = generate_subtitle(conn, seed=seed)
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                seed=seed,
+            )
+        except TierFilterError as exc:
+            conn.close()
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"Generating jacket for: {sub.text}\n")
-        md = generate_jacket(sub.text, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
+        try:
+            md = generate_jacket(
+                sub.text,
+                show_concept=show_concept,
+                conn=conn,
+                allowed_tiers=tone_set,
+                **kwargs,
+            )
+        except ValueError as exc:
+            conn.close()
+            raise click.ClickException(str(exc)) from exc
         click.echo(md)
         if sources:
             click.echo(format_sources(conn, sub))

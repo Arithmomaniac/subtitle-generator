@@ -32,7 +32,6 @@ EXPECTED_TUNABLE_PARAMS = {
     "tone_target_niche_list_item": 0.16,
     "tone_target_niche_action_noun": 0.16,
     "tone_target_niche_of_object": 0.16,
-    "sample_tone_spread": 0.6,
     "tier_center_pop": 0.78,
     "tier_center_mainstream": 0.3,
     "tier_center_niche": 0.16,
@@ -47,17 +46,12 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_weight_gr": 0.2,
     "pop_weight_nyt": 0.1,
     "pop_weight_library": 0.05,
-    "pop_weight_freq": 0.0,
     "pop_exponent": 1.2,
     "pop_base_weight_blend": 0.5,
-    "pop_tone_blend": 0.5,
     "pop_classification_blend": 0.9,
     "pop_missing_default": 0.1,
     "tier_pop_min_demand_confidence": 0.25,
     "tier_pop_min_lower_tail": 0.35,
-    "tier_pop_min_accessibility_margin": 0.35,
-    "tier_mainstream_demand_relief": 0.1,
-    "tier_source_label_weight": 0.25,
     "pop_slot_mult_list_item": 0.8,
     "pop_slot_mult_action_noun": 0.9,
     "pop_slot_mult_of_object": 1.0,
@@ -223,7 +217,6 @@ def test_work_level_popularity_scoring_is_testable_without_db_writes():
         weight_goodreads=0.2,
         weight_nyt=0.1,
         weight_library=0.05,
-        weight_frequency=0.0,
         exponent=1.2,
     )
 
@@ -356,50 +349,6 @@ def test_schema_contract_validator_reports_stage_context(tmp_path):
         raise AssertionError("partial schema should not validate")
 
 
-def test_ensure_slot_tables_migrates_legacy_popularity_evidence_conservatively():
-    from subtitle_generator.slots import ensure_slot_tables
-
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE slot_fillers (
-            id INTEGER PRIMARY KEY,
-            slot_type TEXT NOT NULL,
-            filler TEXT NOT NULL,
-            mode TEXT NOT NULL DEFAULT 'strict',
-            freq INTEGER NOT NULL DEFAULT 1,
-            popularity_score REAL
-        )
-        """
-    )
-    conn.execute(
-        """
-        INSERT INTO slot_fillers (slot_type, filler, mode, freq, popularity_score)
-        VALUES
-            ('list_item', 'money', 'strict', 10, 0.8),
-            ('list_item', 'fallback', 'strict', 1, NULL)
-        """
-    )
-    conn.commit()
-
-    ensure_slot_tables(conn)
-
-    assert _columns(conn, "slot_fillers") >= {
-        "popularity_score", "popularity_level", "popularity_confidence",
-    }
-    rows = conn.execute(
-        """
-        SELECT filler, popularity_level, popularity_confidence
-        FROM slot_fillers
-        ORDER BY filler
-        """
-    ).fetchall()
-    assert rows == [
-        ("fallback", 0, 0.0),
-        ("money", 0, 0.0),
-    ]
-
-
 def test_current_model_ids_and_tunable_defaults_are_characterized():
     from subtitle_generator.config import ALL_TUNABLE_PARAMS
     from subtitle_generator.jacket import DEFAULT_MODEL
@@ -485,6 +434,42 @@ def test_default_generation_uses_configured_tone_target():
         "action_noun": 1.8,
         "of_object": 2.0,
     }
+
+
+def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    import subtitle_generator.tiering as tiering_module
+    from subtitle_generator.generate import GeneratedSubtitle, generate_subtitle_matching_tiers
+
+    conn = make_runtime_db()
+    observed_seeds: list[int] = []
+
+    def fake_generate_subtitle(conn, **kwargs):
+        observed_seeds.append(kwargs["seed"])
+        return GeneratedSubtitle(
+            text=f"Generated {len(observed_seeds)}",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )
+
+    def fake_compute_tier_evidence(subtitle, conn):
+        tier = "pop" if subtitle == "Generated 2" else "mainstream"
+        return SimpleNamespace(tier=tier)
+
+    monkeypatch.setattr(generate_module, "generate_subtitle", fake_generate_subtitle)
+    monkeypatch.setattr(tiering_module, "compute_tier_evidence", fake_compute_tier_evidence)
+
+    sub = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers={"pop"},
+        seed=11,
+        max_attempts=3,
+    )
+
+    assert sub.text == "Generated 2"
+    assert observed_seeds == [11, 12]
 
 
 def test_remix_precompute_validator_checks_version_and_columns():
@@ -584,7 +569,7 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
 
     observed = {}
 
-    def fake_generate_subtitle(conn, **kwargs):
+    def fake_generate_subtitle_matching_tiers(conn, **kwargs):
         observed.update(kwargs)
         return GeneratedSubtitle(
             text="Race, Power, and the Making of Modern Life",
@@ -595,15 +580,20 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(handlers, "get_db", lambda db_path=None: sqlite3.connect(str(tmp_path / "runtime.db")))
-    monkeypatch.setattr(handlers, "generate_subtitle", fake_generate_subtitle)
+    monkeypatch.setattr(
+        handlers,
+        "generate_subtitle_matching_tiers",
+        fake_generate_subtitle_matching_tiers,
+    )
 
     status, body = handlers.handle_generate({})
 
     assert status == 200
     assert body["text"] == "Race, Power, and the Making of Modern Life"
+    assert observed["allowed_tiers"] is None
     assert observed["remix_prob"] == 0.33
     assert observed["min_sim"] == 0.44
-    assert set(observed) == {"tone_target", "remix_prob", "min_sim"}
+    assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim"}
 
 
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):
@@ -674,7 +664,7 @@ def test_jacket_generation_uses_prepared_prompt_once(monkeypatch):
             lower_tail_score=0.4,
             demand_confidence=1.0,
         )
-        return "system prompt", "user prompt", "mainstream", evidence, False
+        return "system prompt", "user prompt", "mainstream", evidence
 
     async def fake_generate(subtitle, system_prompt, user_prompt, **kwargs):
         captured.update({
@@ -738,7 +728,7 @@ def test_rating_config_snapshot_preserves_defaults_and_overrides():
     from subtitle_generator.feedback import store_rating
 
     conn = make_runtime_db()
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_tone_blend', '0.25')")
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '0.25')")
     conn.commit()
 
     row_id = store_rating(
@@ -762,7 +752,7 @@ def test_rating_config_snapshot_preserves_defaults_and_overrides():
     snapshot = json.loads(row[0])
 
     assert snapshot.keys() == EXPECTED_TUNABLE_PARAMS.keys()
-    assert snapshot["pop_tone_blend"] == 0.25
+    assert snapshot["pop_classification_blend"] == 0.25
     assert snapshot["weighted_sample_spread"] == 0.12
     assert json.loads(row[1]) == ["interesting", "realistic"]
     assert row[2] == "characterization"
@@ -823,7 +813,7 @@ def test_tuning_proposal_decision_records_before_after_scores():
 
     decision = record_decision(
         change=ConfigChange(
-            param="pop_tone_blend",
+            param="pop_classification_blend",
             old_value=0.5,
             new_value=0.6,
         ),
@@ -833,7 +823,7 @@ def test_tuning_proposal_decision_records_before_after_scores():
         after=(7.6, 0.3, 8.2),
     )
 
-    assert decision.change.param == "pop_tone_blend"
+    assert decision.change.param == "pop_classification_blend"
     assert decision.status == "kept"
     assert decision.quality_before == 7.5
     assert decision.separation_after == 0.3

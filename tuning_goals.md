@@ -25,7 +25,7 @@ The tuning agent reads this file each iteration to guide parameter proposals.
 - **Pop and niche must produce clearly different output.** A human should be able to tell
   which tone was used just by reading 5 subtitles from each.
 - Measured by distributional overlap of filler scores (blended log10(1+freq) and popularity_score
-  per `pop_tone_blend`).
+  per `pop_classification_blend`).
 - Target: tone_separation ≥ 0.5 (at least 50% non-overlapping distributions).
 
 ## Popularity Scoring
@@ -38,15 +38,13 @@ at 0.5 composite. NYT bestseller appearances get a binary boost (0.8 floor).
 
 **Highest-impact discovery:** `pop_classification_blend` (0.9) separates tier
 classification from tone sampling. Before this, classification and tone bias
-used the same blend — changing `pop_tone_blend` above 0.5 hurt tone quality
+used the same blend — pushing tone bias too far toward pure popularity hurt tone quality
 but classification needed a higher blend to use actual popularity data.
 
 ### How it works
 
 - `pop_classification_blend` controls tier classification score: 0=log10(1+freq), 1=popularity_score.
   Also used for Gaussian bias alignment in tone targeting during generation.
-- `pop_tone_blend` controls base weight blending for tone bias: 0=log10(1+freq), 1=popularity_score.
-  Now only used for base weights, NOT for tone bias alignment (which uses `pop_classification_blend`).
 - `pop_base_weight_blend` controls the sampling base weight: 0=sqrt(freq), 1=sqrt(pop)
 - `pop_weight_spl` / `pop_weight_ol` / `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library`
   control the composite formula (takes effect when `populate-popularity` is re-run)
@@ -88,7 +86,8 @@ phase were driven by this artifact.
 ### Exploration history
 
 Initial tuning round (April 2026) explored all `pop_*` params. Key findings:
-- `pop_tone_blend=0.5` beat 1.0 — blending freq+pop works better than pure pop
+- `pop_classification_blend` should avoid pure popularity for generation bias; blending
+  freq+pop works better than pure pop
 - `pop_base_weight_blend`: both 0.25 and 0.75 hurt from 0.5 — 0.5 is the sweet spot
 - Per-slot multipliers: reducing bias on secondary slots helped (list_item=0.8, action_noun=0.9),
   but changing of_object in either direction (0.9 or 1.2) hurt — leave at 1.0
@@ -146,12 +145,11 @@ propose values outside these bounds.
 
 | Parameter | Min | Max | Current | Notes |
 |---|---|---|---|---|
-| `weighted_sample_spread` | 0.05 | 0.5 | 0.10 | Gaussian width. Insensitive in [0.05, 0.15] under current scoring scale. |
+| `weighted_sample_spread` | 0.05 | 0.5 | 0.12 | Gaussian width. Insensitive in [0.05, 0.15] under current scoring scale. |
 | `weighted_sample_bias_floor` | 0.01 | 0.30 | 0.01 | Minimum weight; pinned at lower bound. |
 | `tone_target_pop_*` | 0.4 | 1.0 | 0.699 | Aligned to tier_center_pop (auto-calibrated). Higher = more common words only. |
 | `tone_target_mainstream_*` | 0.2 | 0.6 | 0.480 | Aligned to tier_center_mainstream (auto-calibrated). Between pop and niche. |
 | `tone_target_niche_*` | 0.1 | 0.5 | 0.301 | Aligned to tier_center_niche (auto-calibrated). Lower = rarer words. |
-| `sample_tone_spread` | 0.2 | 1.5 | 0.6 | Tier sampling Gaussian width |
 | `tier_center_pop` | 0.4 | 1.0 | 0.699 | Center score for pop tier (auto-calibrated from percentile distribution) |
 | `tier_center_mainstream` | 0.2 | 0.6 | 0.480 | Center score for mainstream tier (auto-calibrated) |
 | `tier_center_niche` | 0.1 | 0.5 | 0.301 | Center score for niche tier (auto-calibrated) |
@@ -163,10 +161,8 @@ propose values outside these bounds.
 | `remix_reject_double_of` | 0 | 1 | 1 | Reject type-2 remixes where inner prep is "of" (avoids double-of) |
 | `pop_weight_spl` | 0.0 | 1.0 | 0.7 | Weight of SPL checkout signal in popularity composite |
 | `pop_weight_ol` | 0.0 | 1.0 | 0.3 | Weight of OL edition count signal in popularity composite |
-| `pop_weight_freq` | 0.0 | 1.0 | 0.0 | Weight of corpus freq fallback in popularity composite |
 | `pop_exponent` | 0.5 | 2.0 | 1.2 | Power-law exponent applied to raw scores before combining |
 | `pop_base_weight_blend` | 0.0 | 1.0 | 0.5 | Blend: 0=sqrt(freq) for base weight, 1=sqrt(popularity). Sweet spot at 0.5. |
-| `pop_tone_blend` | 0.0 | 1.0 | 0.5 | Blend for base weights only: 0=log10(1+freq), 1=popularity_score. Tone bias now uses pop_classification_blend. |
 | `pop_classification_blend` | 0.0 | 1.0 | 1.0 | Blend for tier classification: 0=log10(1+freq), 1=popularity_score. **Currently at 1.0; sweeps suggest 0.5–0.7 gives better separation. Thresholds + tier centers are now auto-recalibrated on every change.** |
 | `pop_weight_gr` | 0.0 | 1.0 | 0.2 | Weight of Goodreads ratings signal in popularity composite |
 | `pop_weight_nyt` | 0.0 | 1.0 | 0.1 | Weight of NYT bestseller signal in popularity composite |
@@ -189,15 +185,13 @@ From tuning history — parameters ranked by impact and exploration status:
    all values give separation ~0.57–0.60. Probably close to optimal once
    blend is fixed. Stop tuning unless quality is regressing.
 3. **`pop_slot_mult_action_noun`** — historic +0.050 win, reduced 1.0→0.9
-4. **`pop_tone_blend`** — +0.022, reduced 1.0→0.5. Used for base weights only.
-5. **`pop_slot_mult_list_item`** — +0.012, reduced 1.0→0.8.
-6. **`pop_exponent`** — +0.003, raised 1.0→1.2.
-7. `sample_tone_spread` — never tuned, may interact with popularity differently
-8. `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library` — **unexplored**, data source
+4. **`pop_slot_mult_list_item`** — +0.012, reduced 1.0→0.8.
+5. **`pop_exponent`** — +0.003, raised 1.0→1.2.
+6. `pop_weight_gr` / `pop_weight_nyt` / `pop_weight_library` — **unexplored**, data source
    weights. Changing requires `subtitle-gen populate-popularity` re-run.
-9. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires populate-popularity re-run)
-10. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.01)
-11. `accessibility_threshold_*` — auto-calibrated on every popularity-related change; do not tune manually
+7. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires populate-popularity re-run)
+8. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.01)
+9. `accessibility_threshold_*` — auto-calibrated on every popularity-related change; do not tune manually
 12. `tone_target_*` — aligned to tier centers. Coordinate with `tier_center_*` if adjusting.
 13. `pop_base_weight_blend` — explored both directions from 0.5, both hurt. Stable at 0.5.
 14. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.

@@ -311,11 +311,11 @@ $$
 \end{aligned}
 $$
 
-Jacket tone selection uses the same idea: a subtitle's accessibility score is
-compared with the pop/mainstream/niche centers, and `sample_tone_spread`
-controls how sharply probability falls off with distance. So the percentile
-cutoffs define the bands; the Gaussian makes runtime selection gradual instead
-of cliff-like.
+Tone filters are hard generation constraints. When a caller requests a tier,
+generation retries with that tier's tone target until `compute_tier_evidence()`
+classifies the generated subtitle as one of the requested tiers. Jacket tone
+selection then uses the classifier result directly; it no longer samples or
+forces a mismatched requested tier after generation.
 
 ### Remix precompute
 
@@ -756,7 +756,7 @@ should not be conflated.
 | LLM model IDs | Python constants in `parameter_state.py` | rating, proposal, jacket generation |
 | Tunable numeric params | Defaults in `config.py`, DB overrides in `config` | scoring, generation, tuning |
 | Popularity source weights | `pop_weight_*` config params | `populate-popularity` and repopulate during tuning |
-| Popularity blending params | `pop_base_weight_blend`, `pop_tone_blend`, `pop_classification_blend`, `pop_missing_default` | sampling, tone bias, tier classification |
+| Popularity blending params | `pop_base_weight_blend`, `pop_classification_blend`, `pop_missing_default` | sampling, tone bias, tier classification |
 | Tone thresholds and targets | auto-calibrated `config` rows | generation and jacket tone selection |
 | Article params | `article_*` config rows and article stats blobs | article restoration |
 | Remix params/constants | `remix_*`, `embedding_version`, centroid/cross-sim config rows | remix composition and validation |

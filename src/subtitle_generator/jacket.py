@@ -1,7 +1,6 @@
 """Generate full book jackets using the Copilot SDK (LLM + web_search)."""
 
 import asyncio
-import math
 import random
 import re
 import sqlite3
@@ -9,7 +8,6 @@ from collections.abc import Callable
 
 import click
 
-from subtitle_generator.config import load_tuning_config
 from subtitle_generator.parameter_state import DEFAULT_JACKET_MODEL
 from subtitle_generator.tiering import TierEvidence, compute_tier_evidence, parse_subtitle_slots
 
@@ -95,37 +93,6 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
     evidence = compute_tier_evidence(subtitle, conn)
     return _TIER_TO_TONE[evidence.tier], evidence.accessibility_score
 
-
-
-def sample_tone(score: float, allowed_tiers: set[str] | None = None, conn: sqlite3.Connection | None = None) -> tuple[str, str]:
-    """Randomly sample a tone tier with probabilities centered on the score.
-
-    Returns (tier_name, tone_text). Probabilities are Gaussian-weighted
-    by distance from each tier's center score. allowed_tiers clamps the
-    selection to a subset (zeroing out disallowed tiers and renormalizing).
-    """
-    cfg = load_tuning_config(conn)
-    spread = cfg["sample_tone_spread"]
-
-    tiers_def = [
-        ("pop", TONE_HIGH, cfg["tier_center_pop"]),
-        ("mainstream", TONE_MEDIUM, cfg["tier_center_mainstream"]),
-        ("niche", TONE_LOW, cfg["tier_center_niche"]),
-    ]
-    weights = []
-    tiers = []
-    for name, text, center in tiers_def:
-        if allowed_tiers and name not in allowed_tiers:
-            continue
-        w = math.exp(-((score - center) / spread) ** 2)
-        weights.append(w)
-        tiers.append((name, text))
-
-    if not tiers:
-        return "mainstream", TONE_MEDIUM
-
-    chosen = random.choices(tiers, weights=weights, k=1)[0]
-    return chosen
 
 
 JACKET_PROMPT = """\
@@ -385,18 +352,21 @@ def _select_jacket_tone(
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
-) -> tuple[str, str, TierEvidence, bool]:
+) -> tuple[str, str, TierEvidence]:
     evidence = compute_tier_evidence(subtitle, conn)
     if tone_override:
         tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
-        return tone_tier, tone_override, evidence, tone_tier != evidence.tier
+        return tone_tier, tone_override, evidence
 
     if allowed_tiers and evidence.tier not in allowed_tiers:
-        tone_tier, tone = sample_tone(evidence.accessibility_score, allowed_tiers, conn)
-        return tone_tier, tone, evidence, True
+        requested = ", ".join(sorted(allowed_tiers))
+        raise ValueError(
+            f"Subtitle evidence tier '{evidence.tier}' does not match allowed tier(s): "
+            f"{requested}"
+        )
 
     tone_tier = evidence.tier
-    return tone_tier, _TIER_TO_TONE[tone_tier], evidence, False
+    return tone_tier, _TIER_TO_TONE[tone_tier], evidence
 
 
 def _build_jacket_prompt_with_evidence(
@@ -405,8 +375,8 @@ def _build_jacket_prompt_with_evidence(
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
     rng: random.Random | None = None,
-) -> tuple[str, str, str, TierEvidence, bool]:
-    tone_tier, tone, evidence, forced_tier = _select_jacket_tone(
+) -> tuple[str, str, str, TierEvidence]:
+    tone_tier, tone, evidence = _select_jacket_tone(
         subtitle,
         conn=conn,
         tone_override=tone_override,
@@ -436,7 +406,7 @@ def _build_jacket_prompt_with_evidence(
         system_prompt = full_prompt
         user_prompt = subtitle
 
-    return system_prompt, user_prompt, tone_tier, evidence, forced_tier
+    return system_prompt, user_prompt, tone_tier, evidence
 
 
 def build_jacket_prompt(
@@ -453,7 +423,7 @@ def build_jacket_prompt(
     - user_prompt contains the subtitle framing
     - tone_tier is "pop", "mainstream", or "niche"
     """
-    system_prompt, user_prompt, tone_tier, _, _ = _build_jacket_prompt_with_evidence(
+    system_prompt, user_prompt, tone_tier, _ = _build_jacket_prompt_with_evidence(
         subtitle,
         conn=conn,
         tone_override=tone_override,
@@ -513,16 +483,15 @@ def _prepare_jacket_prompt(
     allowed_tiers: set[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, str, str]:
-    system_prompt, user_prompt, tone_tier, evidence, forced_tier = _build_jacket_prompt_with_evidence(
+    system_prompt, user_prompt, tone_tier, evidence = _build_jacket_prompt_with_evidence(
         subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
     )
 
     if tone_override:
         _progress("Tone: override", on_progress)
     else:
-        forced_note = f", forced from {evidence.tier}" if forced_tier else ""
         _progress(
-            f"Tone: {tone_tier}{forced_note} "
+            f"Tone: {tone_tier} "
             f"(accessibility: {evidence.accessibility_score:.2f}, "
             f"tail: {evidence.lower_tail_score:.2f}, "
             f"demand: {evidence.demand_confidence:.2f})",

@@ -17,8 +17,7 @@ import click
 import litellm
 from pydantic import BaseModel
 
-from subtitle_generator.config import get_tone_targets
-from subtitle_generator.generate import generate_subtitle
+from subtitle_generator.generate import generate_subtitle, generate_subtitle_matching_tiers
 from subtitle_generator.parameter_state import (
     DEFAULT_PROPOSER_MODEL as DEFAULT_PROPOSER_MODEL,
     DEFAULT_RATER_MODEL,
@@ -175,23 +174,23 @@ def generate_sample_set(
     seed_base: int = 1000,
 ) -> list:
     """Generate *n* subtitles with the given parameters."""
-    tone_target: dict[str, float] | None = None
-    if tone:
-        targets = get_tone_targets(conn)
-        tone_target = {
-            slot: targets[tone][slot]
-            for slot in ["list_item", "action_noun", "of_object"]
-        }
-
     results = []
     for i in range(n):
-        sub = generate_subtitle(
-            conn,
-            seed=seed_base + i,
-            tone_target=tone_target,
-            remix_prob=remix_prob,
-            min_sim=min_sim,
-        )
+        if tone:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers={tone},
+                seed=seed_base + i,
+                remix_prob=remix_prob,
+                min_sim=min_sim,
+            )
+        else:
+            sub = generate_subtitle(
+                conn,
+                seed=seed_base + i,
+                remix_prob=remix_prob,
+                min_sim=min_sim,
+            )
         results.append(sub)
     return results
 
@@ -280,7 +279,7 @@ def _filler_log_freqs(
 ) -> list[float]:
     """Return blended filler scores for every filler in the subtitle list.
 
-    Blends log10(1+freq) with popularity_score per pop_tone_blend config.
+    Blends log10(1+freq) with popularity_score per pop_classification_blend config.
     """
     from subtitle_generator.config import load_tuning_config
 

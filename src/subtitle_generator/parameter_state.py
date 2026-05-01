@@ -28,14 +28,12 @@ class PopularityParameters:
     weight_goodreads: float
     weight_nyt: float
     weight_library: float
-    weight_frequency: float
     exponent: float
 
 
 @dataclass(frozen=True)
 class PopularityBlendParameters:
     base_weight_blend: float
-    tone_blend: float
     classification_blend: float
     missing_default: float
 
@@ -72,9 +70,6 @@ class TierThresholdParameters:
 class TierClassifierParameters:
     pop_min_demand_confidence: float
     pop_min_lower_tail: float
-    pop_min_accessibility_margin: float
-    mainstream_demand_relief: float
-    source_label_weight: float
 
 
 @dataclass(frozen=True)
@@ -122,7 +117,6 @@ def get_popularity_parameters(conn: sqlite3.Connection | None = None) -> Popular
         weight_goodreads=cfg["pop_weight_gr"],
         weight_nyt=cfg["pop_weight_nyt"],
         weight_library=cfg["pop_weight_library"],
-        weight_frequency=cfg["pop_weight_freq"],
         exponent=cfg["pop_exponent"],
     )
 
@@ -133,7 +127,6 @@ def get_popularity_blend_parameters(
     cfg = _cfg(conn)
     return PopularityBlendParameters(
         base_weight_blend=cfg["pop_base_weight_blend"],
-        tone_blend=cfg["pop_tone_blend"],
         classification_blend=cfg["pop_classification_blend"],
         missing_default=cfg["pop_missing_default"],
     )
@@ -184,9 +177,6 @@ def get_tier_classifier_parameters(
     return TierClassifierParameters(
         pop_min_demand_confidence=cfg["tier_pop_min_demand_confidence"],
         pop_min_lower_tail=cfg["tier_pop_min_lower_tail"],
-        pop_min_accessibility_margin=cfg["tier_pop_min_accessibility_margin"],
-        mainstream_demand_relief=cfg["tier_mainstream_demand_relief"],
-        source_label_weight=cfg["tier_source_label_weight"],
     )
 
 

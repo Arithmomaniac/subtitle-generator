@@ -179,7 +179,7 @@ async def test():
             assert not model_visible, "Model picker should be hidden in web mode"
             print("  PASS: model picker hidden (web mode)")
 
-        # 8. Generate with tone bias
+        # 8. Generate with a hard tier filter
         print("TEST 8: Generate with tone=pop")
         await gen_btn.click()
         await page.wait_for_function(
@@ -188,7 +188,7 @@ async def test():
         )
         slots2 = await page.locator(".slot").count()
         assert slots2 >= 4, f"Expected >= 4 slots, got {slots2}"
-        print("  PASS: regenerated with tone bias")
+        print("  PASS: regenerated with tier filter")
 
         # 9. GitHub link in footer
         print("TEST 9: GitHub link")
@@ -198,6 +198,7 @@ async def test():
 
         # 10. Generate until remix (sub-parts visible)
         print("TEST 10: Generate until remix")
+        await tone_select.select_option("")
         got_remix = False
         # Use a more specific locator to avoid matching hidden "Generate Jacket"
         generate_btn = page.locator("button.btn-primary:has-text('Generate')")

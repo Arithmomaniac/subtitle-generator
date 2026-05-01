@@ -11,8 +11,9 @@ from pathlib import Path
 
 from subtitle_generator.generate import (
     GeneratedSubtitle,
+    TierFilterError,
     find_source,
-    generate_subtitle,
+    generate_subtitle_matching_tiers,
 )
 from subtitle_generator.jacket import (
     TONE_HIGH,
@@ -137,21 +138,15 @@ def handle_generate(body: dict) -> tuple[int, dict]:
             ).fetchone()
             min_sim = float(row[0]) if row else 0.1
 
-        tone_target = None
-        if tone_set:
-            from subtitle_generator.config import get_tone_targets
-            targets = get_tone_targets(conn)
-            merged: dict[str, float] = {}
-            for slot in ("list_item", "action_noun", "of_object"):
-                merged[slot] = sum(targets[t][slot] for t in tone_set) / len(tone_set)
-            tone_target = merged
-
-        sub = generate_subtitle(
-            conn,
-            tone_target=tone_target,
-            remix_prob=remix_prob,
-            min_sim=min_sim,
-        )
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                remix_prob=remix_prob,
+                min_sim=min_sim,
+            )
+        except TierFilterError as exc:
+            return 422, {"error": str(exc)}
         sources = build_sources(conn, sub)
         return 200, subtitle_to_dict(sub, sources)
     finally:
