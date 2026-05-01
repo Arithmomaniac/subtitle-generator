@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sqlite3
+from collections import Counter
 from dataclasses import dataclass, field
 
 import click
@@ -17,7 +18,7 @@ from subtitle_generator.remix_state import (
 )
 
 _inflect_engine = inflect.engine()
-MAX_TIER_FILTER_ATTEMPTS = 200
+MAX_TIER_FILTER_ATTEMPTS = 1000
 
 
 class TierFilterError(RuntimeError):
@@ -921,24 +922,19 @@ def _assemble_generated_subtitle(
     )
 
 
-def generate_subtitle(
-    conn: sqlite3.Connection, seed: int | None = None,
-    tone_target: dict[str, float] | None = None,
-    remix_prob: float = 0.0, min_sim: float = 0.0,
+def _generate_subtitle_from_candidates(
+    conn: sqlite3.Connection,
+    candidates: GenerationCandidates,
+    *,
+    seed: int | None,
+    adjusted_tone_target: dict[str, float] | None,
+    remix_prob: float,
+    min_sim: float,
 ) -> GeneratedSubtitle:
-    """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
-
-    tone_target maps slot_type → log10 target score for filler biasing.
-    remix_prob: probability of remixing a multi-word of-object (0.0 = never, 1.0 = always).
-    min_sim: minimum cosine similarity for embedding coherence filter.
-    """
     rng = _make_rng(seed)
-
-    candidates = _load_generation_candidates(conn)
     if not _has_enough_candidates(candidates):
         return _not_enough_fillers_subtitle()
 
-    adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
     parts = _select_subtitle_parts(
         conn,
         candidates,
@@ -955,6 +951,32 @@ def generate_subtitle(
         parts.remix_parts,
     )
     return _assemble_generated_subtitle(parts, action_article, of_article)
+
+
+def generate_subtitle(
+    conn: sqlite3.Connection, seed: int | None = None,
+    tone_target: dict[str, float] | None = None,
+    remix_prob: float = 0.0, min_sim: float = 0.0,
+) -> GeneratedSubtitle:
+    """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
+
+    tone_target maps slot_type → log10 target score for filler biasing.
+    remix_prob: probability of remixing a multi-word of-object (0.0 = never, 1.0 = always).
+    min_sim: minimum cosine similarity for embedding coherence filter.
+    """
+    candidates = _load_generation_candidates(conn)
+    if not _has_enough_candidates(candidates):
+        return _not_enough_fillers_subtitle()
+
+    adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
+    return _generate_subtitle_from_candidates(
+        conn,
+        candidates,
+        seed=seed,
+        adjusted_tone_target=adjusted_tone_target,
+        remix_prob=remix_prob,
+        min_sim=min_sim,
+    )
 
 
 def _tone_target_for_tiers(
@@ -993,17 +1015,21 @@ def generate_subtitle_matching_tiers(
 
     from subtitle_generator.tiering import compute_tier_evidence
 
+    candidates = _load_generation_candidates(conn)
+    adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
+    observed_tiers: Counter[str] = Counter()
     last_tier: str | None = None
     for attempt in range(max_attempts):
-        attempt_seed = seed + attempt if seed is not None else None
-        subtitle = generate_subtitle(
+        subtitle = _generate_subtitle_from_candidates(
             conn,
-            seed=attempt_seed,
-            tone_target=tone_target,
+            candidates,
+            seed=seed + attempt if seed is not None else None,
+            adjusted_tone_target=adjusted_tone_target,
             remix_prob=remix_prob,
             min_sim=min_sim,
         )
         tier = compute_tier_evidence(subtitle.text, conn).tier
+        observed_tiers[tier] += 1
         if tier in allowed_tiers:
             return subtitle
         last_tier = tier
@@ -1012,8 +1038,82 @@ def generate_subtitle_matching_tiers(
     suffix = f"; last generated tier was {last_tier}" if last_tier else ""
     raise TierFilterError(
         f"Could not generate a subtitle matching tier filter [{requested}] "
-        f"after {max_attempts} attempts{suffix}."
+        f"after {max_attempts} attempts{suffix}; "
+        f"observed tiers: {_format_tier_counts(observed_tiers)}."
     )
+
+
+def generate_subtitles_by_tier(
+    conn: sqlite3.Connection,
+    *,
+    tiers: list[str],
+    samples_per_tier: int,
+    seed: int | None = None,
+    remix_prob: float = 0.0,
+    min_sim: float = 0.0,
+    max_attempts: int = MAX_TIER_FILTER_ATTEMPTS,
+) -> dict[str, list[GeneratedSubtitle]]:
+    """Generate a shared candidate pool until each requested tier has enough samples."""
+
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    requested_tiers = list(dict.fromkeys(tiers))
+    buckets: dict[str, list[GeneratedSubtitle]] = {
+        tier: [] for tier in requested_tiers
+    }
+    candidates = _load_generation_candidates(conn)
+    tone_targets = {
+        tier: _adjust_tone_targets(conn, _tone_target_for_tiers(conn, {tier}))
+        for tier in requested_tiers
+    }
+    observed_tiers: Counter[str] = Counter()
+    last_tier: str | None = None
+
+    for attempt in range(max_attempts):
+        remaining_tiers = [
+            tier for tier in requested_tiers
+            if len(buckets[tier]) < samples_per_tier
+        ]
+        if not remaining_tiers:
+            return buckets
+
+        target_tier = remaining_tiers[attempt % len(remaining_tiers)]
+        subtitle = _generate_subtitle_from_candidates(
+            conn,
+            candidates,
+            seed=(seed + attempt if seed is not None else None),
+            adjusted_tone_target=tone_targets[target_tier],
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+        tier = compute_tier_evidence(subtitle.text, conn).tier
+        observed_tiers[tier] += 1
+        if tier in buckets and len(buckets[tier]) < samples_per_tier:
+            buckets[tier].append(subtitle)
+            if all(len(samples) >= samples_per_tier for samples in buckets.values()):
+                return buckets
+        last_tier = tier
+
+    missing = ", ".join(
+        f"{tier}={samples_per_tier - len(samples)}"
+        for tier, samples in buckets.items()
+        if len(samples) < samples_per_tier
+    )
+    suffix = f"; last generated tier was {last_tier}" if last_tier else ""
+    raise TierFilterError(
+        "Could not generate enough subtitles for tier spot-check batch "
+        f"after {max_attempts} attempts; missing {missing}{suffix}; "
+        f"observed tiers: {_format_tier_counts(observed_tiers)}."
+    )
+
+
+def _format_tier_counts(counts: Counter[str]) -> str:
+    if not counts:
+        return "none"
+    preferred = ["pop", "mainstream", "niche"]
+    names = [name for name in preferred if name in counts]
+    names.extend(sorted(set(counts) - set(preferred)))
+    return ", ".join(f"{name}={counts[name]}" for name in names)
 
 
 def _try_remix(

@@ -16,7 +16,7 @@ from pathlib import Path
 from subtitle_generator.generate import (
     GeneratedSubtitle,
     TierFilterError,
-    generate_subtitle_matching_tiers,
+    generate_subtitles_by_tier,
 )
 from subtitle_generator.handlers import (
     get_db as _get_db,
@@ -110,17 +110,18 @@ def _handle_spot_check_batch(body: dict) -> tuple[int, dict]:
         batch_id = uuid.uuid4().hex[:12]
         items: list[dict] = []
 
+        try:
+            subtitles_by_tier = generate_subtitles_by_tier(
+                conn,
+                tiers=tiers,
+                samples_per_tier=samples_per_tier,
+                seed=seed_base,
+            )
+        except TierFilterError as exc:
+            return 422, {"error": str(exc)}
+
         for tier in tiers:
-            for j in range(samples_per_tier):
-                seed = seed_base + tiers.index(tier) * 100 + j
-                try:
-                    sub = generate_subtitle_matching_tiers(
-                        conn,
-                        allowed_tiers={tier},
-                        seed=seed,
-                    )
-                except TierFilterError as exc:
-                    return 422, {"error": str(exc)}
+            for sub in subtitles_by_tier[tier]:
                 sample_id = uuid.uuid4().hex[:12]
 
                 # Build slot info for display

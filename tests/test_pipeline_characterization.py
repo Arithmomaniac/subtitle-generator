@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -439,12 +441,23 @@ def test_default_generation_uses_configured_tone_target():
 def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
     import subtitle_generator.generate as generate_module
     import subtitle_generator.tiering as tiering_module
-    from subtitle_generator.generate import GeneratedSubtitle, generate_subtitle_matching_tiers
+    from subtitle_generator.generate import (
+        GeneratedSubtitle,
+        TierFilterError,
+        generate_subtitle_matching_tiers,
+    )
 
     conn = make_runtime_db()
     observed_seeds: list[int] = []
+    loaded_candidates: list[object] = []
 
-    def fake_generate_subtitle(conn, **kwargs):
+    def fake_load_generation_candidates(conn):
+        candidates = object()
+        loaded_candidates.append(candidates)
+        return candidates
+
+    def fake_generate_from_candidates(conn, candidates, **kwargs):
+        assert candidates is loaded_candidates[-1]
         observed_seeds.append(kwargs["seed"])
         return GeneratedSubtitle(
             text=f"Generated {len(observed_seeds)}",
@@ -458,7 +471,13 @@ def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
         tier = "pop" if subtitle == "Generated 2" else "mainstream"
         return SimpleNamespace(tier=tier)
 
-    monkeypatch.setattr(generate_module, "generate_subtitle", fake_generate_subtitle)
+    monkeypatch.setattr(
+        generate_module, "_load_generation_candidates", fake_load_generation_candidates,
+    )
+    monkeypatch.setattr(
+        generate_module, "_generate_subtitle_from_candidates",
+        fake_generate_from_candidates,
+    )
     monkeypatch.setattr(tiering_module, "compute_tier_evidence", fake_compute_tier_evidence)
 
     sub = generate_subtitle_matching_tiers(
@@ -470,6 +489,74 @@ def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
 
     assert sub.text == "Generated 2"
     assert observed_seeds == [11, 12]
+    assert len(loaded_candidates) == 1
+
+    with pytest.raises(TierFilterError, match="observed tiers: mainstream=3"):
+        generate_subtitle_matching_tiers(
+            conn,
+            allowed_tiers={"niche"},
+            seed=21,
+            max_attempts=3,
+        )
+    assert len(loaded_candidates) == 2
+
+
+def test_spot_check_tier_generation_uses_shared_candidate_pool(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    import subtitle_generator.tiering as tiering_module
+    from subtitle_generator.generate import GeneratedSubtitle, generate_subtitles_by_tier
+
+    conn = make_runtime_db()
+    observed_seeds: list[int] = []
+    loaded_candidates: list[object] = []
+    generated_tiers = ["mainstream", "pop", "niche", "pop", "niche", "mainstream"]
+
+    def fake_load_generation_candidates(conn):
+        candidates = object()
+        loaded_candidates.append(candidates)
+        return candidates
+
+    def fake_generate_from_candidates(conn, candidates, **kwargs):
+        assert candidates is loaded_candidates[-1]
+        observed_seeds.append(kwargs["seed"])
+        index = len(observed_seeds)
+        return GeneratedSubtitle(
+            text=f"Candidate {index}",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )
+
+    def fake_compute_tier_evidence(subtitle, conn):
+        index = int(subtitle.removeprefix("Candidate ")) - 1
+        return SimpleNamespace(tier=generated_tiers[index])
+
+    monkeypatch.setattr(
+        generate_module, "_load_generation_candidates", fake_load_generation_candidates,
+    )
+    monkeypatch.setattr(
+        generate_module, "_generate_subtitle_from_candidates",
+        fake_generate_from_candidates,
+    )
+    monkeypatch.setattr(tiering_module, "compute_tier_evidence", fake_compute_tier_evidence)
+
+    by_tier = generate_subtitles_by_tier(
+        conn,
+        tiers=["pop", "mainstream", "niche"],
+        samples_per_tier=2,
+        seed=100,
+        max_attempts=6,
+    )
+
+    assert [sub.text for sub in by_tier["pop"]] == ["Candidate 2", "Candidate 4"]
+    assert [sub.text for sub in by_tier["mainstream"]] == [
+        "Candidate 1",
+        "Candidate 6",
+    ]
+    assert [sub.text for sub in by_tier["niche"]] == ["Candidate 3", "Candidate 5"]
+    assert observed_seeds == [100, 101, 102, 103, 104, 105]
+    assert len(loaded_candidates) == 1
 
 
 def test_remix_precompute_validator_checks_version_and_columns():
