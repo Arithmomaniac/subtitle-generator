@@ -25,15 +25,6 @@ EXPECTED_TUNABLE_PARAMS = {
     "weighted_sample_spread": 0.12,
     "weighted_sample_bias_floor": 0.05,
     "default_generation_tone_target": 2.0,
-    "tone_target_pop_list_item": 0.78,
-    "tone_target_pop_action_noun": 0.78,
-    "tone_target_pop_of_object": 0.78,
-    "tone_target_mainstream_list_item": 0.3,
-    "tone_target_mainstream_action_noun": 0.3,
-    "tone_target_mainstream_of_object": 0.3,
-    "tone_target_niche_list_item": 0.16,
-    "tone_target_niche_action_noun": 0.16,
-    "tone_target_niche_of_object": 0.16,
     "tier_center_pop": 0.78,
     "tier_center_mainstream": 0.3,
     "tier_center_niche": 0.16,
@@ -312,7 +303,22 @@ def test_threshold_calibration_workers_cover_percentile_cutoffs():
     assert calibration.mainstream_count == 28
     assert calibration.niche_count == 64
     assert params["accessibility_threshold_pop"] == 0.92
-    assert params["tone_target_mainstream_of_object"] == params["tier_center_mainstream"]
+    assert params["tier_center_mainstream"] == 0.78
+
+
+def test_threshold_config_write_removes_legacy_tone_targets():
+    pop = _load_populate_popularity_module()
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO config VALUES ('tone_target_pop_list_item', '0.77')")
+    conn.execute("INSERT INTO config VALUES ('tier_center_pop', '0.7')")
+    conn.commit()
+
+    pop.write_threshold_config(conn, {"tier_center_pop": 0.8})
+
+    rows = dict(conn.execute("SELECT key, value FROM config"))
+    assert rows == {"tier_center_pop": "0.8"}
 
 
 def test_schema_contract_validator_reports_stage_context(tmp_path):
@@ -397,6 +403,7 @@ def test_parameter_views_preserve_defaults_and_db_overrides():
     assert get_tier_threshold_parameters(conn).accessibility_pop == 0.6
     assert get_tier_classifier_parameters(conn).pop_min_demand_confidence == 0.25
     assert get_tone_targets(conn).pop["list_item"] == 0.78
+    assert get_tone_targets(conn).mainstream["of_object"] == 0.3
 
 
 def test_seeded_generation_path_is_stable():
@@ -501,10 +508,144 @@ def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
     assert len(loaded_candidates) == 2
 
 
+def test_batch_generation_reuses_one_candidate_pool(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    from subtitle_generator.generate import GeneratedSubtitle, generate_subtitles
+
+    conn = make_runtime_db()
+    observed_seeds: list[int] = []
+    loaded_candidates: list[object] = []
+
+    def fake_load_generation_candidates(conn):
+        candidates = object()
+        loaded_candidates.append(candidates)
+        return candidates
+
+    def fake_generate_from_candidates(conn, candidates, **kwargs):
+        assert candidates is loaded_candidates[-1]
+        observed_seeds.append(kwargs["seed"])
+        return GeneratedSubtitle(
+            text=f"Generated {len(observed_seeds)}",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )
+
+    monkeypatch.setattr(
+        generate_module, "_load_generation_candidates", fake_load_generation_candidates,
+    )
+    monkeypatch.setattr(generate_module, "_has_enough_candidates", lambda candidates: True)
+    monkeypatch.setattr(
+        generate_module, "_generate_subtitle_from_candidates",
+        fake_generate_from_candidates,
+    )
+
+    subtitles = generate_subtitles(conn, n=3, seed_base=50)
+
+    assert [sub.text for sub in subtitles] == [
+        "Generated 1",
+        "Generated 2",
+        "Generated 3",
+    ]
+    assert observed_seeds == [50, 51, 52]
+    assert len(loaded_candidates) == 1
+
+
+def test_cli_spot_check_uses_raw_tone_targets_not_classifier_filter(monkeypatch):
+    import subtitle_generator.tune as tune_module
+    from subtitle_generator.generate import GeneratedSubtitle
+
+    conn = make_runtime_db()
+    requested_batches: list[tuple[int, dict[str, float]]] = []
+    captured_samples: list[tuple[str, str, object]] = []
+
+    def fake_generate_subtitles(conn, *, n, seed_base, tone_target, **kwargs):
+        requested_batches.append((seed_base, tone_target))
+        return [
+            GeneratedSubtitle(
+                text=f"Raw {seed_base + i}",
+                item1="Race",
+                item2="Power",
+                action_noun="Pursuit",
+                of_object="Happiness",
+            )
+            for i in range(n)
+        ]
+
+    def fake_spot_check_cli(conn, samples, tier_labels, tier_shortcuts, source):
+        captured_samples.extend(samples)
+        return 1.0
+
+    monkeypatch.setattr(
+        "subtitle_generator.generate.generate_subtitles", fake_generate_subtitles,
+    )
+    monkeypatch.setattr(tune_module, "_spot_check_cli", fake_spot_check_cli)
+
+    accuracy = tune_module.run_spot_check(conn, n_samples=2, seed_base=10)
+
+    assert accuracy == 1.0
+    assert [seed for seed, _ in requested_batches] == [10, 110, 210]
+    assert [target["list_item"] for _, target in requested_batches] == [0.78, 0.3, 0.16]
+    assert [tier for tier, _, _ in captured_samples] == [
+        "pop",
+        "pop",
+        "mainstream",
+        "mainstream",
+        "niche",
+        "niche",
+    ]
+
+
+def test_tier_batch_generation_fast_exits_when_candidates_missing(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    from subtitle_generator.generate import GenerationCandidates, generate_subtitles_by_tier
+
+    conn = make_runtime_db()
+    compute_calls = 0
+
+    def fake_compute_tier_evidence(subtitle, conn):
+        nonlocal compute_calls
+        compute_calls += 1
+        return SimpleNamespace(tier="mainstream")
+
+    monkeypatch.setattr(
+        generate_module,
+        "_load_generation_candidates",
+        lambda conn: GenerationCandidates([], [], []),
+    )
+    monkeypatch.setattr(
+        "subtitle_generator.tiering.compute_tier_evidence",
+        fake_compute_tier_evidence,
+    )
+
+    by_tier = generate_subtitles_by_tier(
+        conn,
+        tiers=["pop", "mainstream", "niche"],
+        samples_per_tier=2,
+        seed=100,
+        max_attempts=3,
+    )
+
+    assert {
+        tier: [sub.text for sub in subtitles]
+        for tier, subtitles in by_tier.items()
+    } == {
+        "pop": ["(not enough fillers — run 'build-slots' first)"] * 2,
+        "mainstream": ["(not enough fillers — run 'build-slots' first)"] * 2,
+        "niche": ["(not enough fillers — run 'build-slots' first)"] * 2,
+    }
+    assert compute_calls == 0
+
+
 def test_spot_check_tier_generation_uses_shared_candidate_pool(monkeypatch):
     import subtitle_generator.generate as generate_module
     import subtitle_generator.tiering as tiering_module
-    from subtitle_generator.generate import GeneratedSubtitle, generate_subtitles_by_tier
+    from subtitle_generator.generate import (
+        GeneratedSubtitle,
+        GenerationCandidates,
+        generate_subtitles_by_tier,
+    )
 
     conn = make_runtime_db()
     observed_seeds: list[int] = []
@@ -512,7 +653,7 @@ def test_spot_check_tier_generation_uses_shared_candidate_pool(monkeypatch):
     generated_tiers = ["mainstream", "pop", "niche", "pop", "niche", "mainstream"]
 
     def fake_load_generation_candidates(conn):
-        candidates = object()
+        candidates = GenerationCandidates([(), ()], [()], [()])
         loaded_candidates.append(candidates)
         return candidates
 

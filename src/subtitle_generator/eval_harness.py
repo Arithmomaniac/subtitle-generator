@@ -17,7 +17,7 @@ import click
 import litellm
 from pydantic import BaseModel
 
-from subtitle_generator.generate import generate_subtitle, generate_subtitle_matching_tiers
+from subtitle_generator.generate import generate_subtitles, generate_subtitles_by_tier
 from subtitle_generator.parameter_state import (
     DEFAULT_PROPOSER_MODEL as DEFAULT_PROPOSER_MODEL,
     DEFAULT_RATER_MODEL,
@@ -174,25 +174,22 @@ def generate_sample_set(
     seed_base: int = 1000,
 ) -> list:
     """Generate *n* subtitles with the given parameters."""
-    results = []
-    for i in range(n):
-        if tone:
-            sub = generate_subtitle_matching_tiers(
-                conn,
-                allowed_tiers={tone},
-                seed=seed_base + i,
-                remix_prob=remix_prob,
-                min_sim=min_sim,
-            )
-        else:
-            sub = generate_subtitle(
-                conn,
-                seed=seed_base + i,
-                remix_prob=remix_prob,
-                min_sim=min_sim,
-            )
-        results.append(sub)
-    return results
+    if tone:
+        return generate_subtitles_by_tier(
+            conn,
+            tiers=[tone],
+            samples_per_tier=n,
+            seed=seed_base,
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )[tone]
+    return generate_subtitles(
+        conn,
+        n=n,
+        seed_base=seed_base,
+        remix_prob=remix_prob,
+        min_sim=min_sim,
+    )
 
 
 # ---------------------------------------------------------------------------

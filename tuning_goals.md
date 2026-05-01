@@ -59,7 +59,7 @@ distribution (using `pop_classification_blend=0.9`). Current values:
 - `accessibility_threshold_mainstream`: 0.480 — p64, 4,570 fillers in mainstream tier
 - Niche: 7,199 fillers
 - `tier_center_pop`: 0.699, `tier_center_mainstream`: 0.480, `tier_center_niche`: 0.301
-- `tone_target_*` values match tier centers
+- Tone targets are derived from tier centers and `pop_slot_mult_*` values at runtime
 
 ### Current accuracy and next steps
 
@@ -97,7 +97,7 @@ Initial tuning round (April 2026) explored all `pop_*` params. Key findings:
 Second round (April 2026) added `pop_classification_blend` and recalibrated:
 - `pop_classification_blend=0.9` — high value drives tiers by actual popularity
 - Thresholds auto-calibrated from percentiles of blended score distribution
-- Tone targets aligned to calibrated tier centers
+- Tone targets derived from calibrated tier centers
 - Pop accuracy still low — `weighted_sample_spread` needs narrowing for new scale
 
 Third round (April 2026) — multi-source scoring redesign:
@@ -147,9 +147,6 @@ propose values outside these bounds.
 |---|---|---|---|---|
 | `weighted_sample_spread` | 0.05 | 0.5 | 0.12 | Gaussian width. Insensitive in [0.05, 0.15] under current scoring scale. |
 | `weighted_sample_bias_floor` | 0.01 | 0.30 | 0.01 | Minimum weight; pinned at lower bound. |
-| `tone_target_pop_*` | 0.4 | 1.0 | 0.699 | Aligned to tier_center_pop (auto-calibrated). Higher = more common words only. |
-| `tone_target_mainstream_*` | 0.2 | 0.6 | 0.480 | Aligned to tier_center_mainstream (auto-calibrated). Between pop and niche. |
-| `tone_target_niche_*` | 0.1 | 0.5 | 0.301 | Aligned to tier_center_niche (auto-calibrated). Lower = rarer words. |
 | `tier_center_pop` | 0.4 | 1.0 | 0.699 | Center score for pop tier (auto-calibrated from percentile distribution) |
 | `tier_center_mainstream` | 0.2 | 0.6 | 0.480 | Center score for mainstream tier (auto-calibrated) |
 | `tier_center_niche` | 0.1 | 0.5 | 0.301 | Center score for niche tier (auto-calibrated) |
@@ -168,9 +165,9 @@ propose values outside these bounds.
 | `pop_weight_nyt` | 0.0 | 1.0 | 0.1 | Weight of NYT bestseller signal in popularity composite |
 | `pop_weight_library` | 0.0 | 1.0 | 0.05 | Weight of other library lists signal in popularity composite |
 | `pop_missing_default` | 0.01 | 0.5 | 0.1 | Default popularity_score for fillers with no empirical data |
-| `pop_slot_mult_list_item` | 0.5 | 2.0 | 0.8 | Multiplier on tone_target for list items. Lower helped (less pop bias on items). |
-| `pop_slot_mult_action_noun` | 0.5 | 2.0 | 0.9 | Multiplier on tone_target for action nouns. Lower helped. |
-| `pop_slot_mult_of_object` | 0.5 | 2.0 | 1.0 | Multiplier on tone_target for of-objects. Both 0.9 and 1.2 hurt — leave at 1.0. |
+| `pop_slot_mult_list_item` | 0.5 | 2.0 | 0.8 | Multiplier on the tier center for list items. Lower helped (less pop bias on items). |
+| `pop_slot_mult_action_noun` | 0.5 | 2.0 | 0.9 | Multiplier on the tier center for action nouns. Lower helped. |
+| `pop_slot_mult_of_object` | 0.5 | 2.0 | 1.0 | Multiplier on the tier center for of-objects. Both 0.9 and 1.2 hurt — leave at 1.0. |
 
 ## Priority Order
 
@@ -192,10 +189,9 @@ From tuning history — parameters ranked by impact and exploration status:
 7. `pop_weight_spl` / `pop_weight_ol` — not yet explored (requires populate-popularity re-run)
 8. `weighted_sample_bias_floor` — historically impactful, pinned at lower bound (0.01)
 9. `accessibility_threshold_*` — auto-calibrated on every popularity-related change; do not tune manually
-12. `tone_target_*` — aligned to tier centers. Coordinate with `tier_center_*` if adjusting.
-13. `pop_base_weight_blend` — explored both directions from 0.5, both hurt. Stable at 0.5.
-14. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.
-15. `pop_missing_default` — lowering hurt. Stable at 0.1.
+12. `pop_base_weight_blend` — explored both directions from 0.5, both hurt. Stable at 0.5.
+13. `pop_slot_mult_of_object` — explored both directions from 1.0, both hurt. Stable at 1.0.
+14. `pop_missing_default` — lowering hurt. Stable at 0.1.
 
 ## Multi-Source Popularity
 

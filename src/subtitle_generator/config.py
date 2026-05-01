@@ -9,15 +9,6 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "weighted_sample_spread": 0.12,
     "weighted_sample_bias_floor": 0.05,
     "default_generation_tone_target": 2.0,
-    "tone_target_pop_list_item": 0.78,
-    "tone_target_pop_action_noun": 0.78,
-    "tone_target_pop_of_object": 0.78,
-    "tone_target_mainstream_list_item": 0.3,
-    "tone_target_mainstream_action_noun": 0.3,
-    "tone_target_mainstream_of_object": 0.3,
-    "tone_target_niche_list_item": 0.16,
-    "tone_target_niche_action_noun": 0.16,
-    "tone_target_niche_of_object": 0.16,
     "tier_center_pop": 0.78,
     "tier_center_mainstream": 0.3,
     "tier_center_niche": 0.16,
@@ -40,7 +31,7 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     # Evidence-aware jacket tier classification params
     "tier_pop_min_demand_confidence": 0.25,
     "tier_pop_min_lower_tail": 0.35,
-    # Per-slot popularity multipliers (applied to tone_target before Gaussian bias)
+    # Per-slot popularity multipliers (applied to tier center before Gaussian bias)
     "pop_slot_mult_list_item": 0.8,
     "pop_slot_mult_action_noun": 0.9,
     "pop_slot_mult_of_object": 1.0,
@@ -84,13 +75,14 @@ def invalidate_config_cache() -> None:
 
 
 def get_tone_targets(conn: sqlite3.Connection | None = None) -> dict[str, dict[str, float]]:
-    """Get TONE_TARGETS dict from config. Format: {tier: {slot: target}}."""
+    """Get base tone targets derived from tier centers."""
     cfg = load_tuning_config(conn)
     targets: dict[str, dict[str, float]] = {}
     for tier in ("pop", "mainstream", "niche"):
-        targets[tier] = {}
-        for slot in ("list_item", "action_noun", "of_object"):
-            targets[tier][slot] = cfg[f"tone_target_{tier}_{slot}"]
+        center = cfg[f"tier_center_{tier}"]
+        targets[tier] = {
+            slot: center for slot in ("list_item", "action_noun", "of_object")
+        }
     return targets
 
 

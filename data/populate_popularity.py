@@ -100,15 +100,6 @@ class ThresholdCalibration:
             "tier_center_pop": round(self.pop_center, 4),
             "tier_center_mainstream": round(self.mainstream_center, 4),
             "tier_center_niche": round(self.niche_center, 4),
-            "tone_target_pop_list_item": round(self.pop_center, 4),
-            "tone_target_pop_action_noun": round(self.pop_center, 4),
-            "tone_target_pop_of_object": round(self.pop_center, 4),
-            "tone_target_mainstream_list_item": round(self.mainstream_center, 4),
-            "tone_target_mainstream_action_noun": round(self.mainstream_center, 4),
-            "tone_target_mainstream_of_object": round(self.mainstream_center, 4),
-            "tone_target_niche_list_item": round(self.niche_center, 4),
-            "tone_target_niche_action_noun": round(self.niche_center, 4),
-            "tone_target_niche_of_object": round(self.niche_center, 4),
         }
 
 
@@ -719,9 +710,10 @@ def calibrate_threshold_values(scores: list[float]) -> ThresholdCalibration:
 
 
 def write_threshold_config(conn: sqlite3.Connection, params: dict[str, float]) -> None:
-    """Persist calibrated threshold/tone target values to config."""
+    """Persist calibrated thresholds and tier centers to config."""
 
     conn.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("DELETE FROM config WHERE key LIKE 'tone_target_%'")
     for key, value in params.items():
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",

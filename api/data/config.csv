@@ -22,15 +22,6 @@ tier_pop_min_demand_confidence,0.25
 tier_center_pop,0.7015
 tier_center_mainstream,0.4005
 tier_center_niche,0.301
-tone_target_pop_list_item,0.7015
-tone_target_pop_action_noun,0.7015
-tone_target_pop_of_object,0.7015
-tone_target_mainstream_list_item,0.4005
-tone_target_mainstream_action_noun,0.4005
-tone_target_mainstream_of_object,0.4005
-tone_target_niche_list_item,0.301
-tone_target_niche_action_noun,0.301
-tone_target_niche_of_object,0.301
 centroid_norm,2.9397037029266357
 avg_cross_sim_t1,0.19383802045380957
 avg_cross_sim_t2,0.24287751382758685

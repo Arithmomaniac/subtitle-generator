@@ -184,19 +184,19 @@ def get_tone_targets(conn: sqlite3.Connection | None = None) -> ToneTargets:
     cfg = _cfg(conn)
     return ToneTargets(
         pop={
-            "list_item": cfg["tone_target_pop_list_item"],
-            "action_noun": cfg["tone_target_pop_action_noun"],
-            "of_object": cfg["tone_target_pop_of_object"],
+            "list_item": cfg["tier_center_pop"],
+            "action_noun": cfg["tier_center_pop"],
+            "of_object": cfg["tier_center_pop"],
         },
         mainstream={
-            "list_item": cfg["tone_target_mainstream_list_item"],
-            "action_noun": cfg["tone_target_mainstream_action_noun"],
-            "of_object": cfg["tone_target_mainstream_of_object"],
+            "list_item": cfg["tier_center_mainstream"],
+            "action_noun": cfg["tier_center_mainstream"],
+            "of_object": cfg["tier_center_mainstream"],
         },
         niche={
-            "list_item": cfg["tone_target_niche_list_item"],
-            "action_noun": cfg["tone_target_niche_action_noun"],
-            "of_object": cfg["tone_target_niche_of_object"],
+            "list_item": cfg["tier_center_niche"],
+            "action_noun": cfg["tier_center_niche"],
+            "of_object": cfg["tier_center_niche"],
         },
     )
 

@@ -979,6 +979,35 @@ def generate_subtitle(
     )
 
 
+def generate_subtitles(
+    conn: sqlite3.Connection,
+    *,
+    n: int,
+    seed_base: int | None = 1000,
+    tone_target: dict[str, float] | None = None,
+    remix_prob: float = 0.0,
+    min_sim: float = 0.0,
+) -> list[GeneratedSubtitle]:
+    """Generate a batch from one source candidate snapshot."""
+
+    candidates = _load_generation_candidates(conn)
+    if not _has_enough_candidates(candidates):
+        return [_not_enough_fillers_subtitle() for _ in range(n)]
+
+    adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
+    return [
+        _generate_subtitle_from_candidates(
+            conn,
+            candidates,
+            seed=seed_base + i if seed_base is not None else None,
+            adjusted_tone_target=adjusted_tone_target,
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+        for i in range(n)
+    ]
+
+
 def _tone_target_for_tiers(
     conn: sqlite3.Connection,
     allowed_tiers: set[str] | None,
@@ -1005,13 +1034,13 @@ def generate_subtitle_matching_tiers(
 
     tone_target = _tone_target_for_tiers(conn, allowed_tiers)
     if not allowed_tiers:
-        return generate_subtitle(
+        return generate_subtitles(
             conn,
-            seed=seed,
-            tone_target=tone_target,
+            n=1,
+            seed_base=seed,
             remix_prob=remix_prob,
             min_sim=min_sim,
-        )
+        )[0]
 
     from subtitle_generator.tiering import compute_tier_evidence
 
@@ -1062,6 +1091,11 @@ def generate_subtitles_by_tier(
         tier: [] for tier in requested_tiers
     }
     candidates = _load_generation_candidates(conn)
+    if not _has_enough_candidates(candidates):
+        return {
+            tier: [_not_enough_fillers_subtitle() for _ in range(samples_per_tier)]
+            for tier in requested_tiers
+        }
     tone_targets = {
         tier: _adjust_tone_targets(conn, _tone_target_for_tiers(conn, {tier}))
         for tier in requested_tiers

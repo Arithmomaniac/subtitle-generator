@@ -192,6 +192,7 @@ def test_export_import_roundtrip():
         )
     """)
     conn.execute("INSERT INTO subtitles VALUES (1, 'Test Book', 'A Test Subtitle', 'openlibrary')")
+    conn.execute("INSERT INTO config VALUES ('tone_target_pop_list_item', '0.77')")
     conn.commit()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -216,6 +217,12 @@ def test_export_import_roundtrip():
             )
             assert first_row["popularity_score"] != "", (
                 "popularity_score should not be empty for Race"
+            )
+
+        with open(tmp_path / "config.csv", encoding="utf-8") as f:
+            config_rows = list(csv.DictReader(f))
+            assert all(
+                not row["key"].startswith("tone_target_") for row in config_rows
             )
 
         # Import into mini DB

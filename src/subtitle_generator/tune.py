@@ -92,7 +92,7 @@ def _proposal_change(
 
 
 def _run_calibrate_thresholds(conn: sqlite3.Connection) -> None:
-    """Re-derive accessibility thresholds, tier centers, and tone targets from
+    """Re-derive accessibility thresholds and tier centers from
     the current blended-score distribution. Cheap; safe to call after any
     repopulate or after a pop_classification_blend / pop_missing_default change.
     """
@@ -400,7 +400,7 @@ def _parse_bounds(goals_text: str) -> dict[str, tuple[float, float]]:
     Matches rows like:
       | `weighted_sample_spread` | 0.1 | 1.0 | 0.12 | ... |
     Also handles wildcard rows like:
-      | `tone_target_pop_*` | 0.5 | 2.5 | 1.0–1.5 | ... |
+      | `pop_slot_mult_*` | 0.5 | 2.0 | 0.8–1.0 | ... |
     """
     bounds: dict[str, tuple[float, float]] = {}
     for match in re.finditer(
@@ -468,7 +468,7 @@ def _summarize_regime_state(results_file: str) -> dict:
     # These params are auto-derived on every calibrate; manual tuning is futile.
     AUTO_CALIBRATED = {
         k for k in ALL_TUNABLE_PARAMS
-        if k.startswith(("accessibility_threshold_", "tier_center_", "tone_target_"))
+        if k.startswith(("accessibility_threshold_", "tier_center_"))
     }
     available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED
     path = pathlib.Path(results_file)
@@ -763,7 +763,7 @@ def run_spot_check(
     """
     import random as _rng
     from subtitle_generator.config import get_tone_targets
-    from subtitle_generator.generate import generate_subtitle
+    from subtitle_generator.generate import generate_subtitles
 
     if seed_base is None:
         seed_base = _rng.randint(0, 100000)
@@ -779,17 +779,14 @@ def run_spot_check(
     ))
 
     all_samples: list[tuple[str, str, object]] = []
-    for tier in tiers:
-        tone_target = {
-            slot: targets[tier][slot]
-            for slot in ["list_item", "action_noun", "of_object"]
-        }
-        for j in range(n_samples):
-            sub = generate_subtitle(
-                conn,
-                seed=seed_base + tiers.index(tier) * 100 + j,
-                tone_target=tone_target,
-            )
+    for tier_index, tier in enumerate(tiers):
+        subtitles = generate_subtitles(
+            conn,
+            n=n_samples,
+            seed_base=seed_base + tier_index * 100,
+            tone_target=targets[tier],
+        )
+        for sub in subtitles:
             all_samples.append((tier, sub.text, sub))
 
     accuracy = _spot_check_cli(conn, all_samples, tier_labels, tier_shortcuts, source)

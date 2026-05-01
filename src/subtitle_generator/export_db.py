@@ -44,7 +44,9 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     stats["slot_fillers.csv"] = len(rows)
 
     # -- config --
-    rows = source_conn.execute("SELECT key, value FROM config").fetchall()
+    rows = source_conn.execute(
+        "SELECT key, value FROM config WHERE key NOT LIKE 'tone_target_%'"
+    ).fetchall()
     path = output_dir / "config.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)

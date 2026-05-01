@@ -267,10 +267,11 @@ uses for tone targeting and jacket tone selection:
 - `tier_center_pop`
 - `tier_center_mainstream`
 - `tier_center_niche`
-- `tone_target_{tier}_{slot}`
 
-These values are written to `config`. They are the handoff between build-time
-scoring and runtime concepts such as "pop", "mainstream", and "niche".
+These values are written to `config`. Tier centers are the source of truth for
+runtime concepts such as "pop", "mainstream", and "niche"; serving derives
+slot-specific tone targets from the relevant tier center and `pop_slot_mult_*`
+runtime multipliers.
 
 #### Popularity thresholds and Gaussian bias
 
@@ -312,7 +313,7 @@ $$
 $$
 
 Tone filters are hard generation constraints. When a caller requests a tier,
-generation retries with that tier's tone target until `compute_tier_evidence()`
+generation retries with the tier-center-derived target until `compute_tier_evidence()`
 classifies the generated subtitle as one of the requested tiers. Jacket tone
 selection then uses the classifier result directly; it no longer samples or
 forces a mismatched requested tier after generation.
@@ -537,7 +538,7 @@ It manipulates:
 - numeric config rows in `config`
 - derived popularity scores in `slot_fillers` when population-related params
   change
-- derived thresholds/tone targets when classification-related params change
+- derived thresholds and tier centers when classification-related params change
 - result logs and best-state snapshots
 
 It does not manipulate:
@@ -688,7 +689,7 @@ they are not applied silently.
 | `pop_missing_default` | Missing-popularity filler classification | No | Yes |
 | `pop_base_weight_blend` | Runtime base sampling weights | No | No |
 | `weighted_sample_spread`, `weighted_sample_bias_floor` | Runtime tone-bias strength | No | No |
-| `pop_slot_mult_*` | Per-slot runtime tone targets | No | No |
+| `pop_slot_mult_*` | Per-slot runtime target multipliers | No | No |
 | `article_*` | Runtime article restoration | No | No |
 | `remix_reject_double_of` | Runtime remix filtering | No | No |
 
@@ -722,8 +723,8 @@ When behavior looks wrong, identify which concern owns the symptom:
 |---|---|
 | Bad source/citation or missing attribution | `slot_filler_sources`, `find_source`, mini DB export. |
 | Weird catalog/jargon filler | `slots.py` validation filters and `slot_fillers.mode`. |
-| Pop mode feels too obscure | popularity scores, thresholds, `pop_classification_blend`, tone targets. |
-| Pop and niche feel similar | `measure_tone_separation`, tone targets, sampling spread/bias floor. |
+| Pop mode feels too obscure | popularity scores, thresholds, `pop_classification_blend`, tier centers and slot multipliers. |
+| Pop and niche feel similar | `measure_tone_separation`, tier centers, slot multipliers, sampling spread/bias floor. |
 | Tuning keeps rejecting good-looking changes | metric scale, threshold calibration, results history/regime markers. |
 | Remix output is ungrammatical | remix classification, article stats, similarity threshold, double-of rejection. |
 | Web and CLI generate different shapes | `handlers.py` response contract vs CLI formatting. |
@@ -757,11 +758,11 @@ should not be conflated.
 | Tunable numeric params | Defaults in `config.py`, DB overrides in `config` | scoring, generation, tuning |
 | Popularity source weights | `pop_weight_*` config params | `populate-popularity` and repopulate during tuning |
 | Popularity blending params | `pop_base_weight_blend`, `pop_classification_blend`, `pop_missing_default` | sampling, tone bias, tier classification |
-| Tone thresholds and targets | auto-calibrated `config` rows | generation and jacket tone selection |
+| Tone thresholds and centers | auto-calibrated `config` rows | generation and jacket tone selection |
 | Article params | `article_*` config rows and article stats blobs | article restoration |
 | Remix params/constants | `remix_*`, `embedding_version`, centroid/cross-sim config rows | remix composition and validation |
 
 `parameter_state.py` exposes typed views so each stage can ask for only the
 state it needs: sampling params, popularity params, blend params, article params,
-remix params, tier thresholds, tone targets, runtime generation params, and the
+remix params, tier thresholds, derived tone targets, runtime generation params, and the
 model registry.
