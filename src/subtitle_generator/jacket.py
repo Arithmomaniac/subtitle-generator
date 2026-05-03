@@ -1,7 +1,6 @@
 """Generate full book jackets using the Copilot SDK (LLM + web_search)."""
 
 import asyncio
-import math
 import random
 import re
 import sqlite3
@@ -9,8 +8,9 @@ from collections.abc import Callable
 
 import click
 
-from subtitle_generator.config import load_tuning_config
 from subtitle_generator.parameter_state import DEFAULT_JACKET_MODEL
+from subtitle_generator.market_tiers import jacket_tone_text
+from subtitle_generator.tiering import TierEvidence, compute_tier_evidence, parse_subtitle_slots
 
 try:
     from copilot import CopilotClient
@@ -36,52 +36,14 @@ INLINE_BLURB_RE = re.compile(
 
 # --- Accessibility scoring & tone tiers ---
 
-_SUBTITLE_RE = re.compile(
-    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+the\s+(?P<action>.+?)\s+of\s+(?P<object>.+)$",
-    re.IGNORECASE,
-)
-
-TONE_HIGH = """\
-BOOK TYPE: POP / mass-market commercial.
-High-concept, instantly legible, and built for casual readers, gift buyers,
-BookTok/Bookstagram discovery, airport tables, Target/Costco displays, and library hold
-lists. Think celebrity memoir, self-help, pop science/history, or Malcolm Gladwell /
-Mary Roach / Atomic Habits-style nonfiction. Research recent bestseller lists, publisher
-pages, retailer copy, BookTok-friendly comps, podcasts, magazine features, and pop-culture
-flashpoints from the last 18-24 months. The hook should land in five seconds and promise
-surprise, suspense, empowerment, escape, or transformation."""
-
-TONE_MEDIUM = """\
-BOOK TYPE: MAINSTREAM / broad trade, book-club, literary-commercial.
-Accessible but substantial general-readership trade work for indie bookstore staff picks,
-NPR listeners, LibraryReads, book clubs, NYT Book Review coverage, and public-library
-new-book shelves. Think Ann Patchett, Erik Larson, Tara Westover, Rebecca Solnit, Patrick
-Radden Keefe, or narrative nonfiction from Knopf, Riverhead, FSG, Scribner, Norton, or
-Ecco. Research trade publisher copy, newspaper/book-section reviews, longform journalism,
-author interviews, and accessible scholarship. Promise emotional involvement plus
-something to think about, never pure hype or academic dryness."""
-
-TONE_LOW = """\
-BOOK TYPE: NICHE / scholarly, specialty, small-press, or deep-genre.
-For a clearly defined audience: specialists, students, practitioners, hobbyists, genre
-devotees, course adopters, or acquiring librarians. Think university-press monographs and
-academic trade crossovers from Princeton, Yale, Chicago, Duke, MIT, Verso, or Oxford;
-specialty nonfiction; translated/small-press literary work; technical books; or
-deep-genre titles. Research publisher catalog pages, Choice/ACRL-style reviews,
-field-specific journals, author bios, scholarly debates, specialist blogs, and prior
-books in the same series or subfield. The hook is authority and contribution."""
+TONE_HIGH = jacket_tone_text("pop")
+TONE_MEDIUM = jacket_tone_text("mainstream")
+TONE_LOW = jacket_tone_text("niche")
 
 
 def _parse_subtitle_fillers(subtitle: str) -> list[str]:
     """Extract the slot fillers from a subtitle string."""
-    m = _SUBTITLE_RE.match(subtitle)
-    if not m:
-        return []
-    list_part = m.group("list_part")
-    action = m.group("action").strip()
-    obj = re.sub(r"[\s]*[/:;,.]\s*$", "", m.group("object")).strip()
-    items = [item.strip() for item in list_part.split(",") if item.strip()]
-    return items + [action, obj]
+    return [slot.filler for slot in parse_subtitle_slots(subtitle)]
 
 
 def _lookup_freq(conn: sqlite3.Connection, filler: str) -> tuple[int, float | None]:
@@ -96,74 +58,16 @@ def _lookup_freq(conn: sqlite3.Connection, filler: str) -> tuple[int, float | No
 
 
 def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None) -> tuple[str, float]:
-    """Compute an accessibility tier for a subtitle based on filler scores.
+    """Compute the jacket tone and accessibility score for a subtitle.
 
-    Returns (tone_text, score) where score is a blend of mean(log10(1+freq))
-    and mean(popularity_score) per pop_tone_blend config.
+    Returns ``(tone_text, score)`` for compatibility with older callers. The
+    score is still the mean blended accessibility score, while the tone now
+    comes from the evidence-aware tier classifier. Do not infer a tier from the
+    returned score; use ``compute_tier_evidence`` when the tier decision matters.
     """
-    fillers = _parse_subtitle_fillers(subtitle)
-    if not fillers or conn is None:
-        return TONE_MEDIUM, 0.0
+    evidence = compute_tier_evidence(subtitle, conn)
+    return _TIER_TO_TONE[evidence.tier], evidence.accessibility_score
 
-    cfg = load_tuning_config(conn)
-    blend_tone = cfg.get("pop_classification_blend", 0.9)
-    pop_default = cfg.get("pop_missing_default", 0.1)
-
-    filler_data = [_lookup_freq(conn, f) for f in fillers]
-    blended_scores = []
-    for freq, pop_score in filler_data:
-        score_freq = math.log10(1 + freq)
-        ps = pop_score if pop_score is not None else pop_default
-        blended_scores.append((1 - blend_tone) * score_freq + blend_tone * ps)
-    score = sum(blended_scores) / len(blended_scores)
-
-    pop_thresh = cfg["accessibility_threshold_pop"]
-    main_thresh = cfg["accessibility_threshold_mainstream"]
-
-    # Thresholds tuned to the distribution:
-    # score > pop_thresh → fillers avg freq ~10+ (pop staples like Race, Power, America)
-    # score main_thresh-pop_thresh → fillers avg freq ~2-10 (mainstream nonfiction)
-    # score < main_thresh → fillers avg freq ~1-2 (niche/academic)
-    if score > pop_thresh:
-        tone = TONE_HIGH
-    elif score >= main_thresh:
-        tone = TONE_MEDIUM
-    else:
-        tone = TONE_LOW
-
-    return tone, score
-
-
-
-def sample_tone(score: float, allowed_tiers: set[str] | None = None, conn: sqlite3.Connection | None = None) -> tuple[str, str]:
-    """Randomly sample a tone tier with probabilities centered on the score.
-
-    Returns (tier_name, tone_text). Probabilities are Gaussian-weighted
-    by distance from each tier's center score. allowed_tiers clamps the
-    selection to a subset (zeroing out disallowed tiers and renormalizing).
-    """
-    cfg = load_tuning_config(conn)
-    spread = cfg["sample_tone_spread"]
-
-    tiers_def = [
-        ("pop", TONE_HIGH, cfg["tier_center_pop"]),
-        ("mainstream", TONE_MEDIUM, cfg["tier_center_mainstream"]),
-        ("niche", TONE_LOW, cfg["tier_center_niche"]),
-    ]
-    weights = []
-    tiers = []
-    for name, text, center in tiers_def:
-        if allowed_tiers and name not in allowed_tiers:
-            continue
-        w = math.exp(-((score - center) / spread) ** 2)
-        weights.append(w)
-        tiers.append((name, text))
-
-    if not tiers:
-        return "mainstream", TONE_MEDIUM
-
-    chosen = random.choices(tiers, weights=weights, k=1)[0]
-    return chosen
 
 
 JACKET_PROMPT = """\
@@ -418,26 +322,41 @@ def _format_blurb_instructions(source_types: list[str]) -> str:
     return "\n".join(lines)
 
 
-def build_jacket_prompt(
+def _select_jacket_tone(
+    subtitle: str,
+    conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
+) -> tuple[str, str, TierEvidence]:
+    evidence = compute_tier_evidence(subtitle, conn)
+    if tone_override:
+        tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
+        return tone_tier, tone_override, evidence
+
+    if allowed_tiers and evidence.tier not in allowed_tiers:
+        requested = ", ".join(sorted(allowed_tiers))
+        raise ValueError(
+            f"Subtitle evidence tier '{evidence.tier}' does not match allowed tier(s): "
+            f"{requested}"
+        )
+
+    tone_tier = evidence.tier
+    return tone_tier, _TIER_TO_TONE[tone_tier], evidence
+
+
+def _build_jacket_prompt_with_evidence(
     subtitle: str,
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
     rng: random.Random | None = None,
-) -> tuple[str, str, str]:
-    """Construct the jacket generation prompts without calling the LLM.
-
-    Returns (system_prompt, user_prompt, tone_tier) where:
-    - system_prompt contains role instructions, format requirements, and tone context
-    - user_prompt contains the subtitle framing
-    - tone_tier is "pop", "mainstream", or "niche"
-    """
-    if tone_override:
-        tone = tone_override
-        tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
-    else:
-        _, score = compute_accessibility(subtitle, conn)
-        tone_tier, tone = sample_tone(score, allowed_tiers, conn)
+) -> tuple[str, str, str, TierEvidence]:
+    tone_tier, tone, evidence = _select_jacket_tone(
+        subtitle,
+        conn=conn,
+        tone_override=tone_override,
+        allowed_tiers=allowed_tiers,
+    )
 
     review_outlets = _select_review_outlets(tone_tier, rng)
     blurb_source_types = _select_blurb_source_types(tone_tier, rng)
@@ -461,6 +380,31 @@ def build_jacket_prompt(
     else:
         system_prompt = full_prompt
         user_prompt = subtitle
+
+    return system_prompt, user_prompt, tone_tier, evidence
+
+
+def build_jacket_prompt(
+    subtitle: str,
+    conn: sqlite3.Connection | None = None,
+    tone_override: str | None = None,
+    allowed_tiers: set[str] | None = None,
+    rng: random.Random | None = None,
+) -> tuple[str, str, str]:
+    """Construct the jacket generation prompts without calling the LLM.
+
+    Returns (system_prompt, user_prompt, tone_tier) where:
+    - system_prompt contains role instructions, format requirements, and tone context
+    - user_prompt contains the subtitle framing
+    - tone_tier is "pop", "mainstream", or "niche"
+    """
+    system_prompt, user_prompt, tone_tier, _ = _build_jacket_prompt_with_evidence(
+        subtitle,
+        conn=conn,
+        tone_override=tone_override,
+        allowed_tiers=allowed_tiers,
+        rng=rng,
+    )
 
     return system_prompt, user_prompt, tone_tier
 
@@ -514,15 +458,20 @@ def _prepare_jacket_prompt(
     allowed_tiers: set[str] | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, str, str]:
-    system_prompt, user_prompt, tone_tier = build_jacket_prompt(
+    system_prompt, user_prompt, tone_tier, evidence = _build_jacket_prompt_with_evidence(
         subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
     )
 
     if tone_override:
         _progress("Tone: override", on_progress)
     else:
-        _, score = compute_accessibility(subtitle, conn)
-        _progress(f"Tone: {tone_tier} (score: {score:.2f})", on_progress)
+        _progress(
+            f"Tone: {tone_tier} "
+            f"(accessibility: {evidence.accessibility_score:.2f}, "
+            f"tail: {evidence.lower_tail_score:.2f}, "
+            f"demand: {evidence.demand_confidence:.2f})",
+            on_progress,
+        )
 
     return system_prompt, user_prompt, tone_tier
 

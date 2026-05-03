@@ -16,13 +16,20 @@ from subtitle_generator.extract_openlibrary import (
     extract_from_ol_dump,
 )
 from subtitle_generator.export_db import build_mini_db, export_data, export_mini_db
-from subtitle_generator.generate import TONE_TARGETS, format_sources, generate_subtitle, precompute_remix_data, slot_stats
+from subtitle_generator.generate import (
+    TierFilterError,
+    format_sources,
+    generate_subtitle_matching_tiers,
+    precompute_remix_data,
+    slot_stats,
+)
 from subtitle_generator.jacket import (
     TONE_HIGH, TONE_LOW, TONE_MEDIUM,
-    compute_accessibility, generate_jacket,
+    generate_jacket,
 )
 from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
 from subtitle_generator.slots import build_slots, ensure_slot_tables
+from subtitle_generator.tiering import compute_tier_evidence
 
 
 _TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
@@ -32,14 +39,8 @@ _TONE_OVERRIDE_MAP = {"p": "pop", "m": "mainstream", "n": "niche"}
 
 def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
     """Compute system tone tier and score for a subtitle."""
-    from subtitle_generator.config import load_tuning_config
-    _, score = compute_accessibility(subtitle, conn)
-    cfg = load_tuning_config(conn)
-    if score > cfg["accessibility_threshold_pop"]:
-        return "pop", score
-    elif score >= cfg["accessibility_threshold_mainstream"]:
-        return "mainstream", score
-    return "niche", score
+    evidence = compute_tier_evidence(subtitle, conn)
+    return evidence.tier, evidence.accessibility_score
 
 
 _TAG_MAP = {
@@ -381,18 +382,10 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     effective_remix_prob = remix_prob if remix else 0.0
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
-        click.echo(f"Tone bias: {', '.join(sorted(tone_set))}")
+        click.echo(f"Tier filter: {', '.join(sorted(tone_set))}")
     if effective_remix_prob > 0:
         click.echo(f"Remix: prob={effective_remix_prob:.1f}, min_sim={min_sim:.2f}")
     click.echo()
-
-    # Compute per-slot tone targets (average across requested tiers)
-    tone_target = None
-    if tone_set:
-        merged = {}
-        for slot in ["list_item", "action_noun", "of_object"]:
-            merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
-        tone_target = merged
 
     reviewed_count = 0
     thumbs_up = 0
@@ -400,12 +393,30 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
 
     for i in range(count):
         s = seed + i if seed is not None else None
-        sub = generate_subtitle(conn, seed=s, tone_target=tone_target, remix_prob=effective_remix_prob, min_sim=min_sim)
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                seed=s,
+                remix_prob=effective_remix_prob,
+                min_sim=min_sim,
+            )
+        except TierFilterError as exc:
+            raise click.ClickException(str(exc)) from exc
 
         if jacket:
             click.echo(f"Generating jacket for: {sub.text}\n")
             kwargs = {"model": model} if model else {}
-            md = generate_jacket(sub.text, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
+            try:
+                md = generate_jacket(
+                    sub.text,
+                    show_concept=show_concept,
+                    conn=conn,
+                    allowed_tiers=tone_set,
+                    **kwargs,
+                )
+            except ValueError as exc:
+                raise click.ClickException(str(exc)) from exc
             click.echo(md)
             if sources:
                 click.echo(format_sources(conn, sub))
@@ -460,13 +471,6 @@ def review(count: int, tone: str | None):
     row = conn.execute("SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'").fetchone()
     min_sim = float(row[0]) if row else 0.1
 
-    tone_target = None
-    if tone_set:
-        merged = {}
-        for slot in ["list_item", "action_noun", "of_object"]:
-            merged[slot] = sum(TONE_TARGETS[t][slot] for t in tone_set) / len(tone_set)
-        tone_target = merged
-
     click.echo(f"Review session: {count} subtitles" + (f" (tone: {tone})" if tone else ""))
     click.echo("Rate each subtitle — all prompts are skippable with Enter.\n")
 
@@ -475,7 +479,15 @@ def review(count: int, tone: str | None):
     thumbs_down = 0
 
     for i in range(count):
-        sub = generate_subtitle(conn, tone_target=tone_target, remix_prob=remix_prob, min_sim=min_sim)
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                remix_prob=remix_prob,
+                min_sim=min_sim,
+            )
+        except TierFilterError as exc:
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"  {i + 1:2d}. {sub.text}")
 
         result = _prompt_review(conn, sub.text)
@@ -515,7 +527,17 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
     conn = get_db()
     if subtitle:
         click.echo(f"Generating jacket for: {subtitle}\n")
-        md = generate_jacket(subtitle, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
+        try:
+            md = generate_jacket(
+                subtitle,
+                show_concept=show_concept,
+                conn=conn,
+                allowed_tiers=tone_set,
+                **kwargs,
+            )
+        except ValueError as exc:
+            conn.close()
+            raise click.ClickException(str(exc)) from exc
         click.echo(md)
     else:
         stats = slot_stats(conn)
@@ -523,9 +545,27 @@ def jacket(subtitle: str | None, seed: int | None, sources: bool, model: str | N
             conn.close()
             raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
         click.echo(f"Slot machine loaded: {stats}\n")
-        sub = generate_subtitle(conn, seed=seed)
+        try:
+            sub = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=tone_set,
+                seed=seed,
+            )
+        except TierFilterError as exc:
+            conn.close()
+            raise click.ClickException(str(exc)) from exc
         click.echo(f"Generating jacket for: {sub.text}\n")
-        md = generate_jacket(sub.text, show_concept=show_concept, conn=conn, allowed_tiers=tone_set, **kwargs)
+        try:
+            md = generate_jacket(
+                sub.text,
+                show_concept=show_concept,
+                conn=conn,
+                allowed_tiers=tone_set,
+                **kwargs,
+            )
+        except ValueError as exc:
+            conn.close()
+            raise click.ClickException(str(exc)) from exc
         click.echo(md)
         if sources:
             click.echo(format_sources(conn, sub))
@@ -798,6 +838,98 @@ def export_data_cmd(output_dir: str):
     for filename, count in stats.items():
         size_kb = (out / filename).stat().st_size / 1024
         click.echo(f"  {filename}: {count:,} rows ({size_kb:.0f} KB)")
+
+
+@cli.command("classify-source-tiers")
+@click.option("--limit", default=20, show_default=True, help="Maximum rows to label.")
+@click.option(
+    "--batch-size",
+    default=10,
+    show_default=True,
+    help=(
+        "Rows per LLM batch; for hosted web search this is also the "
+        "concurrency burst size."
+    ),
+)
+@click.option(
+    "--model",
+    default=None,
+    help="LLM model to use. Defaults to the configured rater model.",
+)
+@click.option(
+    "--selection",
+    type=click.Choice(["random", "id"]),
+    default="random",
+    show_default=True,
+    help="How to choose unlabeled pattern_matches rows.",
+)
+@click.option(
+    "--random-seed",
+    default=20260501,
+    show_default=True,
+    help="Seed used when --selection=random.",
+)
+@click.option("--force", is_flag=True, help="Relabel already-labeled rows too.")
+@click.option("--dry-run", is_flag=True, help="Show selected rows without calling the LLM.")
+@click.option(
+    "--web-search/--no-web-search",
+    default=True,
+    show_default=True,
+    help="Use hosted Responses web_search for evidence-grounded labels.",
+)
+@click.option("--no-export", is_flag=True, help="Do not refresh source_tier_labels.csv.")
+@click.option(
+    "--output",
+    default="api/data/source_tier_labels.csv",
+    show_default=True,
+    help="CSV path for exported labels.",
+)
+def classify_source_tiers_cmd(
+    limit: int,
+    batch_size: int,
+    model: str | None,
+    selection: str,
+    random_seed: int,
+    force: bool,
+    dry_run: bool,
+    web_search: bool,
+    no_export: bool,
+    output: str,
+):
+    """LLM-label source title market tiers on pattern_matches rows."""
+    from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
+    from subtitle_generator.source_tier_enrichment import classify_source_tiers
+
+    conn = get_db()
+    try:
+        result = classify_source_tiers(
+            conn,
+            limit=limit,
+            batch_size=batch_size,
+            model=model or DEFAULT_RATER_MODEL,
+            selection=selection,
+            random_seed=random_seed,
+            force=force,
+            dry_run=dry_run,
+            web_search=web_search,
+            export_path=None if no_export else Path(output),
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+
+    if dry_run:
+        click.echo(
+            f"Selected {len(result.selected)} rows "
+            f"(selection={selection}, random_seed={random_seed}):"
+        )
+        for candidate in result.selected:
+            click.echo(f"  {candidate.id}: {candidate.title} — {candidate.subtitle}")
+    else:
+        click.echo(f"Labeled {result.labeled_count} source-title rows.")
+    if result.export_path and not result.dry_run:
+        click.echo(f"Exported {result.exported_count} labels to {result.export_path}")
 
 
 @cli.command("build-db")
@@ -1111,6 +1243,68 @@ def validate_pipeline_cmd(db_path: Path, embedding_version: str):
     click.echo(format_validation_report(report))
     if not report.ok:
         raise click.exceptions.Exit(1)
+
+
+@cli.command("tier-diagnostic")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to inspect.")
+def tier_diagnostic_cmd(db_path: Path):
+    """Report real-title pop/mainstream/niche fixture classification."""
+
+    from subtitle_generator.tier_diagnostics import format_real_title_tier_report
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        click.echo(format_real_title_tier_report(conn))
+    finally:
+        conn.close()
+
+
+@cli.command("calibrate-tier-gates")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to inspect.")
+@click.option("--min-confidence", type=click.FloatRange(min=0.0, max=1.0), default=0.0, show_default=True, help="Minimum source-label confidence to include.")
+@click.option("--apply", "apply_suggestion", is_flag=True, help="Write the suggested tier gates to the config table.")
+def calibrate_tier_gates_cmd(
+    db_path: Path,
+    min_confidence: float,
+    apply_suggestion: bool,
+):
+    """Suggest deterministic tier gates from source-title labels."""
+
+    from subtitle_generator.tier_diagnostics import (
+        apply_tier_gate_calibration,
+        format_tier_gate_calibration_report,
+        suggest_tier_gate_config,
+    )
+
+    if apply_suggestion:
+        conn = sqlite3.connect(db_path)
+    else:
+        try:
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        except sqlite3.OperationalError as exc:
+            raise click.ClickException(
+                f"Unable to open database read-only: {db_path}"
+            ) from exc
+    try:
+        calibration = suggest_tier_gate_config(
+            conn,
+            min_confidence=min_confidence,
+        )
+        click.echo(format_tier_gate_calibration_report(
+            conn,
+            min_confidence=min_confidence,
+            calibration=calibration,
+        ))
+        if apply_suggestion:
+            if calibration is None:
+                raise click.ClickException("No source-title labels available to apply.")
+            apply_tier_gate_calibration(conn, calibration)
+            click.echo("\nApplied suggested tier gates to config.")
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

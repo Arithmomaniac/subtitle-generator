@@ -97,7 +97,7 @@ def _validate_popularity_coverage(conn: sqlite3.Connection) -> list[ValidationIs
             message="popularity_scoring: missing required table 'slot_fillers'",
         )]
 
-    required_columns = {"slot_type", "mode", "popularity_score"}
+    required_columns = {"slot_type", "mode"}
     actual_columns = _columns(conn, "slot_fillers")
     if not required_columns <= actual_columns:
         missing = ", ".join(sorted(required_columns - actual_columns))
@@ -108,6 +108,16 @@ def _validate_popularity_coverage(conn: sqlite3.Connection) -> list[ValidationIs
         )]
 
     issues: list[ValidationIssue] = []
+    evidence_columns = {"popularity_score", "popularity_level", "popularity_confidence"}
+    missing_evidence_columns = evidence_columns - actual_columns
+    if missing_evidence_columns:
+        missing = ", ".join(sorted(missing_evidence_columns))
+        issues.append(ValidationIssue(
+            stage="popularity_scoring",
+            check="coverage",
+            message=f"popularity_scoring: slot_fillers is missing columns: {missing}",
+        ))
+
     strict_count = conn.execute(
         "SELECT COUNT(*) FROM slot_fillers WHERE mode = 'strict'"
     ).fetchone()[0]
@@ -119,21 +129,40 @@ def _validate_popularity_coverage(conn: sqlite3.Connection) -> list[ValidationIs
         ))
         return issues
 
-    missing_scores = conn.execute(
-        """
-        SELECT COUNT(*) FROM slot_fillers
-        WHERE mode = 'strict' AND popularity_score IS NULL
-        """
-    ).fetchone()[0]
-    if missing_scores:
-        issues.append(ValidationIssue(
-            stage="popularity_scoring",
-            check="coverage",
-            message=(
-                "popularity_scoring: "
-                f"{missing_scores} strict slot fillers lack popularity_score"
-            ),
-        ))
+    if "popularity_score" in actual_columns:
+        missing_scores = conn.execute(
+            """
+            SELECT COUNT(*) FROM slot_fillers
+            WHERE mode = 'strict' AND popularity_score IS NULL
+            """
+        ).fetchone()[0]
+        if missing_scores:
+            issues.append(ValidationIssue(
+                stage="popularity_scoring",
+                check="coverage",
+                message=(
+                    "popularity_scoring: "
+                    f"{missing_scores} strict slot fillers lack popularity_score"
+                ),
+            ))
+
+    if {"popularity_level", "popularity_confidence"} <= actual_columns:
+        missing_evidence = conn.execute(
+            """
+            SELECT COUNT(*) FROM slot_fillers
+            WHERE mode = 'strict'
+              AND (popularity_level IS NULL OR popularity_confidence IS NULL)
+            """
+        ).fetchone()[0]
+        if missing_evidence:
+            issues.append(ValidationIssue(
+                stage="popularity_scoring",
+                check="coverage",
+                message=(
+                    "popularity_scoring: "
+                    f"{missing_evidence} strict slot fillers lack popularity level/confidence"
+                ),
+            ))
 
     slot_counts = dict(conn.execute(
         """

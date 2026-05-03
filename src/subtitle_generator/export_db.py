@@ -4,6 +4,8 @@ import csv
 import sqlite3
 from pathlib import Path
 
+from subtitle_generator.schema_contracts import MINI_DB_SCHEMA_CONTRACTS, validate_schema
+
 
 def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     """Export slot_fillers, config, and sources as CSV files.
@@ -20,7 +22,7 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     rows = source_conn.execute(
         "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep, "
         "remix_type, remix_prep, remix_word_count, centroid_dot, norm_sq, token_count, "
-        "popularity_score "
+        "popularity_score, popularity_level, popularity_confidence "
         "FROM slot_fillers"
     ).fetchall()
     path = output_dir / "slot_fillers.csv"
@@ -30,21 +32,21 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
             "id", "slot_type", "filler", "mode", "source_subtitle_id", "freq",
             "pos_tag", "prep", "remix_type", "remix_prep", "remix_word_count",
             "centroid_dot", "norm_sq", "token_count", "popularity_score",
+            "popularity_level", "popularity_confidence",
         ])
         for row in rows:
             row = list(row)
             # Convert None floats to empty strings for CSV
-            if row[11] is None:
-                row[11] = ""
-            if row[12] is None:
-                row[12] = ""
-            if row[14] is None:
-                row[14] = ""
+            for idx in (11, 12, 14, 15, 16):
+                if row[idx] is None:
+                    row[idx] = ""
             w.writerow(row)
     stats["slot_fillers.csv"] = len(rows)
 
     # -- config --
-    rows = source_conn.execute("SELECT key, value FROM config").fetchall()
+    rows = source_conn.execute(
+        "SELECT key, value FROM config WHERE key NOT LIKE 'tone_target_%'"
+    ).fetchall()
     path = output_dir / "config.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -104,6 +106,8 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
             norm_sq REAL,
             token_count INTEGER,
             popularity_score REAL,
+            popularity_level INTEGER DEFAULT 0,
+            popularity_confidence REAL DEFAULT 0.0,
             UNIQUE(slot_type, filler)
         )
     """)
@@ -115,6 +119,8 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
             centroid_dot = float(row["centroid_dot"]) if row.get("centroid_dot") else None
             norm_sq = float(row["norm_sq"]) if row.get("norm_sq") else None
             popularity_score = float(row["popularity_score"]) if row.get("popularity_score") else None
+            popularity_level = int(row.get("popularity_level") or 0)
+            popularity_confidence = float(row.get("popularity_confidence") or 0.0)
             rows.append((
                 int(row["id"]), row["slot_type"], row["filler"], row["mode"],
                 int(row["source_subtitle_id"]) if row["source_subtitle_id"] else None,
@@ -127,9 +133,11 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
                 norm_sq,
                 int(row["token_count"]) if row.get("token_count") else None,
                 popularity_score,
+                popularity_level,
+                popularity_confidence,
             ))
         conn.executemany(
-            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
+            "INSERT INTO slot_fillers VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
         )
         stats["slot_fillers"] = len(rows)
 
@@ -167,6 +175,11 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
     conn.execute("CREATE INDEX idx_sources_filler ON sources(slot_filler_id)")
 
     conn.commit()
+    issues = validate_schema(conn, MINI_DB_SCHEMA_CONTRACTS)
+    if issues:
+        detail = "\n".join(issue.message for issue in issues)
+        conn.close()
+        raise RuntimeError(f"Mini DB schema validation failed:\n{detail}")
     conn.execute("VACUUM")
     conn.close()
 

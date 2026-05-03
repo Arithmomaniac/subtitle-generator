@@ -200,6 +200,26 @@ uv run subtitle-gen review                      # rate 20 subtitles
 uv run subtitle-gen generate --review           # rate while generating
 ```
 
+Source-title tier labels can be populated separately for calibration/evaluation:
+
+```bash
+uv sync --extra tune
+uv run subtitle-gen classify-source-tiers --dry-run --limit 20
+uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10
+```
+
+`classify-source-tiers` stores labels on `pattern_matches.llm_market_tier*` and
+exports `api/data/source_tier_labels.csv` keyed by stable `subtitle_id` plus the
+current `pattern_match_id`. It uses the shared pop/mainstream/niche taxonomy
+from `market_tiers.py`, with source-label wording distinct from jacket-tone
+wording. By default, it uses hosted Responses `web_search` once per source
+title; the rationale includes whether the evidence was an exact match,
+weak/adjacent match, or no reliable match.
+Pass `--no-web-search` to fall back to title/subtitle-only structured labeling.
+The reusable Copilot MCP bridge lives in `subtitle_generator.copilot_web_search`
+as a plain importable module for future scripts/tools; no FastMCP server is
+required for this workflow.
+
 Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 
 ## Commands
@@ -215,6 +235,7 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `generate` | Random subtitle generation (+ optional jacket, review) |
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
+| `classify-source-tiers` | LLM-label real source-title market tiers for calibration/evaluation |
 | `tune` | Autoresearch tuning loop (remix + tone parameters) |
 | `review` | Interactive subtitle rating session |
 | `precompute-vectors` | Recompute remix vector/scalar state after slot extraction changes |
@@ -232,7 +253,7 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 
 ```
 src/subtitle_generator/
-  generate.py          # subtitle generation with remix + locked slots + article logic
+  generate.py          # subtitle generation with remix + article logic
   jacket.py            # jacket prompt construction + LLM execution
   slots.py             # slot extraction + decomposition + article stats
   source_validation.py # shared title/subtitle repair and source corruption checks

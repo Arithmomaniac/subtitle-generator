@@ -16,9 +16,15 @@ from subtitle_generator.jacket import (  # noqa: E402
     JACKET_PROMPT,
     REVIEW_OUTLET_WEIGHTS,
     TONE_HIGH,
+    _prepare_jacket_prompt,
     _strip_internal_concept,
     _validate_jacket,
     build_jacket_prompt,
+)
+from subtitle_generator.market_tiers import MARKET_TIER_DEFINITIONS  # noqa: E402
+from subtitle_generator.source_tier_enrichment import (  # noqa: E402
+    SourceTierCandidate,
+    build_source_tier_prompt,
 )
 
 
@@ -93,6 +99,25 @@ def test_prompt_includes_tier_specific_book_and_back_cover_guidance():
     assert "NICHE back-cover style" not in pop_prompt
 
 
+def test_source_label_and_jacket_tone_share_market_tier_definitions():
+    pop_prompt, _, _ = build_jacket_prompt(
+        "Faith, Commerce, and the Making of Modern Appetite",
+        tone_override=TONE_HIGH,
+        rng=random.Random(7),
+    )
+    source_prompt = build_source_tier_prompt((
+        SourceTierCandidate(
+            id=1,
+            title="Bright Ruins",
+            subtitle="Faith, Commerce, and the Making of Modern Appetite",
+        ),
+    ))
+
+    assert MARKET_TIER_DEFINITIONS["pop"].jacket_definition in pop_prompt
+    for tier, definition in MARKET_TIER_DEFINITIONS.items():
+        assert f"- {tier}: {definition.source_label_definition}" in source_prompt
+
+
 def test_prompt_preselects_reviews_and_blurb_sources():
     system_prompt, _, tone_tier = build_jacket_prompt(
         "Faith, Commerce, and the Making of Modern Appetite",
@@ -122,6 +147,21 @@ def test_prompt_preselects_reviews_and_blurb_sources():
     assert "Pick the most appropriate trade publication" not in system_prompt
     assert "BookLife (by Publishers Weekly)" not in system_prompt
     assert "Choice (ACRL)" not in system_prompt
+
+
+def test_prepare_prompt_rejects_tier_filter_mismatch():
+    progress: list[str] = []
+
+    try:
+        _prepare_jacket_prompt(
+            "Faith, Commerce, and the Making of Modern Appetite",
+            allowed_tiers={"pop"},
+            on_progress=progress.append,
+        )
+    except ValueError as exc:
+        assert "does not match allowed tier" in str(exc)
+    else:
+        raise AssertionError("tier filter mismatch should fail instead of forcing tone")
 
 
 def test_validate_accepts_inline_back_cover_blurbs():

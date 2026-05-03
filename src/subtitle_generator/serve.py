@@ -13,7 +13,11 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from subtitle_generator.generate import GeneratedSubtitle, generate_subtitle
+from subtitle_generator.generate import (
+    GeneratedSubtitle,
+    TierFilterError,
+    generate_subtitles_by_tier,
+)
 from subtitle_generator.handlers import (
     get_db as _get_db,
     handle_generate as _handle_generate,
@@ -92,8 +96,6 @@ _spot_check_samples: dict[str, dict] = {}
 
 def _handle_spot_check_batch(body: dict) -> tuple[int, dict]:
     """Generate a shuffled batch of tone-targeted subtitles for spot-checking."""
-    from subtitle_generator.config import get_tone_targets
-
     samples_per_tier = body.get("samples_per_tier", 2)
     if not isinstance(samples_per_tier, int) or not 1 <= samples_per_tier <= 5:
         return 400, {"error": "samples_per_tier must be an integer 1-5"}
@@ -104,19 +106,22 @@ def _handle_spot_check_batch(body: dict) -> tuple[int, dict]:
 
     conn = _get_db()
     try:
-        targets = get_tone_targets(conn)
         tiers = ["pop", "mainstream", "niche"]
         batch_id = uuid.uuid4().hex[:12]
         items: list[dict] = []
 
+        try:
+            subtitles_by_tier = generate_subtitles_by_tier(
+                conn,
+                tiers=tiers,
+                samples_per_tier=samples_per_tier,
+                seed=seed_base,
+            )
+        except TierFilterError as exc:
+            return 422, {"error": str(exc)}
+
         for tier in tiers:
-            tone_target = {
-                slot: targets[tier][slot]
-                for slot in ["list_item", "action_noun", "of_object"]
-            }
-            for j in range(samples_per_tier):
-                seed = seed_base + tiers.index(tier) * 100 + j
-                sub = generate_subtitle(conn, seed=seed, tone_target=tone_target)
+            for sub in subtitles_by_tier[tier]:
                 sample_id = uuid.uuid4().hex[:12]
 
                 # Build slot info for display

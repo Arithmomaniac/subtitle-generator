@@ -18,6 +18,14 @@ RESPONSES_ONLY_MODELS = frozenset({"gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"})
 class SamplingParameters:
     weighted_sample_spread: float
     weighted_sample_bias_floor: float
+    default_generation_tone_target: float
+
+
+@dataclass(frozen=True)
+class GenerationTierRatios:
+    pop: float
+    mainstream: float
+    niche: float
 
 
 @dataclass(frozen=True)
@@ -27,14 +35,12 @@ class PopularityParameters:
     weight_goodreads: float
     weight_nyt: float
     weight_library: float
-    weight_frequency: float
     exponent: float
 
 
 @dataclass(frozen=True)
 class PopularityBlendParameters:
     base_weight_blend: float
-    tone_blend: float
     classification_blend: float
     missing_default: float
 
@@ -68,6 +74,12 @@ class TierThresholdParameters:
 
 
 @dataclass(frozen=True)
+class TierClassifierParameters:
+    pop_min_demand_confidence: float
+    pop_min_lower_tail: float
+
+
+@dataclass(frozen=True)
 class ToneTargets:
     pop: dict[str, float]
     mainstream: dict[str, float]
@@ -77,6 +89,7 @@ class ToneTargets:
 @dataclass(frozen=True)
 class RuntimeGenerationParameters:
     sampling: SamplingParameters
+    generation_tier_ratios: GenerationTierRatios
     popularity_blends: PopularityBlendParameters
     slot_multipliers: SlotMultiplierParameters
     article: ArticleParameters
@@ -100,6 +113,18 @@ def get_sampling_parameters(conn: sqlite3.Connection | None = None) -> SamplingP
     return SamplingParameters(
         weighted_sample_spread=cfg["weighted_sample_spread"],
         weighted_sample_bias_floor=cfg["weighted_sample_bias_floor"],
+        default_generation_tone_target=cfg["default_generation_tone_target"],
+    )
+
+
+def get_generation_tier_ratios(
+    conn: sqlite3.Connection | None = None,
+) -> GenerationTierRatios:
+    cfg = _cfg(conn)
+    return GenerationTierRatios(
+        pop=cfg["generation_tier_ratio_pop"],
+        mainstream=cfg["generation_tier_ratio_mainstream"],
+        niche=cfg["generation_tier_ratio_niche"],
     )
 
 
@@ -111,7 +136,6 @@ def get_popularity_parameters(conn: sqlite3.Connection | None = None) -> Popular
         weight_goodreads=cfg["pop_weight_gr"],
         weight_nyt=cfg["pop_weight_nyt"],
         weight_library=cfg["pop_weight_library"],
-        weight_frequency=cfg["pop_weight_freq"],
         exponent=cfg["pop_exponent"],
     )
 
@@ -122,7 +146,6 @@ def get_popularity_blend_parameters(
     cfg = _cfg(conn)
     return PopularityBlendParameters(
         base_weight_blend=cfg["pop_base_weight_blend"],
-        tone_blend=cfg["pop_tone_blend"],
         classification_blend=cfg["pop_classification_blend"],
         missing_default=cfg["pop_missing_default"],
     )
@@ -166,23 +189,33 @@ def get_tier_threshold_parameters(
     )
 
 
+def get_tier_classifier_parameters(
+    conn: sqlite3.Connection | None = None,
+) -> TierClassifierParameters:
+    cfg = _cfg(conn)
+    return TierClassifierParameters(
+        pop_min_demand_confidence=cfg["tier_pop_min_demand_confidence"],
+        pop_min_lower_tail=cfg["tier_pop_min_lower_tail"],
+    )
+
+
 def get_tone_targets(conn: sqlite3.Connection | None = None) -> ToneTargets:
     cfg = _cfg(conn)
     return ToneTargets(
         pop={
-            "list_item": cfg["tone_target_pop_list_item"],
-            "action_noun": cfg["tone_target_pop_action_noun"],
-            "of_object": cfg["tone_target_pop_of_object"],
+            "list_item": cfg["tier_center_pop"],
+            "action_noun": cfg["tier_center_pop"],
+            "of_object": cfg["tier_center_pop"],
         },
         mainstream={
-            "list_item": cfg["tone_target_mainstream_list_item"],
-            "action_noun": cfg["tone_target_mainstream_action_noun"],
-            "of_object": cfg["tone_target_mainstream_of_object"],
+            "list_item": cfg["tier_center_mainstream"],
+            "action_noun": cfg["tier_center_mainstream"],
+            "of_object": cfg["tier_center_mainstream"],
         },
         niche={
-            "list_item": cfg["tone_target_niche_list_item"],
-            "action_noun": cfg["tone_target_niche_action_noun"],
-            "of_object": cfg["tone_target_niche_of_object"],
+            "list_item": cfg["tier_center_niche"],
+            "action_noun": cfg["tier_center_niche"],
+            "of_object": cfg["tier_center_niche"],
         },
     )
 
@@ -192,6 +225,7 @@ def get_runtime_generation_parameters(
 ) -> RuntimeGenerationParameters:
     return RuntimeGenerationParameters(
         sampling=get_sampling_parameters(conn),
+        generation_tier_ratios=get_generation_tier_ratios(conn),
         popularity_blends=get_popularity_blend_parameters(conn),
         slot_multipliers=get_slot_multiplier_parameters(conn),
         article=get_article_parameters(conn),

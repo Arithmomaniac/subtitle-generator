@@ -39,6 +39,8 @@ SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
         columns=frozenset({
             "id", "subtitle_id", "title", "subtitle", "list_items_json",
             "action_noun", "of_object", "of_article", "action_article",
+            "llm_market_tier", "llm_market_tier_confidence",
+            "llm_market_tier_rationale",
         }),
     ),
     TableContract(
@@ -78,6 +80,24 @@ SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
 )
 
 MINI_DB_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
+    # Serving used to rely on the generated mini DB shape implicitly. Tiering now
+    # consumes popularity level/confidence at runtime, so the mini DB needs its own
+    # explicit slot_filler contract instead of inheriting only the full-DB checks.
+    TableContract(
+        stage="serving",
+        table="slot_fillers",
+        columns=frozenset({
+            "id", "slot_type", "filler", "mode", "source_subtitle_id", "freq",
+            "pos_tag", "prep", "remix_type", "remix_prep", "remix_word_count",
+            "vector_sum", "token_count", "centroid_dot", "norm_sq",
+            "popularity_score", "popularity_level", "popularity_confidence",
+        }),
+    ),
+    TableContract(
+        stage="model_weight_state",
+        table="config",
+        columns=frozenset({"key", "value"}),
+    ),
     TableContract(
         stage="serving_sources",
         table="sources",

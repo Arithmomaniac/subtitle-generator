@@ -193,6 +193,43 @@ Slot types include:
 
 The generator samples only `mode = 'strict'` fillers.
 
+### Source-title market labels
+
+`pattern_matches` also owns optional source-title market-tier labels:
+
+- `llm_market_tier`
+- `llm_market_tier_confidence`
+- `llm_market_tier_rationale`
+
+These labels sort real source titles into the shared `pop` / `mainstream` /
+`niche` taxonomy used by jacket generation. The definitions live in
+`market_tiers.py`, with separate source-label and jacket-tone wording for each
+tier.
+
+Use the infrastructure command to preview or label a reproducible batch:
+
+```bash
+uv run subtitle-gen classify-source-tiers --dry-run --limit 20
+uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10 --selection random --random-seed 20260501
+```
+
+By default the command uses hosted Responses `web_search` for each source title.
+The rationale should include the evidence strength: exact match, weak/adjacent
+match, or no reliable match. Use `--no-web-search` for title/subtitle-only
+structured labeling. The command persists labels on `pattern_matches` and exports them to
+`api/data/source_tier_labels.csv` keyed by stable `subtitle_id` plus the current
+`pattern_match_id`. `build-slots` preserves existing source-tier labels by
+`subtitle_id` when a source title still validates after a rebuild. The label CSV
+is a build/evaluation artifact, not part of the runtime mini DB; serving uses the
+generated-output classifier.
+Downstream joins should use `subtitle_id`; `pattern_match_id` reflects the
+current `pattern_matches` row and is not stable when a source title stops
+validating after a rebuild.
+
+The lower-level Copilot MCP web-search bridge lives in
+`subtitle_generator.copilot_web_search` as a plain importable module for future
+scripts/tools. No FastMCP server is required for this workflow.
+
 Because `pattern_matches` is now clean-only, rebuilding slots after a validation
 change changes more than the slot table. Re-run popularity population,
 calibration, remix vector precompute, and `validate-pipeline` so
@@ -267,10 +304,11 @@ uses for tone targeting and jacket tone selection:
 - `tier_center_pop`
 - `tier_center_mainstream`
 - `tier_center_niche`
-- `tone_target_{tier}_{slot}`
 
-These values are written to `config`. They are the handoff between build-time
-scoring and runtime concepts such as "pop", "mainstream", and "niche".
+These values are written to `config`. Tier centers are the source of truth for
+runtime concepts such as "pop", "mainstream", and "niche"; serving derives
+slot-specific tone targets from the relevant tier center and `pop_slot_mult_*`
+runtime multipliers.
 
 #### Popularity thresholds and Gaussian bias
 
@@ -311,11 +349,11 @@ $$
 \end{aligned}
 $$
 
-Jacket tone selection uses the same idea: a subtitle's accessibility score is
-compared with the pop/mainstream/niche centers, and `sample_tone_spread`
-controls how sharply probability falls off with distance. So the percentile
-cutoffs define the bands; the Gaussian makes runtime selection gradual instead
-of cliff-like.
+Tone filters are hard generation constraints. When a caller requests a tier,
+generation retries with the tier-center-derived target until `compute_tier_evidence()`
+classifies the generated subtitle as one of the requested tiers. Jacket tone
+selection then uses the classifier result directly; it no longer samples or
+forces a mismatched requested tier after generation.
 
 ### Remix precompute
 
@@ -429,7 +467,7 @@ decisions remain server-side.
 
 ```mermaid
 flowchart TD
-    request[CLI or API request] --> parse[parse tone, locks, remix params]
+    request[CLI or API request] --> parse[parse tone and remix params]
     parse --> db[(SQLite)]
     db --> candidates[load strict slot candidates]
     db --> cfg[load config params]
@@ -449,13 +487,12 @@ flowchart TD
 `generate_subtitle()` is the stable runtime facade. Internally it:
 
 1. Creates a seeded RNG when a seed is supplied.
-2. Validates lock combinations.
-3. Loads strict candidates for list items, action nouns, and of-objects.
-4. Adjusts requested tone targets with per-slot multipliers.
-5. Samples two list items, one action noun, and one of-object.
-6. Optionally attempts of-object remixing.
-7. Restores action/of-object articles from corpus statistics and heuristics.
-8. Title-cases and returns a `GeneratedSubtitle`.
+2. Loads strict candidates for list items, action nouns, and of-objects.
+3. Adjusts requested tone targets with per-slot multipliers.
+4. Samples two list items, one action noun, and one of-object.
+5. Optionally attempts of-object remixing.
+6. Restores action/of-object articles from corpus statistics and heuristics.
+7. Title-cases and returns a `GeneratedSubtitle`.
 
 ### Sampling weights
 
@@ -489,22 +526,6 @@ $$
 
 "Pop" and "niche" do not select from separate hard-coded lists. They use the
 same candidate pools with different numeric targets.
-
-### Locks and runtime API surface
-
-Locks are a testing/UI affordance. Supported keys are:
-
-- `item1`
-- `item2`
-- `action_noun`
-- `of_object`
-- `of_modifier`
-- `of_head`
-- `of_topic`
-- `of_complement`
-
-The code rejects invalid mixes, such as combining an `of_object` lock with remix
-sub-part locks, or mixing Type 1 and Type 2 remix locks.
 
 ### Jacket generation
 
@@ -554,7 +575,7 @@ It manipulates:
 - numeric config rows in `config`
 - derived popularity scores in `slot_fillers` when population-related params
   change
-- derived thresholds/tone targets when classification-related params change
+- derived thresholds and tier centers when classification-related params change
 - result logs and best-state snapshots
 
 It does not manipulate:
@@ -705,7 +726,7 @@ they are not applied silently.
 | `pop_missing_default` | Missing-popularity filler classification | No | Yes |
 | `pop_base_weight_blend` | Runtime base sampling weights | No | No |
 | `weighted_sample_spread`, `weighted_sample_bias_floor` | Runtime tone-bias strength | No | No |
-| `pop_slot_mult_*` | Per-slot runtime tone targets | No | No |
+| `pop_slot_mult_*` | Per-slot runtime target multipliers | No | No |
 | `article_*` | Runtime article restoration | No | No |
 | `remix_reject_double_of` | Runtime remix filtering | No | No |
 
@@ -739,8 +760,8 @@ When behavior looks wrong, identify which concern owns the symptom:
 |---|---|
 | Bad source/citation or missing attribution | `slot_filler_sources`, `find_source`, mini DB export. |
 | Weird catalog/jargon filler | `slots.py` validation filters and `slot_fillers.mode`. |
-| Pop mode feels too obscure | popularity scores, thresholds, `pop_classification_blend`, tone targets. |
-| Pop and niche feel similar | `measure_tone_separation`, tone targets, sampling spread/bias floor. |
+| Pop mode feels too obscure | popularity scores, thresholds, `pop_classification_blend`, tier centers and slot multipliers. |
+| Pop and niche feel similar | `measure_tone_separation`, tier centers, slot multipliers, sampling spread/bias floor. |
 | Tuning keeps rejecting good-looking changes | metric scale, threshold calibration, results history/regime markers. |
 | Remix output is ungrammatical | remix classification, article stats, similarity threshold, double-of rejection. |
 | Web and CLI generate different shapes | `handlers.py` response contract vs CLI formatting. |
@@ -756,6 +777,7 @@ When behavior looks wrong, identify which concern owns the symptom:
 | `slot_fillers` | Canonical runtime filler inventory, including frequency, popularity, remix, vector, and scalar state. |
 | `slot_filler_sources` | Links fillers back to source subtitles/books for attribution and popularity scoring. |
 | `popularity_data` | Work-level demand/supply signals and `composite_score`. |
+| `source_tier_labels.csv` | Exported source-title market labels from `pattern_matches.llm_market_tier*`; evaluation/calibration input, not runtime data. |
 | `config` | Tuned numeric parameters and precompute constants. Defaults live in `config.py`. |
 | `human_ratings` | Human feedback, tone overrides, tags, and config snapshots. |
 | `schema_contracts.py` | Required table/column contracts by pipeline stage. |
@@ -773,12 +795,12 @@ should not be conflated.
 | LLM model IDs | Python constants in `parameter_state.py` | rating, proposal, jacket generation |
 | Tunable numeric params | Defaults in `config.py`, DB overrides in `config` | scoring, generation, tuning |
 | Popularity source weights | `pop_weight_*` config params | `populate-popularity` and repopulate during tuning |
-| Popularity blending params | `pop_base_weight_blend`, `pop_tone_blend`, `pop_classification_blend`, `pop_missing_default` | sampling, tone bias, tier classification |
-| Tone thresholds and targets | auto-calibrated `config` rows | generation and jacket tone selection |
+| Popularity blending params | `pop_base_weight_blend`, `pop_classification_blend`, `pop_missing_default` | sampling, tone bias, tier classification |
+| Tone thresholds and centers | auto-calibrated `config` rows | generation and jacket tone selection |
 | Article params | `article_*` config rows and article stats blobs | article restoration |
 | Remix params/constants | `remix_*`, `embedding_version`, centroid/cross-sim config rows | remix composition and validation |
 
 `parameter_state.py` exposes typed views so each stage can ask for only the
 state it needs: sampling params, popularity params, blend params, article params,
-remix params, tier thresholds, tone targets, runtime generation params, and the
+remix params, tier thresholds, derived tone targets, runtime generation params, and the
 model registry.
