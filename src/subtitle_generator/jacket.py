@@ -9,6 +9,7 @@ from collections.abc import Callable
 import click
 
 from subtitle_generator.parameter_state import DEFAULT_JACKET_MODEL
+from subtitle_generator.market_tiers import jacket_tone_text
 from subtitle_generator.tiering import TierEvidence, compute_tier_evidence, parse_subtitle_slots
 
 try:
@@ -35,35 +36,9 @@ INLINE_BLURB_RE = re.compile(
 
 # --- Accessibility scoring & tone tiers ---
 
-TONE_HIGH = """\
-BOOK TYPE: POP / mass-market commercial.
-High-concept, instantly legible, and built for casual readers, gift buyers,
-BookTok/Bookstagram discovery, airport tables, Target/Costco displays, and library hold
-lists. Think celebrity memoir, self-help, pop science/history, or Malcolm Gladwell /
-Mary Roach / Atomic Habits-style nonfiction. Research recent bestseller lists, publisher
-pages, retailer copy, BookTok-friendly comps, podcasts, magazine features, and pop-culture
-flashpoints from the last 18-24 months. The hook should land in five seconds and promise
-surprise, suspense, empowerment, escape, or transformation."""
-
-TONE_MEDIUM = """\
-BOOK TYPE: MAINSTREAM / broad trade, book-club, literary-commercial.
-Accessible but substantial general-readership trade work for indie bookstore staff picks,
-NPR listeners, LibraryReads, book clubs, NYT Book Review coverage, and public-library
-new-book shelves. Think Ann Patchett, Erik Larson, Tara Westover, Rebecca Solnit, Patrick
-Radden Keefe, or narrative nonfiction from Knopf, Riverhead, FSG, Scribner, Norton, or
-Ecco. Research trade publisher copy, newspaper/book-section reviews, longform journalism,
-author interviews, and accessible scholarship. Promise emotional involvement plus
-something to think about, never pure hype or academic dryness."""
-
-TONE_LOW = """\
-BOOK TYPE: NICHE / scholarly, specialty, small-press, or deep-genre.
-For a clearly defined audience: specialists, students, practitioners, hobbyists, genre
-devotees, course adopters, or acquiring librarians. Think university-press monographs and
-academic trade crossovers from Princeton, Yale, Chicago, Duke, MIT, Verso, or Oxford;
-specialty nonfiction; translated/small-press literary work; technical books; or
-deep-genre titles. Research publisher catalog pages, Choice/ACRL-style reviews,
-field-specific journals, author bios, scholarly debates, specialist blogs, and prior
-books in the same series or subfield. The hook is authority and contribution."""
+TONE_HIGH = jacket_tone_text("pop")
+TONE_MEDIUM = jacket_tone_text("mainstream")
+TONE_LOW = jacket_tone_text("niche")
 
 
 def _parse_subtitle_fillers(subtitle: str) -> list[str]:

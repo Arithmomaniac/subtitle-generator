@@ -57,7 +57,6 @@ def load_source_tier_label_cases(
         "llm_market_tier",
         "llm_market_tier_confidence",
         "llm_market_tier_rationale",
-        "llm_market_tier_model",
     }
     if not required <= columns:
         return ()
@@ -69,7 +68,6 @@ def load_source_tier_label_cases(
             COALESCE(subtitle, ''),
             llm_market_tier,
             COALESCE(llm_market_tier_rationale, ''),
-            COALESCE(llm_market_tier_model, 'unknown'),
             COALESCE(llm_market_tier_confidence, 0.0),
             id
         FROM pattern_matches
@@ -85,7 +83,7 @@ def load_source_tier_label_cases(
             subtitle=row[1],
             expected_tier=row[2],
             rationale=row[3],
-            source=f"pattern_matches/{row[4]}/{row[6]}",
+            source=f"pattern_matches/{row[5]}",
         )
         for row in rows
     )

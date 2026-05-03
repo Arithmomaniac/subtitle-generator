@@ -21,6 +21,11 @@ from subtitle_generator.jacket import (  # noqa: E402
     _validate_jacket,
     build_jacket_prompt,
 )
+from subtitle_generator.market_tiers import MARKET_TIER_DEFINITIONS  # noqa: E402
+from subtitle_generator.source_tier_enrichment import (  # noqa: E402
+    SourceTierCandidate,
+    build_source_tier_prompt,
+)
 
 
 def _valid_inline_jacket() -> str:
@@ -92,6 +97,25 @@ def test_prompt_includes_tier_specific_book_and_back_cover_guidance():
     assert "High-concept" in pop_prompt
     assert "MAINSTREAM back-cover style" not in pop_prompt
     assert "NICHE back-cover style" not in pop_prompt
+
+
+def test_source_label_and_jacket_tone_share_market_tier_definitions():
+    pop_prompt, _, _ = build_jacket_prompt(
+        "Faith, Commerce, and the Making of Modern Appetite",
+        tone_override=TONE_HIGH,
+        rng=random.Random(7),
+    )
+    source_prompt = build_source_tier_prompt((
+        SourceTierCandidate(
+            id=1,
+            title="Bright Ruins",
+            subtitle="Faith, Commerce, and the Making of Modern Appetite",
+        ),
+    ))
+
+    assert MARKET_TIER_DEFINITIONS["pop"].jacket_definition in pop_prompt
+    for tier, definition in MARKET_TIER_DEFINITIONS.items():
+        assert f"- {tier}: {definition.source_label_definition}" in source_prompt
 
 
 def test_prompt_preselects_reviews_and_blurb_sources():

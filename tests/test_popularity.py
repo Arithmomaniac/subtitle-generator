@@ -374,8 +374,7 @@ def test_real_title_tier_metric_uses_db_source_labels():
             subtitle TEXT,
             llm_market_tier TEXT,
             llm_market_tier_confidence REAL,
-            llm_market_tier_rationale TEXT,
-            llm_market_tier_model TEXT
+            llm_market_tier_rationale TEXT
         )
         """
     )
@@ -383,11 +382,11 @@ def test_real_title_tier_metric_uses_db_source_labels():
         """
         INSERT INTO pattern_matches (
             id, title, subtitle, llm_market_tier, llm_market_tier_confidence,
-            llm_market_tier_rationale, llm_market_tier_model
+            llm_market_tier_rationale
         )
         VALUES (
             1, 'Labeled Pop Book', 'Common, Demand, and the Rise of Markets',
-            'pop', 1.0, 'LLM-backed checked label.', 'fixture/web-researched'
+            'pop', 1.0, 'LLM-backed checked label.'
         )
         """
     )
@@ -401,6 +400,405 @@ def test_real_title_tier_metric_uses_db_source_labels():
     assert results[0].predicted_tier == "pop"
     assert measure_real_title_tier_pop_guardrail(conn) == 1.0
     print("  PASS: real_title_tier_metric_uses_db_source_labels")
+
+
+def test_source_tier_candidate_selection_is_seeded_and_resumable():
+    from subtitle_generator.source_tier_enrichment import (
+        ensure_source_tier_label_columns,
+        load_source_tier_candidates,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?)",
+        [
+            (1, "Book A", "Race, Power, and the Rise of Markets"),
+            (2, "Book B", "Helmontian Chymistry, Law, and the Making of Europe"),
+            (3, "Book C", "Memory, Justice, and the Politics of Archives"),
+            (4, "Book D", "Food, Fear, and the Future of America"),
+        ],
+    )
+    ensure_source_tier_label_columns(conn)
+    conn.execute("UPDATE pattern_matches SET llm_market_tier = 'pop' WHERE id = 1")
+    conn.commit()
+
+    by_id = load_source_tier_candidates(conn, limit=3, selection="id")
+    first_random = load_source_tier_candidates(
+        conn, limit=3, selection="random", random_seed=7,
+    )
+    second_random = load_source_tier_candidates(
+        conn, limit=3, selection="random", random_seed=7,
+    )
+    forced = load_source_tier_candidates(conn, limit=4, selection="id", force=True)
+
+    assert [candidate.id for candidate in by_id] == [2, 3, 4]
+    assert first_random == second_random
+    assert {candidate.id for candidate in first_random} == {2, 3, 4}
+    assert [candidate.id for candidate in forced] == [1, 2, 3, 4]
+
+
+def test_classify_source_tiers_persists_and_exports_labels(tmp_path):
+    import csv
+
+    from subtitle_generator.source_tier_enrichment import (
+        SourceTierPrediction,
+        classify_source_tiers,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?)",
+        [
+            (1, "Book A", "Race, Power, and the Rise of Markets"),
+            (2, "Book B", "Helmontian Chymistry, Law, and the Making of Europe"),
+        ],
+    )
+    conn.commit()
+
+    def fake_classifier(candidates, model):
+        return tuple(
+            SourceTierPrediction(
+                id=candidate.id,
+                tier="pop" if candidate.id == 1 else "niche",
+                confidence=0.9,
+                rationale=f"Classified with {model}.",
+            )
+            for candidate in candidates
+        )
+
+    export_path = tmp_path / "source_tier_labels.csv"
+    result = classify_source_tiers(
+        conn,
+        limit=2,
+        batch_size=1,
+        model="test-model",
+        selection="id",
+        export_path=export_path,
+        classifier=fake_classifier,
+    )
+
+    labels = conn.execute(
+        """
+        SELECT id, llm_market_tier, llm_market_tier_confidence,
+               llm_market_tier_rationale
+        FROM pattern_matches
+        ORDER BY id
+        """
+    ).fetchall()
+    assert result.labeled_count == 2
+    assert result.exported_count == 2
+    assert labels[0] == (1, "pop", 0.9, "Classified with test-model.")
+    assert labels[1][1] == "niche"
+
+    with open(export_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert [row["pattern_match_id"] for row in rows] == ["1", "2"]
+    assert [row["llm_market_tier"] for row in rows] == ["pop", "niche"]
+
+
+def test_build_slots_preserves_source_tier_labels_by_subtitle_id(tmp_path, monkeypatch):
+    import csv
+
+    from subtitle_generator import slots
+    from subtitle_generator.source_tier_enrichment import export_source_tier_labels
+
+    conn = sqlite3.connect(":memory:")
+    slots.ensure_slot_tables(conn)
+    conn.execute(
+        """
+        INSERT INTO pattern_matches (
+            id, subtitle_id, title, subtitle, list_items_json, action_noun,
+            of_object, action_article, of_article, llm_market_tier,
+            llm_market_tier_confidence, llm_market_tier_rationale
+        )
+        VALUES (
+            42, 101, 'Old Book A', 'Old Subtitle', '[]', 'Rise',
+            'Markets', 'the', '', 'pop', 0.95, 'Already checked.'
+        )
+        """
+    )
+    conn.commit()
+
+    extracted_matches = [
+        {
+            "subtitle_id": 101,
+            "title": "Updated Book A",
+            "subtitle": "Race, Power, and the Rise of Markets",
+            "list_items": ["Race", "Power"],
+            "action_noun": "Rise",
+            "of_object": "Markets",
+            "action_article": "the",
+            "of_article": "",
+        },
+        {
+            "subtitle_id": 102,
+            "title": "Book B",
+            "subtitle": "Memory, Justice, and the Politics of Archives",
+            "list_items": ["Memory", "Justice"],
+            "action_noun": "Politics",
+            "of_object": "Archives",
+            "action_article": "the",
+            "of_article": "",
+        },
+    ]
+    monkeypatch.setattr(slots, "_load_nlp", lambda: object())
+    monkeypatch.setattr(
+        slots,
+        "extract_pattern_matches",
+        lambda conn, rejection_counts=None: extracted_matches,
+    )
+    monkeypatch.setattr(slots, "_is_valid_action", lambda phrase, nlp: True)
+    monkeypatch.setattr(slots, "_is_valid_object", lambda phrase, nlp: True)
+    monkeypatch.setattr(slots, "_is_valid_list_item", lambda phrase, nlp: True)
+    monkeypatch.setattr(
+        slots,
+        "_decompose_of_objects",
+        lambda conn, nlp, of_objects_seen: None,
+    )
+
+    slots.build_slots(conn)
+
+    rows = conn.execute(
+        """
+        SELECT id, subtitle_id, title, llm_market_tier, llm_market_tier_rationale
+        FROM pattern_matches
+        ORDER BY subtitle_id
+        """
+    ).fetchall()
+    assert rows[0] == (42, 101, "Updated Book A", "pop", "Already checked.")
+    assert rows[1][1:] == (102, "Book B", None, None)
+
+    export_path = tmp_path / "source_tier_labels.csv"
+    assert export_source_tier_labels(conn, export_path) == 1
+    with open(export_path, encoding="utf-8") as f:
+        exported = list(csv.DictReader(f))
+    assert exported[0]["subtitle_id"] == "101"
+    assert exported[0]["pattern_match_id"] == "42"
+
+
+def test_build_slots_keeps_existing_labels_when_rebuild_fails(monkeypatch):
+    from subtitle_generator import slots
+
+    conn = sqlite3.connect(":memory:")
+    slots.ensure_slot_tables(conn)
+    conn.execute(
+        """
+        INSERT INTO pattern_matches (
+            id, subtitle_id, title, subtitle, list_items_json, action_noun,
+            of_object, action_article, of_article, llm_market_tier,
+            llm_market_tier_confidence, llm_market_tier_rationale
+        )
+        VALUES (
+            42, 101, 'Book A', 'Race, Power, and the Rise of Markets', '[]',
+            'Rise', 'Markets', 'the', '', 'pop', 0.95, 'Already checked.'
+        )
+        """
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        slots,
+        "_load_nlp",
+        lambda: (_ for _ in ()).throw(RuntimeError("spaCy unavailable")),
+    )
+
+    try:
+        slots.build_slots(conn)
+    except RuntimeError as exc:
+        assert "spaCy unavailable" in str(exc)
+    else:
+        raise AssertionError("build_slots should propagate rebuild failures")
+
+    row = conn.execute(
+        """
+        SELECT id, subtitle_id, title, llm_market_tier, llm_market_tier_rationale
+        FROM pattern_matches
+        """
+    ).fetchone()
+    assert row == (42, 101, "Book A", "pop", "Already checked.")
+
+
+def test_classify_source_tiers_dry_run_does_not_migrate_or_export(tmp_path):
+    from subtitle_generator.source_tier_enrichment import classify_source_tiers
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?)",
+        (1, "Book A", "Race, Power, and the Rise of Markets"),
+    )
+    conn.commit()
+
+    export_path = tmp_path / "source_tier_labels.csv"
+    result = classify_source_tiers(
+        conn,
+        limit=1,
+        dry_run=True,
+        export_path=export_path,
+    )
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(pattern_matches)")}
+    assert [candidate.id for candidate in result.selected] == [1]
+    assert result.labeled_count == 0
+    assert result.exported_count == 0
+    assert "llm_market_tier" not in columns
+    assert not export_path.exists()
+
+
+def test_classify_source_tiers_exports_when_resume_has_no_unlabeled_rows(tmp_path):
+    import csv
+
+    from subtitle_generator.source_tier_enrichment import (
+        ensure_source_tier_label_columns,
+        classify_source_tiers,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?)",
+        (1, "Book A", "Race, Power, and the Rise of Markets"),
+    )
+    ensure_source_tier_label_columns(conn)
+    conn.execute(
+        """
+        UPDATE pattern_matches
+        SET llm_market_tier = 'pop',
+            llm_market_tier_confidence = 0.95,
+            llm_market_tier_rationale = 'Already labeled.'
+        WHERE id = 1
+        """
+    )
+    conn.commit()
+
+    export_path = tmp_path / "source_tier_labels.csv"
+    result = classify_source_tiers(
+        conn,
+        limit=10,
+        selection="id",
+        export_path=export_path,
+        classifier=lambda candidates, model: (),
+    )
+
+    assert result.selected == ()
+    assert result.labeled_count == 0
+    assert result.exported_count == 1
+    with open(export_path, encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert rows[0]["pattern_match_id"] == "1"
+    assert rows[0]["llm_market_tier"] == "pop"
+
+
+def test_source_tier_prediction_ids_must_match_batch(tmp_path):
+    from subtitle_generator.source_tier_enrichment import (
+        SourceTierPrediction,
+        classify_source_tiers,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?)",
+        [
+            (1, "Book A", "Race, Power, and the Rise of Markets"),
+            (2, "Book B", "Memory, Justice, and the Politics of Archives"),
+        ],
+    )
+    conn.commit()
+
+    def duplicate_classifier(candidates, model):
+        return (
+            SourceTierPrediction(1, "pop", 0.9, "One."),
+            SourceTierPrediction(2, "niche", 0.9, "Two."),
+            SourceTierPrediction(2, "mainstream", 0.9, "Duplicate."),
+        )
+
+    try:
+        classify_source_tiers(
+            conn,
+            limit=2,
+            selection="id",
+            export_path=tmp_path / "source_tier_labels.csv",
+            classifier=duplicate_classifier,
+        )
+    except RuntimeError as exc:
+        assert "did not match requested ids" in str(exc)
+    else:
+        raise AssertionError("duplicate LLM labels should be rejected")
+
+
+def test_classify_source_tiers_dry_run_result_does_not_claim_export(tmp_path):
+    from subtitle_generator.source_tier_enrichment import classify_source_tiers
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?)",
+        (1, "Book A", "Race, Power, and the Rise of Markets"),
+    )
+    conn.commit()
+
+    export_path = tmp_path / "source_tier_labels.csv"
+    result = classify_source_tiers(
+        conn,
+        limit=1,
+        dry_run=True,
+        export_path=export_path,
+    )
+
+    assert result.dry_run is True
+    assert result.export_path == export_path
+    assert result.exported_count == 0
+    assert not export_path.exists()
 
 
 def test_real_title_tier_metric_is_neutral_without_source_labels():

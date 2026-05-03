@@ -12,6 +12,10 @@ from collections import Counter
 import click
 import spacy
 
+from subtitle_generator.source_tier_enrichment import (
+    SOURCE_TIER_LABEL_COLUMNS,
+    VALID_SOURCE_TIERS,
+)
 from subtitle_generator.source_validation import clean_title_and_subtitle
 
 # Regex to match: "A, B[,] and the/a/an C of D"
@@ -458,17 +462,34 @@ def ensure_slot_tables(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE pattern_matches ADD COLUMN of_article TEXT DEFAULT ''")
     if "action_article" not in pm_cols:
         conn.execute("ALTER TABLE pattern_matches ADD COLUMN action_article TEXT DEFAULT ''")
+    for column, column_type in SOURCE_TIER_LABEL_COLUMNS:
+        if column not in pm_cols:
+            conn.execute(f"ALTER TABLE pattern_matches ADD COLUMN {column} {column_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_slot_mode ON slot_fillers(mode)")
     conn.commit()
 
 
+def _snapshot_source_tier_labels(
+    conn: sqlite3.Connection,
+) -> dict[int, tuple[int, str, float | None, str | None]]:
+    label_columns = tuple(column for column, _column_type in SOURCE_TIER_LABEL_COLUMNS)
+    rows = conn.execute(
+        f"""
+        SELECT id, subtitle_id, {", ".join(label_columns)}
+        FROM pattern_matches
+        WHERE subtitle_id IS NOT NULL
+          AND llm_market_tier IN ({", ".join("?" for _ in VALID_SOURCE_TIERS)})
+        """,
+        tuple(sorted(VALID_SOURCE_TIERS)),
+    ).fetchall()
+    return {row[1]: (row[0], *row[2:]) for row in rows}
+
+
 def build_slots(conn: sqlite3.Connection):
     """Extract pattern matches and build slot filler tables with NLP validation."""
     ensure_slot_tables(conn)
-    conn.execute("DELETE FROM pattern_matches")
-    conn.execute("DELETE FROM slot_fillers")
-    conn.commit()
+    preserved_source_tier_labels = _snapshot_source_tier_labels(conn)
 
     click.echo("Loading spaCy model...")
     nlp = _load_nlp()
@@ -554,31 +575,45 @@ def build_slots(conn: sqlite3.Connection):
         for reason, count in sorted(rejection_counts.items()):
             click.echo(f"  {reason}: {count:,}")
 
-    conn.executemany(
-        "INSERT OR IGNORE INTO pattern_matches "
-        "(subtitle_id, title, subtitle, list_items_json, action_noun, of_object, "
-        "action_article, of_article) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (m["subtitle_id"], m["title"], m["subtitle"],
-             json.dumps(m["list_items"]), m["action_noun"], m["of_object"],
-             m["action_article"], m["of_article"])
-            for m in validated_matches
-        ],
-    )
-    conn.commit()
-
+    label_column_names = tuple(column for column, _column_type in SOURCE_TIER_LABEL_COLUMNS)
+    empty_label_values = (None,) * len(label_column_names)
     filler_rows = (
         [("list_item", x, "strict", sid, freq) for x, (sid, freq) in list_items_seen.items()]
         + [("action_noun", x, "strict", sid, freq) for x, (sid, freq) in action_nouns_seen.items()]
         + [("of_object", x, "strict", sid, freq) for x, (sid, freq) in of_objects_seen.items()]
     )
-    conn.executemany(
-        "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id, freq) "
-        "VALUES (?, ?, ?, ?, ?)",
-        filler_rows,
-    )
-    conn.commit()
+    with conn:
+        conn.execute("DELETE FROM pattern_matches")
+        conn.execute("DELETE FROM slot_fillers")
+        conn.executemany(
+            "INSERT OR IGNORE INTO pattern_matches "
+            "(id, subtitle_id, title, subtitle, list_items_json, action_noun, of_object, "
+            f"action_article, of_article, {', '.join(label_column_names)}) "
+            f"VALUES ({', '.join('?' for _ in range(9 + len(label_column_names)))})",
+            [
+                (
+                    preserved_source_tier_labels.get(m["subtitle_id"], (None,))[0],
+                    m["subtitle_id"],
+                    m["title"],
+                    m["subtitle"],
+                    json.dumps(m["list_items"]),
+                    m["action_noun"],
+                    m["of_object"],
+                    m["action_article"],
+                    m["of_article"],
+                    *preserved_source_tier_labels.get(
+                        m["subtitle_id"],
+                        (None, *empty_label_values),
+                    )[1:],
+                )
+                for m in validated_matches
+            ],
+        )
+        conn.executemany(
+            "INSERT OR IGNORE INTO slot_fillers (slot_type, filler, mode, source_subtitle_id, freq) "
+            "VALUES (?, ?, ?, ?, ?)",
+            filler_rows,
+        )
 
     for slot_type in ["list_item", "action_noun", "of_object"]:
         count = conn.execute(

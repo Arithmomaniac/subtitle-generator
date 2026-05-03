@@ -193,6 +193,43 @@ Slot types include:
 
 The generator samples only `mode = 'strict'` fillers.
 
+### Source-title market labels
+
+`pattern_matches` also owns optional source-title market-tier labels:
+
+- `llm_market_tier`
+- `llm_market_tier_confidence`
+- `llm_market_tier_rationale`
+
+These labels sort real source titles into the shared `pop` / `mainstream` /
+`niche` taxonomy used by jacket generation. The definitions live in
+`market_tiers.py`, with separate source-label and jacket-tone wording for each
+tier.
+
+Use the infrastructure command to preview or label a reproducible batch:
+
+```bash
+uv run subtitle-gen classify-source-tiers --dry-run --limit 20
+uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10 --selection random --random-seed 20260501
+```
+
+By default the command uses hosted Responses `web_search` for each source title.
+The rationale should include the evidence strength: exact match, weak/adjacent
+match, or no reliable match. Use `--no-web-search` for title/subtitle-only
+structured labeling. The command persists labels on `pattern_matches` and exports them to
+`api/data/source_tier_labels.csv` keyed by stable `subtitle_id` plus the current
+`pattern_match_id`. `build-slots` preserves existing source-tier labels by
+`subtitle_id` when a source title still validates after a rebuild. The label CSV
+is a build/evaluation artifact, not part of the runtime mini DB; serving uses the
+generated-output classifier.
+Downstream joins should use `subtitle_id`; `pattern_match_id` reflects the
+current `pattern_matches` row and is not stable when a source title stops
+validating after a rebuild.
+
+The lower-level Copilot MCP web-search bridge lives in
+`subtitle_generator.copilot_web_search` as a plain importable module for future
+scripts/tools. No FastMCP server is required for this workflow.
+
 Because `pattern_matches` is now clean-only, rebuilding slots after a validation
 change changes more than the slot table. Re-run popularity population,
 calibration, remix vector precompute, and `validate-pipeline` so
@@ -740,6 +777,7 @@ When behavior looks wrong, identify which concern owns the symptom:
 | `slot_fillers` | Canonical runtime filler inventory, including frequency, popularity, remix, vector, and scalar state. |
 | `slot_filler_sources` | Links fillers back to source subtitles/books for attribution and popularity scoring. |
 | `popularity_data` | Work-level demand/supply signals and `composite_score`. |
+| `source_tier_labels.csv` | Exported source-title market labels from `pattern_matches.llm_market_tier*`; evaluation/calibration input, not runtime data. |
 | `config` | Tuned numeric parameters and precompute constants. Defaults live in `config.py`. |
 | `human_ratings` | Human feedback, tone overrides, tags, and config snapshots. |
 | `schema_contracts.py` | Required table/column contracts by pipeline stage. |

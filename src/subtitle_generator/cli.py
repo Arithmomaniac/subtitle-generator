@@ -840,6 +840,98 @@ def export_data_cmd(output_dir: str):
         click.echo(f"  {filename}: {count:,} rows ({size_kb:.0f} KB)")
 
 
+@cli.command("classify-source-tiers")
+@click.option("--limit", default=20, show_default=True, help="Maximum rows to label.")
+@click.option(
+    "--batch-size",
+    default=10,
+    show_default=True,
+    help=(
+        "Rows per LLM batch; for hosted web search this is also the "
+        "concurrency burst size."
+    ),
+)
+@click.option(
+    "--model",
+    default=None,
+    help="LLM model to use. Defaults to the configured rater model.",
+)
+@click.option(
+    "--selection",
+    type=click.Choice(["random", "id"]),
+    default="random",
+    show_default=True,
+    help="How to choose unlabeled pattern_matches rows.",
+)
+@click.option(
+    "--random-seed",
+    default=20260501,
+    show_default=True,
+    help="Seed used when --selection=random.",
+)
+@click.option("--force", is_flag=True, help="Relabel already-labeled rows too.")
+@click.option("--dry-run", is_flag=True, help="Show selected rows without calling the LLM.")
+@click.option(
+    "--web-search/--no-web-search",
+    default=True,
+    show_default=True,
+    help="Use hosted Responses web_search for evidence-grounded labels.",
+)
+@click.option("--no-export", is_flag=True, help="Do not refresh source_tier_labels.csv.")
+@click.option(
+    "--output",
+    default="api/data/source_tier_labels.csv",
+    show_default=True,
+    help="CSV path for exported labels.",
+)
+def classify_source_tiers_cmd(
+    limit: int,
+    batch_size: int,
+    model: str | None,
+    selection: str,
+    random_seed: int,
+    force: bool,
+    dry_run: bool,
+    web_search: bool,
+    no_export: bool,
+    output: str,
+):
+    """LLM-label source title market tiers on pattern_matches rows."""
+    from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
+    from subtitle_generator.source_tier_enrichment import classify_source_tiers
+
+    conn = get_db()
+    try:
+        result = classify_source_tiers(
+            conn,
+            limit=limit,
+            batch_size=batch_size,
+            model=model or DEFAULT_RATER_MODEL,
+            selection=selection,
+            random_seed=random_seed,
+            force=force,
+            dry_run=dry_run,
+            web_search=web_search,
+            export_path=None if no_export else Path(output),
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+
+    if dry_run:
+        click.echo(
+            f"Selected {len(result.selected)} rows "
+            f"(selection={selection}, random_seed={random_seed}):"
+        )
+        for candidate in result.selected:
+            click.echo(f"  {candidate.id}: {candidate.title} — {candidate.subtitle}")
+    else:
+        click.echo(f"Labeled {result.labeled_count} source-title rows.")
+    if result.export_path and not result.dry_run:
+        click.echo(f"Exported {result.exported_count} labels to {result.export_path}")
+
+
 @cli.command("build-db")
 @click.option("--data-dir", "-d", default="api/data", help="Directory containing CSV files.")
 @click.option("--output", "-o", default="api/data/subtitles.mini.db", help="Output SQLite path.")
