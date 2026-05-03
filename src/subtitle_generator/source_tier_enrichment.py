@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import random
+import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ SOURCE_TIER_LABEL_EXPORT_COLUMNS = (
     "llm_market_tier_rationale",
 )
 VALID_SOURCE_TIERS = {"pop", "mainstream", "niche"}
+_CITATION_LINK_RE = re.compile(r"\s*\(\[[^\]]+\]\(https?://[^)]+\)\)")
+_URL_RE = re.compile(r"https?://\S+")
 
 
 @dataclass(frozen=True)
@@ -228,11 +231,19 @@ def _write_source_tier_predictions(
             (
                 prediction.tier,
                 max(0.0, min(1.0, prediction.confidence)),
-                prediction.rationale,
+                _sanitize_source_tier_rationale(prediction.rationale),
                 prediction.id,
             ),
         )
     conn.commit()
+
+
+def _sanitize_source_tier_rationale(rationale: str) -> str:
+    """Keep durable label rationales concise and free of citation URLs."""
+
+    cleaned = _CITATION_LINK_RE.sub("", rationale)
+    cleaned = _URL_RE.sub("", cleaned)
+    return " ".join(cleaned.split()).strip()
 
 
 def export_source_tier_labels(
@@ -262,10 +273,14 @@ def export_source_tier_labels(
         """
     ).fetchall()
     export_path.parent.mkdir(parents=True, exist_ok=True)
+    cleaned_rows = [
+        (*row[:6], _sanitize_source_tier_rationale(row[6] or ""))
+        for row in rows
+    ]
     with open(export_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(SOURCE_TIER_LABEL_EXPORT_COLUMNS)
-        writer.writerows(rows)
+        writer.writerows(cleaned_rows)
     return len(rows)
 
 
@@ -361,6 +376,7 @@ Search/evidence rules:
 - Do at most two web_search calls total for this book. Do not keep searching.
 - Rationale must be 1-2 concise sentences and include the evidence strength:
   exact match, weak/adjacent match, or no reliable match.
+- Do not include citation links, URLs, or source lists in the rationale.
 - If no reliable match is found, classify as niche unless title/subtitle strongly
   indicates broad trade appeal; lower confidence.
 

@@ -479,7 +479,7 @@ def test_classify_source_tiers_persists_and_exports_labels(tmp_path):
                 id=candidate.id,
                 tier="pop" if candidate.id == 1 else "niche",
                 confidence=0.9,
-                rationale=f"Classified with {model}.",
+                rationale=f"Classified with {model}. ([example.org](https://example.org/book))",
             )
             for candidate in candidates
         )
