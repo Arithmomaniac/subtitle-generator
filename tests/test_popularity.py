@@ -816,6 +816,248 @@ def test_real_title_tier_metric_is_neutral_without_source_labels():
     print("  PASS: real_title_tier_metric_is_neutral_without_source_labels")
 
 
+def test_suggest_tier_gate_config_reports_label_fit():
+    from subtitle_generator.tier_diagnostics import (
+        apply_tier_gate_calibration,
+        format_tier_gate_calibration_report,
+        suggest_tier_gate_config,
+    )
+
+    conn = _make_test_db()
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT,
+            llm_market_tier TEXT,
+            llm_market_tier_confidence REAL,
+            llm_market_tier_rationale TEXT
+        )
+        """
+    )
+    rows = [
+        (
+            1,
+            "Pop Book",
+            "Common, Demand, and the Rise of Markets",
+            "pop",
+            1.0,
+            "Exact match; broad commercial packaging.",
+        ),
+        (
+            2,
+            "Mainstream Book",
+            "Common, Rare, and the Rise of Markets",
+            "mainstream",
+            1.0,
+            "Exact match; accessible but not pop.",
+        ),
+        (
+            3,
+            "Niche Book",
+            "Rare, Fallback, and the Making of Archives",
+            "niche",
+            1.0,
+            "Exact match; specialist topic.",
+        ),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO pattern_matches (
+            id, title, subtitle, llm_market_tier, llm_market_tier_confidence,
+            llm_market_tier_rationale
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    for filler in ("Common", "Demand", "Markets"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 10000, 0.95, 1, 1.0)
+                """,
+                (slot_type, filler),
+            )
+    for filler in ("Rare", "Fallback", "Archives"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 1, 0.1, 0, 0.0)
+                """,
+                (slot_type, filler),
+            )
+    conn.commit()
+
+    calibration = suggest_tier_gate_config(conn)
+
+    assert calibration is not None
+    assert calibration.label_count == 3
+    assert calibration.exact_accuracy == 1.0
+    assert calibration.pop_guardrail == 1.0
+    assert calibration.label_distribution == {"pop": 1, "mainstream": 1, "niche": 1}
+    assert calibration.target_generation_ratios == {
+        "pop": 1 / 3,
+        "mainstream": 1 / 3,
+        "niche": 1 / 3,
+    }
+    assert set(calibration.threshold_config_values()) == {
+        "accessibility_threshold_pop",
+        "accessibility_threshold_mainstream",
+        "tier_pop_min_lower_tail",
+        "tier_pop_min_demand_confidence",
+    }
+    assert calibration.generation_center_config_values() == {
+        "tier_center_pop": 0.75,
+        "tier_center_mainstream": 0.4005,
+        "tier_center_niche": 0.301,
+    }
+    report = format_tier_gate_calibration_report(conn)
+    assert "Source-label distribution" in report
+    assert "| pop | 1 | 0.3333 |" in report
+    assert "Fit metrics" in report
+    assert "Suggested config" in report
+
+    apply_tier_gate_calibration(conn, calibration)
+    cfg = dict(conn.execute("SELECT key, value FROM config"))
+    assert float(cfg["accessibility_threshold_pop"]) == round(
+        calibration.accessibility_threshold_pop, 4
+    )
+    assert float(cfg["generation_tier_ratio_pop"]) == round(
+        calibration.target_generation_ratios["pop"], 4
+    )
+    assert float(cfg["tier_center_pop"]) == round(calibration.tier_center_pop, 4)
+    print("  PASS: suggest_tier_gate_config_reports_label_fit")
+
+
+def test_tier_gate_suggestion_preserves_pop_recall():
+    from subtitle_generator.config import load_tuning_config
+    from subtitle_generator.tier_diagnostics import (
+        _score_gate_candidate,
+        evaluate_real_title_tiers,
+        suggest_tier_gate_config,
+    )
+
+    conn = _make_test_db()
+    for key, value in (
+        ("accessibility_threshold_pop", "0.6"),
+        ("accessibility_threshold_mainstream", "0.3"),
+        ("tier_pop_min_lower_tail", "0.35"),
+        ("tier_pop_min_demand_confidence", "0.25"),
+        ("pop_classification_blend", "0.5"),
+    ):
+        conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, value))
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT,
+            llm_market_tier TEXT,
+            llm_market_tier_confidence REAL,
+            llm_market_tier_rationale TEXT
+        )
+        """
+    )
+    rows = [
+        (
+            1,
+            "High Pop Book",
+            "Common, Demand, and the Rise of Markets",
+            "pop",
+            1.0,
+            "Exact match; broad commercial packaging.",
+        ),
+        (
+            2,
+            "Low Pop Book",
+            "Quiet, Local, and the Study of Footnotes",
+            "pop",
+            1.0,
+            "Exact match; broad commercial packaging despite quiet wording.",
+        ),
+        (
+            3,
+            "Niche Book",
+            "Rare, Fallback, and the Making of Archives",
+            "niche",
+            1.0,
+            "Exact match; specialist packaging.",
+        ),
+    ]
+    conn.executemany(
+        """
+        INSERT INTO pattern_matches (
+            id, title, subtitle, llm_market_tier, llm_market_tier_confidence,
+            llm_market_tier_rationale
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    for filler in ("Common", "Demand", "Markets"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 10000, 0.95, 1, 1.0)
+                """,
+                (slot_type, filler),
+            )
+    for filler in ("Quiet", "Local", "Study", "Footnotes", "Rare", "Fallback", "Archives"):
+        for slot_type in ("list_item", "action_noun", "of_object"):
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO slot_fillers (
+                    slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, 'strict', 1, 0.1, 0, 0.0)
+                """,
+                (slot_type, filler),
+            )
+    conn.commit()
+
+    results = evaluate_real_title_tiers(conn)
+    cfg = load_tuning_config(conn)
+    baseline = _score_gate_candidate(
+        results,
+        pop_threshold=cfg["accessibility_threshold_pop"],
+        mainstream_threshold=cfg["accessibility_threshold_mainstream"],
+        lower_tail_threshold=cfg["tier_pop_min_lower_tail"],
+        demand_threshold=cfg["tier_pop_min_demand_confidence"],
+    )
+    calibration = suggest_tier_gate_config(conn)
+
+    assert calibration is not None
+    assert baseline.pop_recall == 0.5
+    assert calibration.pop_recall >= baseline.pop_recall
+    assert calibration.pop_guardrail >= baseline.pop_guardrail
+    assert ("niche", "pop") not in calibration.confusion
+    print("  PASS: tier_gate_suggestion_preserves_pop_recall")
+
+
+def test_tier_gate_calibration_report_handles_empty_labels():
+    from subtitle_generator.tier_diagnostics import format_tier_gate_calibration_report
+
+    report = format_tier_gate_calibration_report(_make_test_db())
+
+    assert "No `pattern_matches.llm_market_tier` labels found." in report
+    print("  PASS: tier_gate_calibration_report_handles_empty_labels")
+
+
 def test_tier_label_guardrail_blend_is_noop_without_labels():
     from subtitle_generator.tune import _blend_real_title_tier_guardrail
 
@@ -867,6 +1109,9 @@ if __name__ == "__main__":
         ("parse_subtitle_slots_rejects_empty_cleaned_fillers", test_parse_subtitle_slots_rejects_empty_cleaned_fillers),
         ("real_title_tier_metric_uses_db_source_labels", test_real_title_tier_metric_uses_db_source_labels),
         ("real_title_tier_metric_is_neutral_without_source_labels", test_real_title_tier_metric_is_neutral_without_source_labels),
+        ("suggest_tier_gate_config_reports_label_fit", test_suggest_tier_gate_config_reports_label_fit),
+        ("tier_gate_suggestion_preserves_pop_recall", test_tier_gate_suggestion_preserves_pop_recall),
+        ("tier_gate_calibration_report_handles_empty_labels", test_tier_gate_calibration_report_handles_empty_labels),
         ("tier_label_guardrail_blend_is_noop_without_labels", test_tier_label_guardrail_blend_is_noop_without_labels),
     ]
 

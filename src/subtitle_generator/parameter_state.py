@@ -22,6 +22,13 @@ class SamplingParameters:
 
 
 @dataclass(frozen=True)
+class GenerationTierRatios:
+    pop: float
+    mainstream: float
+    niche: float
+
+
+@dataclass(frozen=True)
 class PopularityParameters:
     weight_spl: float
     weight_ol: float
@@ -82,6 +89,7 @@ class ToneTargets:
 @dataclass(frozen=True)
 class RuntimeGenerationParameters:
     sampling: SamplingParameters
+    generation_tier_ratios: GenerationTierRatios
     popularity_blends: PopularityBlendParameters
     slot_multipliers: SlotMultiplierParameters
     article: ArticleParameters
@@ -106,6 +114,17 @@ def get_sampling_parameters(conn: sqlite3.Connection | None = None) -> SamplingP
         weighted_sample_spread=cfg["weighted_sample_spread"],
         weighted_sample_bias_floor=cfg["weighted_sample_bias_floor"],
         default_generation_tone_target=cfg["default_generation_tone_target"],
+    )
+
+
+def get_generation_tier_ratios(
+    conn: sqlite3.Connection | None = None,
+) -> GenerationTierRatios:
+    cfg = _cfg(conn)
+    return GenerationTierRatios(
+        pop=cfg["generation_tier_ratio_pop"],
+        mainstream=cfg["generation_tier_ratio_mainstream"],
+        niche=cfg["generation_tier_ratio_niche"],
     )
 
 
@@ -206,6 +225,7 @@ def get_runtime_generation_parameters(
 ) -> RuntimeGenerationParameters:
     return RuntimeGenerationParameters(
         sampling=get_sampling_parameters(conn),
+        generation_tier_ratios=get_generation_tier_ratios(conn),
         popularity_blends=get_popularity_blend_parameters(conn),
         slot_multipliers=get_slot_multiplier_parameters(conn),
         article=get_article_parameters(conn),

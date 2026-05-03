@@ -14,7 +14,6 @@ import json
 import pathlib
 import re
 import sqlite3
-import sys
 
 import click
 
@@ -40,33 +39,35 @@ from subtitle_generator.tuning_state import (
 )
 
 SOURCE_TIER_LABEL_WEIGHT = 0.25
+_NON_PARAM_RESULT_MARKERS = frozenset({
+    "(failed)",
+    "[auto-revert]",
+    "[regime change]",
+})
+
+AUTOTUNE_PARAM_KEYS = frozenset({
+    "article_of_min_freq",
+    "article_action_min_freq",
+    "article_remix_heuristic_threshold",
+})
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Parameters that require re-running populate-popularity to take effect.
-# These change the composite scoring formula, not just generation-time behavior.
-_REPOPULATE_PARAMS = frozenset({
-    "pop_weight_spl", "pop_weight_ol", "pop_weight_gr",
-    "pop_weight_nyt", "pop_weight_library", "pop_exponent",
-})
 
-# Params that don't change stored filler scores but DO change the blended-score
-# distribution used for tier classification. Trigger calibrate-only (no repopulate).
-_CALIBRATE_ONLY_PARAMS = frozenset({
-    "pop_classification_blend", "pop_missing_default",
-})
+def _autotune_param_keys() -> set[str]:
+    """Return config keys that the autoresearch loop is allowed to propose."""
+
+    return set(AUTOTUNE_PARAM_KEYS)
 
 
-def _needs_repopulate(param: str) -> bool:
-    """Check if changing this param requires a populate-popularity re-run."""
-    return param in _REPOPULATE_PARAMS
-
-
-def _needs_calibrate(param: str) -> bool:
-    """Check if changing this param requires recalibrating thresholds/tier centers."""
-    return param in _REPOPULATE_PARAMS or param in _CALIBRATE_ONLY_PARAMS
+def _autotune_param_values(params: dict[str, float]) -> dict[str, float]:
+    return {
+        key: params[key]
+        for key in sorted(_autotune_param_keys())
+        if key in params
+    }
 
 
 def _proposal_change(
@@ -91,301 +92,6 @@ def _proposal_change(
     ), clamped_from
 
 
-def _run_calibrate_thresholds(conn: sqlite3.Connection) -> None:
-    """Re-derive accessibility thresholds and tier centers from
-    the current blended-score distribution. Cheap; safe to call after any
-    repopulate or after a pop_classification_blend / pop_missing_default change.
-    """
-    import contextlib
-    import importlib
-    import io
-    sys.path.insert(0, "data")
-    import populate_popularity as pp
-    importlib.reload(pp)
-    # Suppress the verbose threshold report; tune loop only needs the new values
-    # to be live in config, not a 30-line dump every iteration.
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        pp.calibrate_thresholds(conn)
-    conn.commit()
-    invalidate_config_cache()
-    # One-line summary
-    cfg = load_tuning_config(conn)
-    click.echo(
-        f"  [calibrate] thresholds pop={cfg.get('accessibility_threshold_pop'):.3f} "
-        f"main={cfg.get('accessibility_threshold_mainstream'):.3f} "
-        f"centers pop={cfg.get('tier_center_pop'):.3f} "
-        f"main={cfg.get('tier_center_mainstream'):.3f} "
-        f"niche={cfg.get('tier_center_niche'):.3f}"
-    )
-
-
-# Cached popularity data (loaded once, reused across tuner iterations)
-_pop_data_cache: dict | None = None
-_work_data_cache: dict = {}
-_filler_works_cache: dict | None = None  # filler_id -> list of work_keys
-_filler_freq_cache: dict | None = None   # filler_id -> freq (for fallback)
-
-
-def _load_pop_data():
-    """Load all popularity JSON files (cached across calls)."""
-    global _pop_data_cache
-    if _pop_data_cache is not None:
-        return _pop_data_cache
-
-    import json
-    from pathlib import Path
-
-    click.echo("  [repopulate] loading popularity data (first time, will cache)...")
-    data = {}
-    spl_path = Path("data/spl_checkout_lookup.json")
-    ol_path = Path("data/ol_edition_lookup.json")
-    gr_path = Path("data/goodreads_lookup.json")
-    ottawa_path = Path("data/canadian_library_lookup.json")
-    nyt_path = Path("data/nyt_bestseller_lookup.json")
-
-    with open(spl_path) as f:
-        data["spl"] = json.load(f)
-    with open(ol_path) as f:
-        data["ol"] = json.load(f)
-
-    if gr_path.exists():
-        with open(gr_path) as f:
-            data["gr"] = json.load(f)
-    else:
-        data["gr"] = {}
-
-    if ottawa_path.exists():
-        with open(ottawa_path) as f:
-            raw = json.load(f)
-        data["ottawa_isbn"] = {k: v for k, v in raw.items() if k.replace("-", "").isdigit()}
-    else:
-        data["ottawa_isbn"] = {}
-
-    if nyt_path.exists():
-        with open(nyt_path) as f:
-            data["nyt"] = json.load(f)
-    else:
-        data["nyt"] = {}
-
-    _pop_data_cache = data
-    click.echo(f"  [repopulate] cached: SPL={len(data['spl']):,}, OL={len(data['ol']):,}, "
-               f"GR={len(data['gr']):,}, Ottawa={len(data['ottawa_isbn']):,}, NYT={len(data['nyt']):,}")
-    return data
-
-
-def _load_filler_works(conn: sqlite3.Connection):
-    """Build filler_id -> [work_keys] mapping (cached)."""
-    global _filler_works_cache, _filler_freq_cache
-    if _filler_works_cache is not None:
-        return _filler_works_cache, _filler_freq_cache
-
-    click.echo("  [repopulate] building filler->work mapping (first time)...")
-    from collections import defaultdict
-
-    rows = conn.execute("""
-        SELECT sf.id, ia.work_key
-        FROM slot_fillers sf
-        JOIN slot_filler_sources sfs ON sfs.slot_filler_id = sf.id
-        JOIN subtitles s ON sfs.subtitle_id = s.id
-        JOIN isbn_aliases ia ON ia.isbn = s.isbn
-        WHERE ia.work_key IS NOT NULL AND sf.mode = 'strict'
-    """).fetchall()
-
-    filler_works = defaultdict(list)
-    for fid, wk in rows:
-        filler_works[fid].append(wk)
-    # Deduplicate
-    _filler_works_cache = {fid: list(set(wks)) for fid, wks in filler_works.items()}
-
-    # Also cache freq for fallback scoring
-    freq_rows = conn.execute(
-        "SELECT id, freq FROM slot_fillers WHERE mode = 'strict'"
-    ).fetchall()
-    _filler_freq_cache = {r[0]: r[1] for r in freq_rows}
-
-    click.echo(f"  [repopulate] cached {len(_filler_works_cache):,} fillers with work mappings")
-    return _filler_works_cache, _filler_freq_cache
-
-
-def _score_in_memory(conn: sqlite3.Connection):
-    """Compute composite scores in memory and write only filler scores to DB.
-
-    Returns the work_composites dict for use by _flush_repopulate if kept.
-    """
-    import bisect
-    import math
-    import time as _time
-
-    t0 = _time.time()
-    _load_pop_data()
-    cfg = load_tuning_config(conn)
-
-    w_spl = cfg.get("pop_weight_spl", 0.7)
-    w_ol = cfg.get("pop_weight_ol", 0.3)
-    w_gr = cfg.get("pop_weight_gr", 0.2)
-    w_library = cfg.get("pop_weight_library", 0.05)
-    w_nyt = cfg.get("pop_weight_nyt", 0.1)
-
-    click.echo(f"  [repopulate] scoring in-memory (SPL={w_spl}, OL={w_ol}, "
-               f"GR={w_gr}, LIB={w_library}, NYT={w_nyt})...")
-
-    # Ensure work-level data is cached
-    if "work_spl" not in _work_data_cache:
-        # Need a full run first to populate the cache
-        click.echo("  [repopulate] cold start: need full populate for work data cache")
-        _run_repopulate_full(conn)
-        return None
-
-    work_spl = _work_data_cache["work_spl"]
-    work_ol = _work_data_cache["work_ol"]
-    work_gr = _work_data_cache["work_gr"]
-    work_ottawa = _work_data_cache["work_ottawa"]
-    work_nyt = _work_data_cache["work_nyt"]
-    all_works = _work_data_cache["all_works"]
-
-    # Build percentile arrays
-    spl_log_vals = sorted([math.log10(1 + d["checkouts"] / max(d["years"], 1))
-                           for d in work_spl.values() if d["checkouts"] > 0])
-    gr_log_vals = sorted([math.log10(1 + d["ratings_count"]) for d in work_gr.values()])
-    ol_log_vals = sorted([math.log10(1 + ec) for ec in work_ol.values()])
-    lib_log_vals = sorted([math.log10(1 + d["holds_count"]) for d in work_ottawa.values()])
-
-    n_spl = len(spl_log_vals) or 1
-    n_gr = len(gr_log_vals) or 1
-    n_ol = len(ol_log_vals) or 1
-    n_lib = len(lib_log_vals) or 1
-
-    # Score all works in memory (dict, no DB)
-    work_composites: dict[str, float] = {}
-    denom = w_spl + w_gr + w_library + w_nyt
-
-    for work in all_works:
-        signals = []
-        total_weight = 0.0
-
-        spl_data = work_spl.get(work)
-        if spl_data and spl_data["checkouts"] > 0:
-            co_per_year = spl_data["checkouts"] / max(spl_data["years"], 1)
-            spl_norm = bisect.bisect_left(spl_log_vals, math.log10(1 + co_per_year)) / n_spl
-            signals.append((w_spl, spl_norm))
-            total_weight += w_spl
-
-        gr_data = work_gr.get(work)
-        if gr_data:
-            gr_norm = bisect.bisect_left(gr_log_vals, math.log10(1 + gr_data["ratings_count"])) / n_gr
-            signals.append((w_gr, gr_norm))
-            total_weight += w_gr
-
-        can_data = work_ottawa.get(work)
-        if can_data:
-            lib_norm = bisect.bisect_left(lib_log_vals, math.log10(1 + can_data["holds_count"])) / n_lib
-            signals.append((w_library, lib_norm))
-            total_weight += w_library
-
-        nyt_data = work_nyt.get(work)
-        if nyt_data:
-            nyt_norm = min(1.0, 0.8 + 0.2 * math.log10(1 + nyt_data["weeks_on_list"]) / 2.0)
-            signals.append((w_nyt, nyt_norm))
-            total_weight += w_nyt
-
-        if total_weight > 0:
-            demand_score = sum(w * s for w, s in signals) / total_weight
-        else:
-            demand_score = 0.0
-
-        ol_ec = work_ol.get(work, 1)
-        ol_norm = bisect.bisect_left(ol_log_vals, math.log10(1 + ol_ec)) / n_ol
-        confidence = min(total_weight / denom, 1.0) if denom > 0 else 0.0
-        composite = confidence * demand_score + (1 - confidence) * ol_norm
-        if confidence == 0:
-            composite = min(composite, 0.5)
-
-        work_composites[work] = composite
-
-    # Compute filler scores from in-memory composites (top-3 mean)
-    filler_works, filler_freq = _load_filler_works(conn)
-
-    filler_updates = []  # (popularity_score, popularity_level, filler_id)
-    for fid, wkeys in filler_works.items():
-        scores = sorted([work_composites.get(wk, 0.0) for wk in wkeys], reverse=True)
-        top3 = scores[:3]
-        avg = sum(top3) / len(top3) if top3 else 0.0
-        filler_updates.append((avg, 1, 1.0, fid))
-
-    # Fallback for fillers without L1 data
-    l1_ids = set(filler_works.keys())
-    for fid, freq in filler_freq.items():
-        if fid not in l1_ids:
-            score = math.log10(1 + freq) if freq > 0 else 0.0
-            filler_updates.append((score, 0, 0.0, fid))
-
-    # Write only filler scores to DB (~13k rows)
-    conn.executemany(
-        "UPDATE slot_fillers SET popularity_score=?, popularity_level=?, popularity_confidence=? WHERE id=?",
-        filler_updates,
-    )
-    conn.commit()
-
-    elapsed = _time.time() - t0
-    click.echo(f"  [repopulate] scored {len(all_works):,} works in memory, "
-               f"updated {len(filler_updates):,} fillers in {elapsed:.0f}s")
-    return work_composites
-
-
-def _run_repopulate_full(conn: sqlite3.Connection):
-    """Full repopulate: recompute and write everything to DB (for 'keep' path)."""
-    import importlib
-    import time as _time
-
-    click.echo("  [repopulate] full DB write...")
-    t0 = _time.time()
-
-    data = _load_pop_data()
-    cfg = load_tuning_config(conn)
-
-    w_spl = cfg.get("pop_weight_spl", 0.7)
-    w_ol = cfg.get("pop_weight_ol", 0.3)
-    w_gr = cfg.get("pop_weight_gr", 0.2)
-    w_library = cfg.get("pop_weight_library", 0.05)
-    w_nyt = cfg.get("pop_weight_nyt", 0.1)
-    exponent = cfg.get("pop_exponent", 1.2)
-
-    sys.path.insert(0, "data")
-    import populate_popularity as pp
-    importlib.reload(pp)
-
-    conn.execute("PRAGMA synchronous=OFF")
-    conn.execute("PRAGMA cache_size=-65536")
-    conn.execute("PRAGMA mmap_size=268435456")
-    conn.execute("PRAGMA temp_store=MEMORY")
-
-    pp.create_tables(conn)
-    pp.populate_work_level(
-        conn, data["spl"], data["ol"],
-        w_spl=w_spl, w_ol=w_ol, exponent=exponent,
-        gr=data["gr"], w_gr=w_gr,
-        ottawa_isbn=data["ottawa_isbn"], w_library=w_library,
-        nyt=data["nyt"], w_nyt=w_nyt,
-        work_data_cache=_work_data_cache,
-    )
-    pp.score_fillers_level1(conn)
-    pp.score_fillers_fallback(conn)
-
-    elapsed = _time.time() - t0
-    click.echo(f"  [repopulate] full write done in {elapsed:.0f}s")
-    _run_calibrate_thresholds(conn)
-
-
-def _run_repopulate(conn: sqlite3.Connection):
-    """Fast repopulate: score in memory, write only filler scores."""
-    result = _score_in_memory(conn)
-    if result is not None:
-        # Fast in-memory path; cold-start path (result is None) already
-        # delegated to _run_repopulate_full which calibrated.
-        _run_calibrate_thresholds(conn)
-
-
 def _load_goals() -> str:
     """Read tuning_goals.md from repo root."""
     goals_path = pathlib.Path(__file__).parent.parent.parent / "tuning_goals.md"
@@ -399,8 +105,7 @@ def _parse_bounds(goals_text: str) -> dict[str, tuple[float, float]]:
 
     Matches rows like:
       | `weighted_sample_spread` | 0.1 | 1.0 | 0.12 | ... |
-    Also handles wildcard rows like:
-      | `pop_slot_mult_*` | 0.5 | 2.0 | 0.8–1.0 | ... |
+    Also handles wildcard rows for parameters that remain in the autotune surface.
     """
     bounds: dict[str, tuple[float, float]] = {}
     for match in re.finditer(
@@ -409,10 +114,10 @@ def _parse_bounds(goals_text: str) -> dict[str, tuple[float, float]]:
         pattern, lo, hi = match.group(1), float(match.group(2)), float(match.group(3))
         if "*" in pattern:
             prefix = pattern.replace("*", "")
-            for key in ALL_TUNABLE_PARAMS:
+            for key in _autotune_param_keys():
                 if key.startswith(prefix):
                     bounds[key] = (lo, hi)
-        else:
+        elif pattern in _autotune_param_keys():
             bounds[pattern] = (lo, hi)
     return bounds
 
@@ -465,12 +170,7 @@ def _summarize_regime_state(results_file: str) -> dict:
                      (excludes auto-calibrated params that the tuner can't usefully set)
       - param_freq:  dict of param -> count of times probed this regime
     """
-    # These params are auto-derived on every calibrate; manual tuning is futile.
-    AUTO_CALIBRATED = {
-        k for k in ALL_TUNABLE_PARAMS
-        if k.startswith(("accessibility_threshold_", "tier_center_"))
-    }
-    available = set(ALL_TUNABLE_PARAMS.keys()) - AUTO_CALIBRATED
+    available = _autotune_param_keys()
     path = pathlib.Path(results_file)
     if not path.exists():
         return {
@@ -503,7 +203,7 @@ def _summarize_regime_state(results_file: str) -> dict:
         except ValueError:
             continue
         param = parts[1]
-        if param in ("(failed)", "[regime change]"):
+        if param in _NON_PARAM_RESULT_MARKERS:
             continue
         explored.add(param)
         param_freq[param] = param_freq.get(param, 0) + 1
@@ -561,27 +261,31 @@ def _write_best_snapshot(
     )
 
 
-def _clear_best_snapshot(results_file: str) -> None:
+def _clear_best_snapshot(results_file: str) -> bool:
     """Called on regime change — old best may be invalid in new regime."""
     p = _best_snapshot_path(results_file)
     if p.exists():
         p.unlink()
+        return True
+    return False
+
+
+def _clear_best_snapshot_for_regime_change(results_file: str) -> None:
+    if _clear_best_snapshot(results_file):
+        click.echo(
+            "  [regime change] cleared tune_best_state.json because the "
+            "autotune parameter surface changed."
+        )
 
 
 def _restore_params_from_snapshot(
     conn: sqlite3.Connection, snapshot_params: dict,
-) -> tuple[bool, bool]:
-    """Write snapshot params back to config table.
-
-    Returns (any_pop_param_changed, any_calibrate_param_changed) so the caller
-    knows whether to repopulate / calibrate.
-    """
-    needs_repop = False
-    needs_calib = False
+) -> None:
+    """Write snapshot params back to config table."""
     current = load_tuning_config(conn)
     for key, value in snapshot_params.items():
-        if key not in ALL_TUNABLE_PARAMS:
-            continue  # param removed in current regime
+        if key not in _autotune_param_keys():
+            continue  # param removed from autoresearch or owned by another workflow
         cur = current.get(key)
         if cur == value or str(cur) == str(value):
             continue
@@ -592,13 +296,8 @@ def _restore_params_from_snapshot(
                 "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
                 (key, str(value)),
             )
-        if _needs_repopulate(key):
-            needs_repop = True
-        elif _needs_calibrate(key):
-            needs_calib = True
     conn.commit()
     invalidate_config_cache()
-    return needs_repop, needs_calib
 
 
 def _check_regime_change(results_file: str) -> None:
@@ -612,15 +311,15 @@ def _check_regime_change(results_file: str) -> None:
     if not path.exists():
         return
 
-    current_params = sorted(ALL_TUNABLE_PARAMS.keys())
+    current_params = sorted(_autotune_param_keys())
     lines = path.read_text(encoding="utf-8").strip().split("\n")
 
     # Find the most recent regime marker
     last_regime_params = None
     for line in reversed(lines):
-        if line.startswith("---\t[regime change]"):
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[1] == "[regime change]":
             # Extract param list from description
-            parts = line.split("\t")
             if len(parts) >= 9:
                 desc = parts[8]
                 if "available_params=" in desc:
@@ -635,19 +334,27 @@ def _check_regime_change(results_file: str) -> None:
             if line.startswith("---"):
                 continue
             parts = line.split("\t")
-            if len(parts) >= 2 and parts[1] not in ("(failed)", "[regime change]"):
+            if len(parts) >= 2 and parts[1] not in _NON_PARAM_RESULT_MARKERS:
                 mentioned.add(parts[1])
-        # If we have new params that were never mentioned and never regime-marked, add marker
-        if mentioned and set(current_params) - mentioned:
+        if mentioned and mentioned != set(current_params):
             new_params = sorted(set(current_params) - mentioned)
+            removed_params = sorted(mentioned - set(current_params))
+            desc_parts = []
+            if new_params:
+                desc_parts.append(f"New params added: {', '.join(new_params)}.")
+            if removed_params:
+                desc_parts.append(f"Params removed: {', '.join(removed_params)}.")
+            desc_parts.append(
+                "History above is from a prior regime with a different "
+                "parameter surface."
+            )
+            desc_parts.append(f"available_params={','.join(current_params)}")
             _append_result(
                 results_file, 0, "[regime change]", 0, 0, 0, 0, 0,
                 "regime",
-                f"New params added: {', '.join(new_params)}. "
-                f"History above is from a prior regime without these params. "
-                f"available_params={','.join(current_params)}",
+                " ".join(desc_parts),
             )
-            _clear_best_snapshot(results_file)
+            _clear_best_snapshot_for_regime_change(results_file)
             return
 
     if last_regime_params is not None and last_regime_params != current_params:
@@ -663,7 +370,7 @@ def _check_regime_change(results_file: str) -> None:
             results_file, 0, "[regime change]", 0, 0, 0, 0, 0,
             "regime", " ".join(desc_parts),
         )
-        _clear_best_snapshot(results_file)
+        _clear_best_snapshot_for_regime_change(results_file)
 
 
 def _append_result(
@@ -1065,7 +772,7 @@ def run_tone_tuning(
     if _read_best_snapshot(results_file) is None:
         _write_best_snapshot(
             results_file, current_score, quality, separation,
-            current_params, iteration=0,
+            _autotune_param_values(current_params), iteration=0,
         )
 
     # Threshold for considering current "drifted below best" (1σ-ish on composite)
@@ -1076,6 +783,7 @@ def run_tone_tuning(
 
         # Reload state each iteration
         current_params = load_tuning_config(conn)
+        proposer_params = _autotune_param_values(current_params)
         results_history = _load_results_history(results_file)
         regime_state = _summarize_regime_state(results_file)
         snapshot = _read_best_snapshot(results_file)
@@ -1091,13 +799,7 @@ def run_tone_tuning(
                 f"{snapshot['composite']:.3f} (iter {snapshot['iteration']}). "
                 f"Restoring best-known params and re-evaluating."
             )
-            needs_repop, needs_calib = _restore_params_from_snapshot(
-                conn, snapshot["params"],
-            )
-            if needs_repop:
-                _run_repopulate_full(conn)
-            elif needs_calib:
-                _run_calibrate_thresholds(conn)
+            _restore_params_from_snapshot(conn, snapshot["params"])
             try:
                 quality, separation, current_score = _evaluate(
                     conn, rater_model, seed_base=2000 + i * 100,
@@ -1123,7 +825,7 @@ def run_tone_tuning(
             if current_score > snapshot["composite"]:
                 _write_best_snapshot(
                     results_file, current_score, quality, separation,
-                    load_tuning_config(conn), iteration=i,
+                    _autotune_param_values(load_tuning_config(conn)), iteration=i,
                 )
             continue  # consume an iteration on the revert
 
@@ -1183,7 +885,7 @@ def run_tone_tuning(
         proposal_prompt = f"""You are tuning parameters for a subtitle generator.
 
 ## Current parameter values:
-{json.dumps(current_params, indent=2)}
+{json.dumps(proposer_params, indent=2)}
 
 ## Tuning goals:
 {goals_text}
@@ -1206,11 +908,10 @@ signal is exhausted and further probes are noise.
 
 Consider what previous experiments tell you about which direction to move.
 
-NOTE: Changes to pop_weight_spl, pop_weight_ol, pop_weight_gr, pop_weight_nyt,
-pop_weight_library, and pop_exponent automatically trigger in-memory rescoring
-(~15s) so their effects are properly evaluated. Previous experiments with
-these params that did NOT mention repopulate may have been evaluated against stale
-scores — treat those results as unreliable.
+NOTE: Popularity parameters such as pop_*, tier_pop_min_*, accessibility
+thresholds, and tier centers are intentionally excluded from this autoresearch
+loop. They should be fitted from source-title labels and table refits, not
+inferred indirectly from generated-output ratings.
 """
 
         click.echo("  proposing parameter change …")
@@ -1232,9 +933,9 @@ scores — treat those results as unreliable.
             continue
 
         # Validate the proposed parameter
-        if proposal.param not in ALL_TUNABLE_PARAMS:
+        if proposal.param not in _autotune_param_keys():
             click.echo(
-                f"  ⚠ proposed unknown param '{proposal.param}' — skipping"
+                f"  ⚠ proposed unsupported param '{proposal.param}' — skipping"
             )
             _append_result(
                 results_file, i, proposal.param, 0, proposal.new_value,
@@ -1270,24 +971,6 @@ scores — treat those results as unreliable.
 
         apply_config_change(conn, change)
 
-        # Re-run populate-popularity if this is a weight/exponent param
-        if _needs_repopulate(proposal.param):
-            try:
-                _run_repopulate(conn)
-            except RuntimeError:
-                click.echo("  -> SKIP (repopulate failed)\n")
-                revert_config_change(conn, change)
-                _append_result(
-                    results_file, i, proposal.param, old_value, new_value,
-                    quality, separation, current_score,
-                    "error", f"repopulate failed: {proposal.reasoning}",
-                )
-                continue
-        elif _needs_calibrate(proposal.param):
-            # Stored filler scores unchanged, but blended-score distribution
-            # shifted -> re-derive thresholds + tier centers.
-            _run_calibrate_thresholds(conn)
-
         # Evaluate with new value
         try:
             new_quality, new_separation, new_score = _evaluate(
@@ -1296,10 +979,6 @@ scores — treat those results as unreliable.
         except TierFilterError as exc:
             click.echo(f"  -> SKIP (tier filter unreachable: {exc})\n")
             revert_config_change(conn, change)
-            if _needs_repopulate(proposal.param):
-                _run_repopulate(conn)
-            elif _needs_calibrate(proposal.param):
-                _run_calibrate_thresholds(conn)
             _append_result(
                 results_file, i, proposal.param, old_value, new_value,
                 quality, separation, current_score,
@@ -1319,9 +998,6 @@ scores — treat those results as unreliable.
                 f"Composite: {current_score:.3f} -> {new_score:.3f}"
             )
             click.echo(f"  -> KEEP (+{delta:.3f})\n")
-            # Flush full DB write for kept weight changes
-            if _needs_repopulate(proposal.param):
-                _run_repopulate_full(conn)
             quality, separation, current_score = (
                 new_quality, new_separation, new_score,
             )
@@ -1330,17 +1006,12 @@ scores — treat those results as unreliable.
             if best_snap is None or current_score > best_snap["composite"]:
                 _write_best_snapshot(
                     results_file, current_score, quality, separation,
-                    load_tuning_config(conn), iteration=i,
+                    _autotune_param_values(load_tuning_config(conn)), iteration=i,
                 )
                 click.echo(f"  [snapshot] new best composite {current_score:.4f} saved")
         else:
             status = "discard"
             revert_config_change(conn, change)
-            # Restore old filler scores in memory (no full DB write needed)
-            if _needs_repopulate(proposal.param):
-                _run_repopulate(conn)
-            elif _needs_calibrate(proposal.param):
-                _run_calibrate_thresholds(conn)
             click.echo(
                 f"  Quality: {quality:.3f} -> {new_quality:.3f}  "
                 f"Separation: {separation:.3f} -> {new_separation:.3f}  "

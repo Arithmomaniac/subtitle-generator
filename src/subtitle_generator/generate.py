@@ -19,6 +19,8 @@ from subtitle_generator.remix_state import (
 
 _inflect_engine = inflect.engine()
 MAX_TIER_FILTER_ATTEMPTS = 1000
+DEFAULT_GENERATION_TIER_ATTEMPTS = 25
+_DEFAULT_GENERATION_TIERS = ("pop", "mainstream", "niche")
 
 
 class TierFilterError(RuntimeError):
@@ -1021,6 +1023,72 @@ def _tone_target_for_tiers(
     }
 
 
+def _default_generation_tier_ratios(conn: sqlite3.Connection) -> dict[str, float]:
+    cfg = load_tuning_config(conn)
+    weights = {
+        tier: max(0.0, cfg[f"generation_tier_ratio_{tier}"])
+        for tier in _DEFAULT_GENERATION_TIERS
+    }
+    total = sum(weights.values())
+    if total <= 0.0:
+        return {"pop": 0.0, "mainstream": 1.0, "niche": 0.0}
+    return {tier: value / total for tier, value in weights.items()}
+
+
+def _choose_default_generation_tier(
+    conn: sqlite3.Connection,
+    seed: int | None,
+) -> str:
+    return _choose_generation_tier(
+        conn,
+        allowed_tiers=set(_DEFAULT_GENERATION_TIERS),
+        seed=seed,
+    )
+
+
+def _generation_tier_sequence(
+    conn: sqlite3.Connection,
+    *,
+    allowed_tiers: set[str],
+    seed: int | None,
+) -> list[str]:
+    ratios = _default_generation_tier_ratios(conn)
+    remaining = [
+        tier for tier in _DEFAULT_GENERATION_TIERS
+        if tier in allowed_tiers
+    ]
+    if not remaining:
+        raise ValueError("allowed_tiers must include at least one known tier")
+    rng = random.Random(seed) if seed is not None else random
+    sequence: list[str] = []
+    while remaining:
+        weights = [ratios[tier] for tier in remaining]
+        if sum(weights) <= 0.0:
+            tier = "mainstream" if "mainstream" in remaining else remaining[0]
+        else:
+            tier = rng.choices(
+                remaining,
+                weights=weights,
+                k=1,
+            )[0]
+        sequence.append(tier)
+        remaining.remove(tier)
+    return sequence
+
+
+def _choose_generation_tier(
+    conn: sqlite3.Connection,
+    *,
+    allowed_tiers: set[str],
+    seed: int | None,
+) -> str:
+    return _generation_tier_sequence(
+        conn,
+        allowed_tiers=allowed_tiers,
+        seed=seed,
+    )[0]
+
+
 def generate_subtitle_matching_tiers(
     conn: sqlite3.Connection,
     *,
@@ -1032,8 +1100,63 @@ def generate_subtitle_matching_tiers(
 ) -> GeneratedSubtitle:
     """Generate a subtitle whose evidence tier satisfies the requested filter."""
 
-    tone_target = _tone_target_for_tiers(conn, allowed_tiers)
+    default_tier_sequence: list[str] | None = None
     if not allowed_tiers:
+        default_tier_sequence = _generation_tier_sequence(
+            conn,
+            allowed_tiers=set(_DEFAULT_GENERATION_TIERS),
+            seed=seed,
+        )
+        max_attempts = min(max_attempts, DEFAULT_GENERATION_TIER_ATTEMPTS)
+    elif len(allowed_tiers) > 1:
+        allowed_tiers = {
+            _choose_generation_tier(
+                conn,
+                allowed_tiers=allowed_tiers,
+                seed=seed,
+            )
+        }
+
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    candidates = _load_generation_candidates(conn)
+    observed_tiers: Counter[str] = Counter()
+    last_tier: str | None = None
+
+    tier_sequence = default_tier_sequence or [next(iter(allowed_tiers))]
+    remaining_attempts = max_attempts
+    attempt_number = 0
+    for tier_index, requested_tier in enumerate(tier_sequence):
+        if remaining_attempts <= 0:
+            break
+        tiers_left = len(tier_sequence) - tier_index
+        attempts_for_tier = (
+            max(1, remaining_attempts // tiers_left)
+            if default_tier_sequence
+            else remaining_attempts
+        )
+        current_allowed_tiers = {requested_tier}
+        tone_target = _tone_target_for_tiers(conn, current_allowed_tiers)
+        adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
+        for _ in range(attempts_for_tier):
+            seed_offset = attempt_number
+            attempt_number += 1
+            subtitle = _generate_subtitle_from_candidates(
+                conn,
+                candidates,
+                seed=seed + seed_offset if seed is not None else None,
+                adjusted_tone_target=adjusted_tone_target,
+                remix_prob=remix_prob,
+                min_sim=min_sim,
+            )
+            tier = compute_tier_evidence(subtitle.text, conn).tier
+            observed_tiers[tier] += 1
+            if tier in current_allowed_tiers:
+                return subtitle
+            last_tier = tier
+        remaining_attempts -= attempts_for_tier
+
+    if default_tier_sequence:
         return generate_subtitles(
             conn,
             n=1,
@@ -1041,28 +1164,6 @@ def generate_subtitle_matching_tiers(
             remix_prob=remix_prob,
             min_sim=min_sim,
         )[0]
-
-    from subtitle_generator.tiering import compute_tier_evidence
-
-    candidates = _load_generation_candidates(conn)
-    adjusted_tone_target = _adjust_tone_targets(conn, tone_target)
-    observed_tiers: Counter[str] = Counter()
-    last_tier: str | None = None
-    for attempt in range(max_attempts):
-        subtitle = _generate_subtitle_from_candidates(
-            conn,
-            candidates,
-            seed=seed + attempt if seed is not None else None,
-            adjusted_tone_target=adjusted_tone_target,
-            remix_prob=remix_prob,
-            min_sim=min_sim,
-        )
-        tier = compute_tier_evidence(subtitle.text, conn).tier
-        observed_tiers[tier] += 1
-        if tier in allowed_tiers:
-            return subtitle
-        last_tier = tier
-
     requested = ", ".join(sorted(allowed_tiers))
     suffix = f"; last generated tier was {last_tier}" if last_tier else ""
     raise TierFilterError(

@@ -1262,5 +1262,50 @@ def tier_diagnostic_cmd(db_path: Path):
         conn.close()
 
 
+@cli.command("calibrate-tier-gates")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to inspect.")
+@click.option("--min-confidence", type=click.FloatRange(min=0.0, max=1.0), default=0.0, show_default=True, help="Minimum source-label confidence to include.")
+@click.option("--apply", "apply_suggestion", is_flag=True, help="Write the suggested tier gates to the config table.")
+def calibrate_tier_gates_cmd(
+    db_path: Path,
+    min_confidence: float,
+    apply_suggestion: bool,
+):
+    """Suggest deterministic tier gates from source-title labels."""
+
+    from subtitle_generator.tier_diagnostics import (
+        apply_tier_gate_calibration,
+        format_tier_gate_calibration_report,
+        suggest_tier_gate_config,
+    )
+
+    if apply_suggestion:
+        conn = sqlite3.connect(db_path)
+    else:
+        try:
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        except sqlite3.OperationalError as exc:
+            raise click.ClickException(
+                f"Unable to open database read-only: {db_path}"
+            ) from exc
+    try:
+        calibration = suggest_tier_gate_config(
+            conn,
+            min_confidence=min_confidence,
+        )
+        click.echo(format_tier_gate_calibration_report(
+            conn,
+            min_confidence=min_confidence,
+            calibration=calibration,
+        ))
+        if apply_suggestion:
+            if calibration is None:
+                raise click.ClickException("No source-title labels available to apply.")
+            apply_tier_gate_calibration(conn, calibration)
+            click.echo("\nApplied suggested tier gates to config.")
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     cli()

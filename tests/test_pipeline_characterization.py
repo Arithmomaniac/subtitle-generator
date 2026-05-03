@@ -25,11 +25,14 @@ EXPECTED_TUNABLE_PARAMS = {
     "weighted_sample_spread": 0.12,
     "weighted_sample_bias_floor": 0.05,
     "default_generation_tone_target": 2.0,
-    "tier_center_pop": 0.78,
-    "tier_center_mainstream": 0.3,
-    "tier_center_niche": 0.16,
-    "accessibility_threshold_pop": 0.6,
-    "accessibility_threshold_mainstream": 0.3,
+    "generation_tier_ratio_pop": 0.0183,
+    "generation_tier_ratio_mainstream": 0.1172,
+    "generation_tier_ratio_niche": 0.8645,
+    "tier_center_pop": 0.75,
+    "tier_center_mainstream": 0.4005,
+    "tier_center_niche": 0.301,
+    "accessibility_threshold_pop": 0.3665,
+    "accessibility_threshold_mainstream": 0.3098,
     "article_of_min_freq": 1.0,
     "article_action_min_freq": 1.0,
     "article_remix_heuristic_threshold": 0.6,
@@ -43,8 +46,8 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_base_weight_blend": 0.5,
     "pop_classification_blend": 0.9,
     "pop_missing_default": 0.1,
-    "tier_pop_min_demand_confidence": 0.25,
-    "tier_pop_min_lower_tail": 0.35,
+    "tier_pop_min_demand_confidence": 0.8001,
+    "tier_pop_min_lower_tail": 0.352,
     "pop_slot_mult_list_item": 0.8,
     "pop_slot_mult_action_noun": 0.9,
     "pop_slot_mult_of_object": 1.0,
@@ -376,6 +379,7 @@ def test_parameter_views_preserve_defaults_and_db_overrides():
     from subtitle_generator.parameter_state import (
         get_popularity_blend_parameters,
         get_popularity_parameters,
+        get_generation_tier_ratios,
         get_runtime_generation_parameters,
         get_slot_multiplier_parameters,
         get_tier_classifier_parameters,
@@ -398,12 +402,14 @@ def test_parameter_views_preserve_defaults_and_db_overrides():
     assert popularity.weight_ol == EXPECTED_TUNABLE_PARAMS["pop_weight_ol"]
     assert blends.classification_blend == 0.25
     assert get_slot_multiplier_parameters(conn).of_object == 1.4
+    assert get_generation_tier_ratios(conn).pop == 0.0183
     assert runtime.popularity_blends == blends
+    assert runtime.generation_tier_ratios.mainstream == 0.1172
     assert runtime.slot_multipliers.of_object == 1.4
-    assert get_tier_threshold_parameters(conn).accessibility_pop == 0.6
-    assert get_tier_classifier_parameters(conn).pop_min_demand_confidence == 0.25
-    assert get_tone_targets(conn).pop["list_item"] == 0.78
-    assert get_tone_targets(conn).mainstream["of_object"] == 0.3
+    assert get_tier_threshold_parameters(conn).accessibility_pop == 0.3665
+    assert get_tier_classifier_parameters(conn).pop_min_demand_confidence == 0.8001
+    assert get_tone_targets(conn).pop["list_item"] == 0.75
+    assert get_tone_targets(conn).mainstream["of_object"] == 0.4005
 
 
 def test_seeded_generation_path_is_stable():
@@ -443,6 +449,106 @@ def test_default_generation_uses_configured_tone_target():
         "action_noun": 1.8,
         "of_object": 2.0,
     }
+
+
+def test_default_generation_tier_choice_uses_configured_ratios():
+    from subtitle_generator.generate import (
+        _choose_default_generation_tier,
+        _default_generation_tier_ratios,
+    )
+
+    conn = make_runtime_db()
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        (
+            ("generation_tier_ratio_pop", "0"),
+            ("generation_tier_ratio_mainstream", "0"),
+            ("generation_tier_ratio_niche", "1"),
+        ),
+    )
+    conn.commit()
+
+    assert _default_generation_tier_ratios(conn) == {
+        "pop": 0.0,
+        "mainstream": 0.0,
+        "niche": 1.0,
+    }
+    assert _choose_default_generation_tier(conn, seed=1) == "niche"
+
+
+def test_explicit_multi_tier_choice_renormalizes_over_selected_tiers():
+    from subtitle_generator.generate import _choose_generation_tier
+
+    conn = make_runtime_db()
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        (
+            ("generation_tier_ratio_pop", "1"),
+            ("generation_tier_ratio_mainstream", "0"),
+            ("generation_tier_ratio_niche", "999"),
+        ),
+    )
+    conn.commit()
+
+    assert _choose_generation_tier(
+        conn,
+        allowed_tiers={"pop", "mainstream"},
+        seed=1,
+    ) == "pop"
+
+
+def test_explicit_multi_tier_generation_targets_one_sampled_tier(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    import subtitle_generator.tiering as tiering_module
+    from subtitle_generator.generate import (
+        GeneratedSubtitle,
+        generate_subtitle_matching_tiers,
+    )
+
+    conn = make_runtime_db()
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        (
+            ("generation_tier_ratio_pop", "1"),
+            ("generation_tier_ratio_mainstream", "0"),
+            ("generation_tier_ratio_niche", "999"),
+        ),
+    )
+    conn.commit()
+    observed_targets: list[dict[str, float]] = []
+
+    def fake_generate_from_candidates(conn, candidates, **kwargs):
+        observed_targets.append(kwargs["adjusted_tone_target"])
+        return GeneratedSubtitle(
+            text="Generated pop",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )
+
+    def fake_compute_tier_evidence(subtitle, conn):
+        return SimpleNamespace(tier="pop")
+
+    monkeypatch.setattr(generate_module, "_load_generation_candidates", lambda conn: object())
+    monkeypatch.setattr(
+        generate_module, "_generate_subtitle_from_candidates", fake_generate_from_candidates,
+    )
+    monkeypatch.setattr(tiering_module, "compute_tier_evidence", fake_compute_tier_evidence)
+
+    sub = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers={"pop", "mainstream"},
+        seed=11,
+        max_attempts=3,
+    )
+
+    assert sub.text == "Generated pop"
+    assert observed_targets == [pytest.approx({
+        "list_item": 0.6,
+        "action_noun": 0.675,
+        "of_object": 0.75,
+    })]
 
 
 def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
@@ -506,6 +612,115 @@ def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
             max_attempts=3,
         )
     assert len(loaded_candidates) == 2
+
+
+def test_default_generation_tries_remaining_tiers_when_sampled_tier_is_unavailable(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    import subtitle_generator.tiering as tiering_module
+    from subtitle_generator.generate import (
+        GeneratedSubtitle,
+        generate_subtitle_matching_tiers,
+    )
+
+    conn = make_runtime_db()
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        (
+            ("generation_tier_ratio_pop", "1"),
+            ("generation_tier_ratio_mainstream", "0"),
+            ("generation_tier_ratio_niche", "0"),
+        ),
+    )
+    conn.commit()
+    generated: list[str] = []
+
+    def fake_generate_from_candidates(conn, candidates, **kwargs):
+        generated.append("filtered")
+        return GeneratedSubtitle(
+            text=f"Filtered {len(generated)}",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )
+
+    def fake_compute_tier_evidence(subtitle, conn):
+        return SimpleNamespace(tier="mainstream")
+
+    def fake_generate_subtitles(conn, **kwargs):
+        return [GeneratedSubtitle(
+            text="Unfiltered fallback",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )]
+
+    monkeypatch.setattr(
+        generate_module, "_generate_subtitle_from_candidates", fake_generate_from_candidates,
+    )
+    monkeypatch.setattr(tiering_module, "compute_tier_evidence", fake_compute_tier_evidence)
+    monkeypatch.setattr(generate_module, "generate_subtitles", fake_generate_subtitles)
+
+    sub = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers=None,
+        seed=7,
+        max_attempts=4,
+    )
+
+    assert sub.text == "Filtered 2"
+    assert generated == ["filtered", "filtered"]
+
+
+def test_default_generation_falls_back_after_all_tier_attempts_fail(monkeypatch):
+    import subtitle_generator.generate as generate_module
+    import subtitle_generator.tiering as tiering_module
+    from subtitle_generator.generate import (
+        DEFAULT_GENERATION_TIER_ATTEMPTS,
+        GeneratedSubtitle,
+        generate_subtitle_matching_tiers,
+    )
+
+    conn = make_runtime_db()
+    generated: list[str] = []
+
+    def fake_generate_from_candidates(conn, candidates, **kwargs):
+        generated.append("filtered")
+        return GeneratedSubtitle(
+            text=f"Filtered {len(generated)}",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )
+
+    def fake_compute_tier_evidence(subtitle, conn):
+        return SimpleNamespace(tier="unreachable")
+
+    def fake_generate_subtitles(conn, **kwargs):
+        return [GeneratedSubtitle(
+            text="Unfiltered fallback",
+            item1="Race",
+            item2="Power",
+            action_noun="Pursuit",
+            of_object="Happiness",
+        )]
+
+    monkeypatch.setattr(
+        generate_module, "_generate_subtitle_from_candidates", fake_generate_from_candidates,
+    )
+    monkeypatch.setattr(tiering_module, "compute_tier_evidence", fake_compute_tier_evidence)
+    monkeypatch.setattr(generate_module, "generate_subtitles", fake_generate_subtitles)
+
+    sub = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers=None,
+        seed=7,
+    )
+
+    assert sub.text == "Unfiltered fallback"
+    assert len(generated) == DEFAULT_GENERATION_TIER_ATTEMPTS
 
 
 def test_batch_generation_reuses_one_candidate_pool(monkeypatch):
@@ -586,7 +801,9 @@ def test_cli_spot_check_uses_raw_tone_targets_not_classifier_filter(monkeypatch)
 
     assert accuracy == 1.0
     assert [seed for seed, _ in requested_batches] == [10, 110, 210]
-    assert [target["list_item"] for _, target in requested_batches] == [0.78, 0.3, 0.16]
+    assert [target["list_item"] for _, target in requested_batches] == [
+        0.75, 0.4005, 0.301,
+    ]
     assert [tier for tier, _, _ in captured_samples] == [
         "pop",
         "pop",
@@ -1034,6 +1251,162 @@ def test_tuning_revert_removes_default_override_row():
     assert conn.execute(
         "SELECT value FROM config WHERE key = 'weighted_sample_spread'"
     ).fetchone() is None
+
+
+def test_autotune_param_surface_excludes_supervised_popularity_knobs():
+    from subtitle_generator import tune
+
+    autotune_keys = tune._autotune_param_keys()
+
+    assert autotune_keys == {
+        "article_of_min_freq",
+        "article_action_min_freq",
+        "article_remix_heuristic_threshold",
+    }
+    assert "weighted_sample_spread" not in autotune_keys
+    assert "weighted_sample_bias_floor" not in autotune_keys
+    assert "default_generation_tone_target" not in autotune_keys
+    assert "generation_tier_ratio_pop" not in autotune_keys
+    assert "generation_tier_ratio_mainstream" not in autotune_keys
+    assert "generation_tier_ratio_niche" not in autotune_keys
+    assert "remix_reject_double_of" not in autotune_keys
+    assert "pop_weight_spl" not in autotune_keys
+    assert "pop_base_weight_blend" not in autotune_keys
+    assert "pop_classification_blend" not in autotune_keys
+    assert "pop_missing_default" not in autotune_keys
+    assert "pop_slot_mult_list_item" not in autotune_keys
+    assert "tier_pop_min_lower_tail" not in autotune_keys
+    assert "accessibility_threshold_pop" not in autotune_keys
+    assert "tier_center_pop" not in autotune_keys
+    assert not any(key.startswith("pop_") for key in autotune_keys)
+
+
+def test_autotune_bounds_ignore_supervised_popularity_rows():
+    from subtitle_generator import tune
+
+    bounds = tune._parse_bounds(
+        """
+        | Parameter | Min | Max | Current | Notes |
+        |---|---:|---:|---:|---|
+        | `article_of_min_freq` | 1 | 10 | 1 | keep |
+        | `weighted_sample_spread` | 0.05 | 0.5 | 0.12 | excluded |
+        | `pop_weight_spl` | 0.0 | 1.0 | 0.7 | excluded |
+        | `pop_slot_mult_*` | 0.5 | 2.0 | 1.0 | excluded wildcard |
+        """
+    )
+
+    assert bounds == {"article_of_min_freq": (1.0, 10.0)}
+    assert "weighted_sample_spread" not in bounds
+    assert "pop_weight_spl" not in bounds
+    assert "pop_slot_mult_list_item" not in bounds
+
+
+def test_autotune_snapshot_contains_only_autotune_params():
+    from subtitle_generator import tune
+
+    params = {
+        "article_of_min_freq": 2.0,
+        "weighted_sample_spread": 0.2,
+        "pop_weight_spl": 0.1,
+        "pop_slot_mult_list_item": 1.2,
+    }
+
+    snapshot = tune._autotune_param_values(params)
+
+    assert snapshot == {"article_of_min_freq": 2.0}
+
+
+def test_autotune_regime_marker_parser_accepts_iteration_zero(tmp_path):
+    from subtitle_generator import tune
+
+    results_file = tmp_path / "results.tsv"
+    params = ",".join(sorted(tune._autotune_param_keys()))
+    results_file.write_text(
+        "iteration\tparam\told_value\tnew_value\tquality\tseparation\tcomposite\tstatus\tdescription\n"
+        f"0\t[regime change]\t0\t0\t0.0000\t0.0000\t0.0000\tregime\tavailable_params={params}\n",
+        encoding="utf-8",
+    )
+
+    tune._check_regime_change(str(results_file))
+
+    assert results_file.read_text(encoding="utf-8").count("[regime change]") == 1
+
+
+def test_autotune_regime_change_warns_when_snapshot_is_cleared(tmp_path, capsys):
+    from subtitle_generator import tune
+
+    results_file = tmp_path / "results.tsv"
+    old_params = ",".join(sorted([
+        *tune._autotune_param_keys(),
+        "pop_weight_spl",
+    ]))
+    results_file.write_text(
+        "iteration\tparam\told_value\tnew_value\tquality\tseparation\tcomposite\tstatus\tdescription\n"
+        f"0\t[regime change]\t0\t0\t0.0000\t0.0000\t0.0000\tregime\tavailable_params={old_params}\n",
+        encoding="utf-8",
+    )
+    snapshot_path = tune._best_snapshot_path(str(results_file))
+    snapshot_path.write_text("{}", encoding="utf-8")
+
+    tune._check_regime_change(str(results_file))
+
+    output = capsys.readouterr().out
+    assert "cleared tune_best_state.json" in output
+    assert not snapshot_path.exists()
+    assert results_file.read_text(encoding="utf-8").count("[regime change]") == 2
+
+
+def test_autotune_unmarked_regime_change_detects_removed_params(tmp_path, capsys):
+    from subtitle_generator import tune
+
+    results_file = tmp_path / "results.tsv"
+    rows = [
+        "iteration\tparam\told_value\tnew_value\tquality\tseparation\tcomposite\tstatus\tdescription",
+    ]
+    for index, param in enumerate(sorted(tune._autotune_param_keys()), start=1):
+        rows.append(
+            f"{index}\t{param}\t1\t2\t0.1\t0.1\t0.1\tdiscarded\told run"
+        )
+    rows.append(
+        "99\tweighted_sample_spread\t0.12\t0.2\t0.1\t0.1\t0.1\tdiscarded\told run"
+    )
+    results_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    snapshot_path = tune._best_snapshot_path(str(results_file))
+    snapshot_path.write_text("{}", encoding="utf-8")
+
+    tune._check_regime_change(str(results_file))
+
+    output = capsys.readouterr().out
+    text = results_file.read_text(encoding="utf-8")
+    assert "cleared tune_best_state.json" in output
+    assert not snapshot_path.exists()
+    assert "Params removed: weighted_sample_spread." in text
+    assert text.count("[regime change]") == 1
+
+
+def test_autotune_unmarked_history_ignores_auto_revert_marker(tmp_path, capsys):
+    from subtitle_generator import tune
+
+    results_file = tmp_path / "results.tsv"
+    rows = [
+        "iteration\tparam\told_value\tnew_value\tquality\tseparation\tcomposite\tstatus\tdescription",
+    ]
+    for index, param in enumerate(sorted(tune._autotune_param_keys()), start=1):
+        rows.append(
+            f"{index}\t{param}\t1\t2\t0.1\t0.1\t0.1\tdiscarded\told run"
+        )
+    rows.append(
+        "99\t[auto-revert]\t0\t0\t0.1\t0.1\t0.1\treverted\trestored best"
+    )
+    results_file.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    snapshot_path = tune._best_snapshot_path(str(results_file))
+    snapshot_path.write_text("{}", encoding="utf-8")
+
+    tune._check_regime_change(str(results_file))
+
+    assert capsys.readouterr().out == ""
+    assert snapshot_path.exists()
+    assert results_file.read_text(encoding="utf-8").count("[regime change]") == 0
 
 
 def test_tuning_proposal_decision_records_before_after_scores():
