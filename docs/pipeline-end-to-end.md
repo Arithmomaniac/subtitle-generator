@@ -80,6 +80,7 @@ flowchart TD
     gr[Goodreads ratings] --> pop
     ottawa[Ottawa/library holds] --> pop
     nyt[NYT bestsellers] --> pop
+    trove[Trove Australia holdings] --> pop
     aliases --> pop
     pop --> popularity[(popularity_data)]
     pop --> fillers
@@ -126,6 +127,7 @@ The generator is grounded in real book/catalog data:
 | Goodreads/UCSD Book Graph | Demand/engagement signal | ISBN-keyed ratings counts mapped to works. |
 | Ottawa/Canadian library data | Library holds/appearances signal | ISBN-keyed library demand mapped to works. |
 | NYT bestseller data | Bestseller signal | ISBN-keyed bestseller appearances mapped to works. |
+| Trove Australia data | Library breadth/holdings signal | ISBN-keyed Trove `holdingsCount` mapped to works; exact physical copy counts are not assumed. |
 
 Human ratings are not population inputs. They are feedback used by tuning and
 analysis.
@@ -250,6 +252,7 @@ intermediate structures:
 - `work_gr`
 - `work_ottawa`
 - `work_nyt`
+- `work_trove`
 - `all_works`
 
 Each source is normalized onto a percentile scale using `log10(1 + raw_value)`.
@@ -274,7 +277,9 @@ $$
 where confidence is based on the amount of demand-source weight actually
 observed. Works with no demand sources are capped so Open Library alone cannot
 make them look like high-demand pop titles. NYT appearances get a high floor
-because even partial bestseller-list presence is meaningful.
+because even partial bestseller-list presence is meaningful. Trove uses
+Australian `holdingsCount` as a library-breadth signal and stores copy counts as
+a documented proxy unless Trove exposes exact copy fields.
 
 The persisted result is one row per work in `popularity_data`.
 
@@ -720,7 +725,7 @@ they are not applied silently.
 
 | Parameter family | Affects | Needs repopulate? | Needs recalibration? |
 |---|---|---:|---:|
-| `pop_weight_spl`, `pop_weight_ol`, `pop_weight_gr`, `pop_weight_nyt`, `pop_weight_library` | Work-level `composite_score` and filler `popularity_score` | Yes | Yes |
+| `pop_weight_spl`, `pop_weight_ol`, `pop_weight_gr`, `pop_weight_nyt`, `pop_weight_library`, `pop_weight_trove` | Work-level `composite_score` and filler `popularity_score` | Yes | Yes |
 | `pop_exponent` | Source score contrast before work-level scoring | Yes | Yes |
 | `pop_classification_blend` | Tier classification and tone-bias alignment | No | Yes |
 | `pop_missing_default` | Missing-popularity filler classification | No | Yes |

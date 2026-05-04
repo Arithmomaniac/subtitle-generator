@@ -14,7 +14,6 @@ import sqlite3
 import warnings
 
 import click
-import litellm
 from pydantic import BaseModel
 
 from subtitle_generator.generate import generate_subtitles, generate_subtitles_by_tier
@@ -32,6 +31,26 @@ warnings.filterwarnings("ignore", message="coroutine.*was never awaited")
 # ---------------------------------------------------------------------------
 
 _RESPONSES_ONLY_MODELS = RESPONSES_ONLY_MODELS
+
+
+def _litellm():
+    """Import litellm only when an LLM call is actually requested.
+
+    The tuning package is optional in pyproject.toml, but many non-LLM tests
+    import this module through subtitle_generator.tune. Keeping the import lazy
+    lets those tests run in the default development environment while still
+    surfacing a clear error when someone invokes LLM-backed evaluation without
+    installing the optional tune dependencies.
+    """
+
+    try:
+        import litellm
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "litellm is required for LLM-backed evaluation. "
+            "Install the optional tune dependencies before running tuning."
+        ) from exc
+    return litellm
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -92,6 +111,7 @@ def structured_completion(
     """
     model_lower = model.lower()
     last_error = None
+    llm = _litellm()
 
     for attempt in range(1 + max_retries):
         try:
@@ -99,7 +119,7 @@ def structured_completion(
                 # Responses API — native structured output via text_format
                 user_content = messages[-1]["content"] if messages else ""
                 timeout = kwargs.pop("timeout", 60.0) if attempt == 0 else kwargs.get("timeout", 60.0)
-                resp = asyncio.run(litellm.aresponses(
+                resp = asyncio.run(llm.aresponses(
                     model=model,
                     input=user_content,
                     text_format=schema,
@@ -114,7 +134,7 @@ def structured_completion(
             use_native = "gpt" in model_lower or "o3" in model_lower or "o4" in model_lower
 
             if use_native:
-                resp = litellm.completion(
+                resp = llm.completion(
                     model=model,
                     messages=messages,
                     response_format=schema,
@@ -133,7 +153,7 @@ def structured_completion(
                         "parameters": schema.model_json_schema(),
                     },
                 }
-                resp = litellm.completion(
+                resp = llm.completion(
                     model=model,
                     messages=messages,
                     tools=[tool_schema],

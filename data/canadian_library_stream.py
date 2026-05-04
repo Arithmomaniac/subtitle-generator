@@ -13,11 +13,9 @@ import csv
 import io
 import json
 import re
-import time
 from collections import defaultdict
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote_plus
 from urllib.request import Request, urlopen
 
 USER_AGENT = "subtitle-generator/0.1 (research project)"
@@ -454,7 +452,7 @@ def main():
     print("\nPhase 3: Build lookup\n")
     if args.skip_isbn_lookup:
         lookup = build_lookup_no_isbn(all_entries)
-        print(f"  Built title/ISBN-keyed lookup (no OL resolution)")
+        print("  Built title/ISBN-keyed lookup (no OL resolution)")
     else:
         lookup, skipped = resolve_isbns(all_entries)
         print(f"  Skipped (no ISBN): {skipped:,}")

@@ -1,4 +1,5 @@
-data/
+data/*
+!data/*.py
 *.mrc
 *.mrc.gz
 __pycache__/

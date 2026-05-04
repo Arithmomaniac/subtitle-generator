@@ -42,6 +42,8 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_weight_gr": 0.2,
     "pop_weight_nyt": 0.1,
     "pop_weight_library": 0.05,
+    "pop_weight_trove": 0.05,
+    "pop_weight_freq": 0.0,
     "pop_exponent": 1.2,
     "pop_base_weight_blend": 0.5,
     "pop_classification_blend": 0.9,
@@ -177,7 +179,9 @@ def test_observed_pipeline_schema_columns(tmp_path):
         "work_key", "spl_checkouts", "spl_years", "spl_earliest_pub_year",
         "ol_edition_count", "checkouts_per_year", "editions_per_decade",
         "gr_ratings_count", "gr_average_rating", "nyt_weeks_on_list",
-        "nyt_peak_rank", "library_appearances", "composite_score",
+        "nyt_peak_rank", "library_appearances", "trove_library_count",
+        "trove_holding_count", "trove_copy_count", "trove_copy_count_is_exact",
+        "composite_score",
     }
     assert _columns(conn, "config") == {"key", "value"}
     assert _columns(conn, "human_ratings") >= {
@@ -204,6 +208,7 @@ def test_work_level_popularity_scoring_is_testable_without_db_writes():
         },
         work_ottawa={},
         work_nyt={"work-a": {"weeks_on_list": 4, "peak_rank": 3}},
+        work_trove={},
         all_works={"work-a", "work-b", "work-c"},
     )
     percentiles = pop.build_percentile_models(data)
@@ -213,6 +218,8 @@ def test_work_level_popularity_scoring_is_testable_without_db_writes():
         weight_goodreads=0.2,
         weight_nyt=0.1,
         weight_library=0.05,
+        weight_trove=0.05,
+        weight_frequency=0.0,
         exponent=1.2,
     )
 
@@ -400,6 +407,7 @@ def test_parameter_views_preserve_defaults_and_db_overrides():
 
     assert popularity.weight_spl == 0.9
     assert popularity.weight_ol == EXPECTED_TUNABLE_PARAMS["pop_weight_ol"]
+    assert popularity.weight_trove == EXPECTED_TUNABLE_PARAMS["pop_weight_trove"]
     assert blends.classification_blend == 0.25
     assert get_slot_multiplier_parameters(conn).of_object == 1.4
     assert get_generation_tier_ratios(conn).pop == 0.0183
