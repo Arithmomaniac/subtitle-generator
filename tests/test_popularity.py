@@ -192,6 +192,8 @@ def test_export_import_roundtrip():
         )
     """)
     conn.execute("INSERT INTO subtitles VALUES (1, 'Test Book', 'A Test Subtitle', 'openlibrary')")
+    conn.execute("INSERT INTO config VALUES ('z_export_order_probe', 'last')")
+    conn.execute("INSERT INTO config VALUES ('a_export_order_probe', 'first')")
     conn.execute("INSERT INTO config VALUES ('tone_target_pop_list_item', '0.77')")
     conn.commit()
 
@@ -224,6 +226,9 @@ def test_export_import_roundtrip():
             assert all(
                 not row["key"].startswith("tone_target_") for row in config_rows
             )
+            assert [row["key"] for row in config_rows] == sorted(
+                row["key"] for row in config_rows
+            )
 
         # Import into mini DB
         mini_path = tmp_path / "mini.db"
@@ -245,6 +250,91 @@ def test_export_import_roundtrip():
         mini.close()
 
     print("  PASS: export_import_roundtrip")
+
+
+def test_export_data_filters_stale_pattern_sources(tmp_path):
+    """Export uses only slot/source rows backed by current valid pattern matches."""
+    import csv
+
+    from subtitle_generator.export_db import export_data
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            centroid_dot REAL,
+            norm_sq REAL,
+            token_count INTEGER,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        );
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE subtitles (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT,
+            source_file TEXT
+        );
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            subtitle_id INTEGER,
+            list_items_json TEXT
+        );
+        CREATE TABLE slot_filler_sources (
+            slot_filler_id INTEGER NOT NULL,
+            subtitle_id INTEGER NOT NULL
+        );
+        INSERT INTO subtitles VALUES
+            (10, 'Stale Source', 'A, B, C, D, and the Making of Noise', 'openlibrary'),
+            (11, 'Current Source', 'A, B, and the Making of Signal', 'openlibrary');
+        INSERT INTO pattern_matches VALUES
+            (100, 10, '["A", "B", "C", "D"]'),
+            (101, 11, '["A", "B"]');
+        INSERT INTO slot_fillers (
+            id, slot_type, filler, mode, source_subtitle_id, freq,
+            popularity_score, popularity_level, popularity_confidence
+        )
+        VALUES
+            (1, 'action_noun', 'Noise', 'strict', 10, 1, 0.1, 1, 1.0),
+            (2, 'action_noun', 'Signal', 'strict', 10, 2, 0.2, 1, 1.0);
+        INSERT INTO slot_filler_sources VALUES
+            (1, 10),
+            (2, 10),
+            (2, 11);
+        """
+    )
+    conn.commit()
+
+    stats = export_data(conn, tmp_path)
+    assert stats["slot_fillers.csv"] == 1
+    assert stats["sources.csv"] == 1
+
+    with open(tmp_path / "slot_fillers.csv", encoding="utf-8") as f:
+        slot_rows = list(csv.DictReader(f))
+    assert [row["filler"] for row in slot_rows] == ["Signal"]
+    assert slot_rows[0]["source_subtitle_id"] == "11"
+
+    with open(tmp_path / "sources.csv", encoding="utf-8") as f:
+        source_rows = list(csv.DictReader(f))
+    assert source_rows == [{
+        "slot_filler_id": "2",
+        "title": "Current Source",
+        "subtitle_text": "A, B, and the Making of Signal",
+        "source_tag": "OL",
+    }]
 
 
 def test_jacket_accessibility_blend():

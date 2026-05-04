@@ -6,6 +6,100 @@ from pathlib import Path
 
 from subtitle_generator.schema_contracts import MINI_DB_SCHEMA_CONTRACTS, validate_schema
 
+_CURRENT_PATTERN_LIST_ITEM_COUNTS = (2, 3)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone() is not None
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    if not _table_exists(conn, table):
+        return set()
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _can_filter_to_current_pattern_matches(conn: sqlite3.Connection) -> bool:
+    return {"subtitle_id", "list_items_json"} <= _columns(conn, "pattern_matches")
+
+
+def _exportable_slot_fillers_cte(conn: sqlite3.Connection) -> str:
+    """Return a CTE exposing slot fillers that still satisfy current slot gates."""
+
+    slot_columns = (
+        "id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep, "
+        "remix_type, remix_prep, remix_word_count, centroid_dot, norm_sq, "
+        "token_count, popularity_score, popularity_level, popularity_confidence"
+    )
+    if not _can_filter_to_current_pattern_matches(conn):
+        return f"WITH exportable_slot_fillers AS (SELECT {slot_columns} FROM slot_fillers)\n"
+
+    allowed_counts = ", ".join(str(count) for count in _CURRENT_PATTERN_LIST_ITEM_COUNTS)
+    valid_sources_cte = f"""
+WITH valid_pattern_sources AS (
+    SELECT subtitle_id
+    FROM pattern_matches
+    WHERE subtitle_id IS NOT NULL
+      AND json_valid(list_items_json)
+      AND json_array_length(list_items_json) IN ({allowed_counts})
+)
+"""
+    if _table_exists(conn, "slot_filler_sources"):
+        return valid_sources_cte + f""",
+linked_valid_sources AS (
+    SELECT sfs.slot_filler_id, MIN(sfs.subtitle_id) AS subtitle_id
+    FROM slot_filler_sources sfs
+    JOIN valid_pattern_sources vps ON vps.subtitle_id = sfs.subtitle_id
+    GROUP BY sfs.slot_filler_id
+),
+fallback_valid_sources AS (
+    SELECT sf.id AS slot_filler_id, sf.source_subtitle_id AS subtitle_id
+    FROM slot_fillers sf
+    JOIN valid_pattern_sources vps ON vps.subtitle_id = sf.source_subtitle_id
+),
+exportable_slot_fillers AS (
+    SELECT
+        sf.id,
+        sf.slot_type,
+        sf.filler,
+        sf.mode,
+        COALESCE(lvs.subtitle_id, fvs.subtitle_id) AS source_subtitle_id,
+        sf.freq,
+        sf.pos_tag,
+        sf.prep,
+        sf.remix_type,
+        sf.remix_prep,
+        sf.remix_word_count,
+        sf.centroid_dot,
+        sf.norm_sq,
+        sf.token_count,
+        sf.popularity_score,
+        sf.popularity_level,
+        sf.popularity_confidence
+    FROM slot_fillers sf
+    LEFT JOIN linked_valid_sources lvs ON lvs.slot_filler_id = sf.id
+    LEFT JOIN fallback_valid_sources fvs ON fvs.slot_filler_id = sf.id
+    WHERE sf.source_subtitle_id IS NULL
+       OR COALESCE(lvs.subtitle_id, fvs.subtitle_id) IS NOT NULL
+)
+"""
+
+    return valid_sources_cte + f""",
+exportable_slot_fillers AS (
+    SELECT {slot_columns}
+    FROM slot_fillers sf
+    WHERE sf.source_subtitle_id IS NULL
+       OR EXISTS (
+            SELECT 1
+            FROM valid_pattern_sources vps
+            WHERE vps.subtitle_id = sf.source_subtitle_id
+       )
+)
+"""
+
 
 def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     """Export slot_fillers, config, and sources as CSV files.
@@ -19,11 +113,14 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
     stats: dict[str, int] = {}
 
     # -- slot_fillers (with scalar decomposition and remix columns) --
+    exportable_cte = _exportable_slot_fillers_cte(source_conn)
     rows = source_conn.execute(
-        "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep, "
+        exportable_cte
+        + "SELECT id, slot_type, filler, mode, source_subtitle_id, freq, pos_tag, prep, "
         "remix_type, remix_prep, remix_word_count, centroid_dot, norm_sq, token_count, "
         "popularity_score, popularity_level, popularity_confidence "
-        "FROM slot_fillers"
+        "FROM exportable_slot_fillers "
+        "ORDER BY id"
     ).fetchall()
     path = output_dir / "slot_fillers.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -45,7 +142,7 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
 
     # -- config --
     rows = source_conn.execute(
-        "SELECT key, value FROM config WHERE key NOT LIKE 'tone_target_%'"
+        "SELECT key, value FROM config WHERE key NOT LIKE 'tone_target_%' ORDER BY key"
     ).fetchall()
     path = output_dir / "config.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -56,11 +153,13 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
 
     # -- sources (pre-joined: slot_filler -> source book) --
     rows = source_conn.execute(
-        "SELECT sf.id, s.title, s.subtitle, "
+        exportable_cte
+        + "SELECT sf.id, s.title, s.subtitle, "
         "CASE WHEN s.source_file = 'openlibrary' THEN 'OL' ELSE 'LOC' END "
-        "FROM slot_fillers sf "
+        "FROM exportable_slot_fillers sf "
         "JOIN subtitles s ON s.id = sf.source_subtitle_id "
-        "WHERE sf.source_subtitle_id IS NOT NULL"
+        "WHERE sf.source_subtitle_id IS NOT NULL "
+        "ORDER BY sf.id"
     ).fetchall()
     path = output_dir / "sources.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:
