@@ -35,6 +35,8 @@ class PopularityParameters:
     weight_goodreads: float
     weight_nyt: float
     weight_library: float
+    weight_trove: float
+    weight_frequency: float
     exponent: float
 
 
@@ -136,6 +138,8 @@ def get_popularity_parameters(conn: sqlite3.Connection | None = None) -> Popular
         weight_goodreads=cfg["pop_weight_gr"],
         weight_nyt=cfg["pop_weight_nyt"],
         weight_library=cfg["pop_weight_library"],
+        weight_trove=cfg["pop_weight_trove"],
+        weight_frequency=cfg["pop_weight_freq"],
         exponent=cfg["pop_exponent"],
     )
 

@@ -60,7 +60,9 @@ SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
             "work_key", "spl_checkouts", "spl_years", "spl_earliest_pub_year",
             "ol_edition_count", "checkouts_per_year", "editions_per_decade",
             "gr_ratings_count", "gr_average_rating", "nyt_weeks_on_list",
-            "nyt_peak_rank", "library_appearances", "composite_score",
+            "nyt_peak_rank", "library_appearances", "trove_library_count",
+            "trove_holding_count", "trove_copy_count",
+            "trove_copy_count_is_exact", "composite_score",
         }),
     ),
     TableContract(

@@ -27,6 +27,8 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "pop_weight_gr": 0.2,       # Weight of Goodreads ratings signal
     "pop_weight_nyt": 0.1,      # Weight of NYT bestseller signal
     "pop_weight_library": 0.05, # Weight of other library lists signal
+    "pop_weight_trove": 0.05,   # Weight of Trove Australia holdings signal
+    "pop_weight_freq": 0.0,
     "pop_exponent": 1.2,
     "pop_base_weight_blend": 0.5,
     "pop_classification_blend": 0.9,

@@ -1064,13 +1064,14 @@ def pull_ratings_cmd(ctx, since: str | None, account: str | None):
     click.echo(f"Synced {synced} ratings ({skipped} duplicates skipped).")
 
 
-_POP_SOURCES = ["spl", "ol", "gr", "ottawa", "nyt"]
+_POP_SOURCES = ["spl", "ol", "gr", "ottawa", "nyt", "trove"]
 _POP_LOOKUP_FILES = {
     "spl": Path("data/spl_checkout_lookup.json"),
     "ol": Path("data/ol_edition_lookup.json"),
     "gr": Path("data/goodreads_lookup.json"),
     "ottawa": Path("data/canadian_library_lookup.json"),
     "nyt": Path("data/nyt_bestseller_lookup.json"),
+    "trove": Path("data/trove_holdings_lookup.json"),
 }
 
 
@@ -1094,12 +1095,47 @@ def _pop_status():
 
 
 @cli.command("download-popularity")
-@click.option("--sources", default=None, help="Comma-separated sources to download (spl,ol,gr,ottawa,nyt). Default: all except nyt without API key.")
+@click.option("--sources", default=None, help="Comma-separated sources to download (spl,ol,gr,ottawa,nyt,trove). Default: all except API-keyed sources without keys.")
 @click.option("--nyt-api-key", default=None, envvar="NYT_API_KEY", help="NYT API key (or set NYT_API_KEY env var)")
 @click.option("--nyt-max-requests", type=int, default=None, help="Stop NYT after N requests")
+@click.option("--trove-api-key", default=None, envvar="TROVE_API_KEY", help="Trove API key (or set TROVE_API_KEY env var)")
+@click.option("--trove-limit", type=int, default=None, help="Stop Trove after N target ISBNs")
+@click.option("--trove-max-requests", type=int, default=None, help="Stop Trove after N API requests")
+@click.option("--trove-rate-per-minute", type=int, default=180, show_default=True, help="Trove request rate below quota")
+@click.option("--trove-quota-per-minute", type=int, default=200, show_default=True, help="Approved Trove quota")
+@click.option("--trove-workers", type=int, default=1, show_default=True, help="Concurrent Trove ISBN workers")
+@click.option("--trove-bulk-pages", type=int, default=0, help="Harvest N Trove bulk pages before targeted ISBN search")
+@click.option("--trove-bulk-page-size", type=int, default=20, show_default=True, help="Trove works per bulk page")
+@click.option("--trove-bulk-full", is_flag=True, help="Use full work/version records for Trove bulk pages")
+@click.option("--trove-db", type=click.Path(path_type=Path), default=DB_PATH, show_default=True, help="SQLite DB used for Trove target ISBNs")
+@click.option(
+    "--trove-target-mode",
+    type=click.Choice(["slot-sources", "all"]),
+    default="slot-sources",
+    show_default=True,
+    help="Which ISBNs to load from --trove-db",
+)
+@click.option("--trove-include-libraries", is_flag=True, help="Persist Trove library NUC/name lists")
 @click.option("--status", is_flag=True, help="Show what's downloaded and exit")
-def download_popularity(sources, nyt_api_key, nyt_max_requests, status):
-    """Download popularity data sources (SPL, OL editions, Goodreads, Ottawa, NYT).
+def download_popularity(
+    sources,
+    nyt_api_key,
+    nyt_max_requests,
+    trove_api_key,
+    trove_limit,
+    trove_max_requests,
+    trove_rate_per_minute,
+    trove_quota_per_minute,
+    trove_workers,
+    trove_bulk_pages,
+    trove_bulk_page_size,
+    trove_bulk_full,
+    trove_db,
+    trove_target_mode,
+    trove_include_libraries,
+    status,
+):
+    """Download popularity data sources (SPL, OL editions, Goodreads, Ottawa, NYT, Trove).
 
     \b
     Sources:
@@ -1108,12 +1144,16 @@ def download_popularity(sources, nyt_api_key, nyt_max_requests, status):
       gr      Goodreads / UCSD Book Graph (~2 GB download)
       ottawa  Ottawa Public Library holds data
       nyt     NYT bestseller lists (multi-day, resumable, needs API key)
+      trove   Trove Australia book holdings (resumable, needs API key)
 
     \b
     Examples:
       subtitle-gen download-popularity                    # all (except NYT w/o key)
       subtitle-gen download-popularity --sources spl,gr   # specific sources
       subtitle-gen download-popularity --sources nyt --nyt-api-key KEY
+      subtitle-gen download-popularity --sources trove --trove-limit 100
+      subtitle-gen download-popularity --sources trove --trove-bulk-pages 1000 --trove-bulk-full
+      subtitle-gen download-popularity --sources trove --trove-db data/db/subtitles.db
       subtitle-gen download-popularity --status           # show what's downloaded
     """
     import subprocess
@@ -1129,7 +1169,10 @@ def download_popularity(sources, nyt_api_key, nyt_max_requests, status):
         if invalid:
             raise click.ClickException(f"Unknown source(s): {', '.join(invalid)}. Choose from: {', '.join(_POP_SOURCES)}")
     else:
-        selected = [s for s in _POP_SOURCES if s != "nyt" or nyt_api_key]
+        selected = [
+            s for s in _POP_SOURCES
+            if (s != "nyt" or nyt_api_key) and (s != "trove" or trove_api_key)
+        ]
 
     for src in selected:
         click.echo(f"\n{'=' * 60}")
@@ -1167,6 +1210,35 @@ def download_popularity(sources, nyt_api_key, nyt_max_requests, status):
             # Auto-export partial data to lookup JSON
             subprocess.run([sys.executable, "data/nyt_stream.py", "--export"], check=True)
 
+        elif src == "trove":
+            if not trove_api_key:
+                raise click.ClickException("Trove requires --trove-api-key or TROVE_API_KEY env var.")
+            args = [
+                sys.executable, "data/trove_stream.py",
+                "--api-key", trove_api_key,
+                "--rate-per-minute", str(trove_rate_per_minute),
+                "--quota-per-minute", str(trove_quota_per_minute),
+                "--workers", str(trove_workers),
+                "--db", str(trove_db),
+                "--db-target-mode", trove_target_mode,
+                "--no-ol-targets",
+            ]
+            if trove_bulk_pages:
+                args.extend([
+                    "--bulk-pages", str(trove_bulk_pages),
+                    "--bulk-page-size", str(trove_bulk_page_size),
+                    "--limit", "0",
+                ])
+                if trove_bulk_full:
+                    args.append("--bulk-full")
+            if trove_limit is not None:
+                args.extend(["--limit", str(trove_limit)])
+            if trove_max_requests is not None:
+                args.extend(["--max-requests", str(trove_max_requests)])
+            if trove_include_libraries:
+                args.append("--include-libraries")
+            subprocess.run(args, check=True)
+
     click.echo(f"\n{'=' * 60}")
     click.echo("Summary:")
     _pop_status()
@@ -1178,16 +1250,17 @@ def download_popularity(sources, nyt_api_key, nyt_max_requests, status):
 @click.option("--gr", "w_gr", type=float, default=None, help="Override pop_weight_gr")
 @click.option("--library", "w_library", type=float, default=None, help="Override pop_weight_library")
 @click.option("--nyt", "w_nyt", type=float, default=None, help="Override pop_weight_nyt")
+@click.option("--trove", "w_trove", type=float, default=None, help="Override pop_weight_trove")
 @click.option("--exponent", type=float, default=None, help="Override pop_exponent")
 @click.option("--skip-calibrate", is_flag=True, help="Skip threshold calibration")
 @click.option("--skip-data-model", is_flag=True, help="Skip ISBN alias / filler-source rebuild")
-def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, exponent, skip_calibrate, skip_data_model):
+def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, w_trove, exponent, skip_calibrate, skip_data_model):
     """Build ISBN mappings and compute popularity scores from all available sources.
 
     \b
     Runs the full popularity pipeline:
       1. Build ISBN aliases + filler-source mapping (unless --skip-data-model)
-      2. Load all available popularity lookups (SPL, OL, Goodreads, Ottawa, NYT)
+      2. Load all available popularity lookups (SPL, OL, Goodreads, Ottawa, NYT, Trove)
       3. Compute composite scores via weighted-average percentile normalization
       4. Score slot fillers (L1 top-3 mean + L2 corpus fallback)
       5. Auto-calibrate tier thresholds (unless --skip-calibrate)
@@ -1218,6 +1291,8 @@ def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, exponent, skip_cali
         args.extend(["--library", str(w_library)])
     if w_nyt is not None:
         args.extend(["--nyt", str(w_nyt)])
+    if w_trove is not None:
+        args.extend(["--trove", str(w_trove)])
     if exponent is not None:
         args.extend(["--exponent", str(exponent)])
     if skip_calibrate:

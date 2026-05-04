@@ -1081,7 +1081,9 @@ def test_config_params_exist():
     from subtitle_generator.config import ALL_TUNABLE_PARAMS
 
     expected = [
-        "pop_weight_spl", "pop_weight_ol",
+        "pop_weight_spl", "pop_weight_ol", "pop_weight_gr",
+        "pop_weight_nyt", "pop_weight_library", "pop_weight_trove",
+        "pop_weight_freq",
         "pop_exponent", "pop_base_weight_blend", "pop_classification_blend",
         "pop_missing_default", "default_generation_tone_target",
         "tier_pop_min_demand_confidence",

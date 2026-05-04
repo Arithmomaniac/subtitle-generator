@@ -22,12 +22,13 @@ OL_PATH = Path("data/ol_edition_lookup.json")
 GR_PATH = Path("data/goodreads_lookup.json")
 OTTAWA_PATH = Path("data/canadian_library_lookup.json")
 NYT_PATH = Path("data/nyt_bestseller_lookup.json")
+TROVE_PATH = Path("data/trove_holdings_lookup.json")
 
 # Ensure src is importable (for config access)
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from subtitle_generator.config import load_tuning_config, ALL_TUNABLE_PARAMS
-from subtitle_generator.parameter_state import PopularityParameters
+from subtitle_generator.config import load_tuning_config, ALL_TUNABLE_PARAMS  # noqa: E402
+from subtitle_generator.parameter_state import PopularityParameters  # noqa: E402
 
 
 @dataclass
@@ -37,6 +38,7 @@ class WorkLevelData:
     work_gr: dict[str, dict]
     work_ottawa: dict[str, dict]
     work_nyt: dict[str, dict]
+    work_trove: dict[str, dict]
     all_works: set[str]
 
 
@@ -54,6 +56,10 @@ class WorkPopularityRow:
     nyt_weeks_on_list: int
     nyt_peak_rank: int | None
     library_appearances: int
+    trove_library_count: int
+    trove_holding_count: int
+    trove_copy_count: int
+    trove_copy_count_is_exact: int
     composite_score: float
 
     def as_db_tuple(self) -> tuple:
@@ -70,6 +76,10 @@ class WorkPopularityRow:
             self.nyt_weeks_on_list,
             self.nyt_peak_rank,
             self.library_appearances,
+            self.trove_library_count,
+            self.trove_holding_count,
+            self.trove_copy_count,
+            self.trove_copy_count_is_exact,
             self.composite_score,
         )
 
@@ -80,6 +90,7 @@ class PercentileModels:
     goodreads: Callable[[float], float]
     open_library: Callable[[float], float]
     library: Callable[[float], float]
+    trove: Callable[[float], float]
 
 
 @dataclass(frozen=True)
@@ -122,6 +133,10 @@ def create_tables(conn: sqlite3.Connection):
             nyt_weeks_on_list INTEGER DEFAULT 0,
             nyt_peak_rank INTEGER,
             library_appearances INTEGER DEFAULT 0,
+            trove_library_count INTEGER DEFAULT 0,
+            trove_holding_count INTEGER DEFAULT 0,
+            trove_copy_count INTEGER DEFAULT 0,
+            trove_copy_count_is_exact INTEGER DEFAULT 0,
             composite_score REAL
         )
     """)
@@ -197,6 +212,35 @@ def load_ottawa(conn: sqlite3.Connection, ottawa_isbn: dict) -> dict[str, dict]:
     return work_ottawa
 
 
+def load_trove(conn: sqlite3.Connection, trove_isbn: dict) -> dict[str, dict]:
+    """Map Trove Australia ISBN-keyed data to work_keys via isbn_aliases."""
+    work_trove: dict[str, dict] = {}
+    rows = conn.execute(
+        "SELECT isbn, work_key FROM isbn_aliases WHERE work_key IS NOT NULL"
+    ).fetchall()
+    isbn_to_work = {r[0]: r[1] for r in rows}
+
+    matched = 0
+    for isbn, data in trove_isbn.items():
+        work = isbn_to_work.get(isbn)
+        if work:
+            library_count = int(data.get("library_count", data.get("holding_count", 0)) or 0)
+            existing = work_trove.get(work)
+            if not existing or library_count > existing.get("library_count", 0):
+                work_trove[work] = {
+                    "library_count": library_count,
+                    "holding_count": int(data.get("holding_count", library_count) or 0),
+                    "copy_count": int(data.get("copy_count", library_count) or 0),
+                    "copy_count_is_exact": bool(data.get("copy_count_is_exact", False)),
+                    "trove_work_id": data.get("trove_work_id", ""),
+                }
+            matched += 1
+
+    print(f"  Trove ISBNs matched to works: {matched:,}")
+    print(f"  Unique works with Trove data: {len(work_trove):,}")
+    return work_trove
+
+
 def load_nyt(conn: sqlite3.Connection, nyt: dict) -> dict[str, dict]:
     """Map NYT bestseller ISBN-keyed data to work_keys via isbn_aliases."""
     work_nyt: dict[str, dict] = {}
@@ -245,6 +289,7 @@ def build_work_level_data(
     gr: dict | None = None,
     ottawa_isbn: dict | None = None,
     nyt: dict | None = None,
+    trove_isbn: dict | None = None,
 ) -> WorkLevelData:
     """Map third-party source dictionaries into work-keyed intermediate data."""
 
@@ -296,12 +341,19 @@ def build_work_level_data(
         work_nyt = {}
         print("  NYT bestsellers: skipped (no data)")
 
+    if trove_isbn:
+        work_trove = load_trove(conn, trove_isbn)
+    else:
+        work_trove = {}
+        print("  Trove Australia: skipped (no data)")
+
     all_works = (
         set(work_spl.keys())
         | set(work_ol.keys())
         | set(work_gr.keys())
         | set(work_ottawa.keys())
         | set(work_nyt.keys())
+        | set(work_trove.keys())
     )
     return WorkLevelData(
         work_spl=dict(work_spl),
@@ -309,6 +361,7 @@ def build_work_level_data(
         work_gr=work_gr,
         work_ottawa=work_ottawa,
         work_nyt=work_nyt,
+        work_trove=work_trove,
         all_works=all_works,
     )
 
@@ -320,6 +373,7 @@ def get_or_build_work_level_data(
     gr: dict | None,
     ottawa_isbn: dict | None,
     nyt: dict | None,
+    trove_isbn: dict | None,
     work_data_cache: dict | None,
 ) -> WorkLevelData:
     """Reuse cached work-level data or populate the cache on first use."""
@@ -331,18 +385,20 @@ def get_or_build_work_level_data(
             work_gr=work_data_cache["work_gr"],
             work_ottawa=work_data_cache["work_ottawa"],
             work_nyt=work_data_cache["work_nyt"],
+            work_trove=work_data_cache.get("work_trove", {}),
             all_works=work_data_cache["all_works"],
         )
         print(f"  Using cached work-level data ({len(data.all_works):,} works)")
         return data
 
-    data = build_work_level_data(conn, spl, ol, gr, ottawa_isbn, nyt)
+    data = build_work_level_data(conn, spl, ol, gr, ottawa_isbn, nyt, trove_isbn)
     if work_data_cache is not None:
         work_data_cache["work_spl"] = data.work_spl
         work_data_cache["work_ol"] = data.work_ol
         work_data_cache["work_gr"] = data.work_gr
         work_data_cache["work_ottawa"] = data.work_ottawa
         work_data_cache["work_nyt"] = data.work_nyt
+        work_data_cache["work_trove"] = data.work_trove
         work_data_cache["all_works"] = data.all_works
         print("  Cached work-level data for reuse")
     return data
@@ -367,11 +423,15 @@ def build_percentile_models(data: WorkLevelData) -> PercentileModels:
     lib_log_vals = [math.log10(1 + d["holds_count"]) for d in data.work_ottawa.values()]
     print(f"  Ottawa percentile base: {len(lib_log_vals):,} values")
 
+    trove_log_vals = [math.log10(1 + d["library_count"]) for d in data.work_trove.values()]
+    print(f"  Trove percentile base: {len(trove_log_vals):,} values")
+
     return PercentileModels(
         spl=make_percentile_fn(spl_log_vals),
         goodreads=make_percentile_fn(gr_log_vals),
         open_library=make_percentile_fn(ol_log_vals),
         library=make_percentile_fn(lib_log_vals),
+        trove=make_percentile_fn(trove_log_vals),
     )
 
 
@@ -423,6 +483,21 @@ def score_work_popularity(
     else:
         library_appearances = 0
 
+    trove_data = data.work_trove.get(work)
+    if trove_data:
+        trove_norm = percentiles.trove(math.log10(1 + trove_data["library_count"]))
+        trove_library_count = trove_data["library_count"]
+        trove_holding_count = trove_data.get("holding_count", trove_library_count)
+        trove_copy_count = trove_data.get("copy_count", trove_holding_count)
+        trove_copy_count_is_exact = int(bool(trove_data.get("copy_count_is_exact", False)))
+        signals.append((params.weight_trove, trove_norm))
+        total_weight += params.weight_trove
+    else:
+        trove_library_count = 0
+        trove_holding_count = 0
+        trove_copy_count = 0
+        trove_copy_count_is_exact = 0
+
     nyt_data = data.work_nyt.get(work)
     if nyt_data:
         nyt_weeks = nyt_data["weeks_on_list"]
@@ -446,6 +521,7 @@ def score_work_popularity(
             + params.weight_goodreads
             + params.weight_library
             + params.weight_nyt
+            + params.weight_trove
         ),
         1.0,
     )
@@ -466,6 +542,10 @@ def score_work_popularity(
         nyt_weeks_on_list=nyt_weeks,
         nyt_peak_rank=nyt_rank,
         library_appearances=library_appearances,
+        trove_library_count=trove_library_count,
+        trove_holding_count=trove_holding_count,
+        trove_copy_count=trove_copy_count,
+        trove_copy_count_is_exact=trove_copy_count_is_exact,
         composite_score=composite,
     )
 
@@ -475,7 +555,7 @@ def persist_work_popularity_rows(
     rows: list[WorkPopularityRow],
 ) -> None:
     conn.executemany(
-        "INSERT OR REPLACE INTO popularity_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO popularity_data VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [row.as_db_tuple() for row in rows],
     )
 
@@ -485,18 +565,20 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
                        gr: dict | None = None, w_gr: float = 0.2,
                        ottawa_isbn: dict | None = None, w_library: float = 0.05,
                        nyt: dict | None = None, w_nyt: float = 0.1,
+                       trove_isbn: dict | None = None, w_trove: float = 0.05,
                        work_data_cache: dict | None = None):
-    """Aggregate SPL + OL + Goodreads + Ottawa + NYT data at work level.
+    """Aggregate SPL + OL + Goodreads + Ottawa + NYT + Trove data at work level.
 
     If work_data_cache is provided and populated, skip the expensive ISBN→work
     mapping and reuse cached work-level dicts. The cache is a dict that this
     function populates on first call; pass the same dict on subsequent calls.
     """
     print(f"\nPopulating work-level popularity_data "
-          f"(w_spl={w_spl}, w_ol={w_ol}, w_gr={w_gr}, w_lib={w_library}, w_nyt={w_nyt}, exp={exponent})...")
+          f"(w_spl={w_spl}, w_ol={w_ol}, w_gr={w_gr}, w_lib={w_library}, "
+          f"w_nyt={w_nyt}, w_trove={w_trove}, exp={exponent})...")
 
     data = get_or_build_work_level_data(
-        conn, spl, ol, gr, ottawa_isbn, nyt, work_data_cache,
+        conn, spl, ol, gr, ottawa_isbn, nyt, trove_isbn, work_data_cache,
     )
     print(f"  Total unique works: {len(data.all_works):,}")
 
@@ -506,6 +588,7 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
         weight_goodreads=w_gr,
         weight_nyt=w_nyt,
         weight_library=w_library,
+        weight_trove=w_trove,
         weight_frequency=0.0,
         exponent=exponent,
     )
@@ -526,9 +609,13 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
     with_spl = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE spl_checkouts > 0").fetchone()[0]
     with_gr = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE gr_ratings_count > 0").fetchone()[0]
     with_lib = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE library_appearances > 0").fetchone()[0]
+    with_trove = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE trove_library_count > 0").fetchone()[0]
     print(f"\n  popularity_data: {total:,} works")
     with_nyt = conn.execute("SELECT COUNT(*) FROM popularity_data WHERE nyt_weeks_on_list > 0").fetchone()[0]
-    print(f"    with SPL: {with_spl:,} | with Goodreads: {with_gr:,} | with Ottawa: {with_lib:,} | with NYT: {with_nyt:,}")
+    print(
+        f"    with SPL: {with_spl:,} | with Goodreads: {with_gr:,} | "
+        f"with Ottawa: {with_lib:,} | with NYT: {with_nyt:,} | with Trove: {with_trove:,}"
+    )
 
     # Distribution
     scores = conn.execute(
@@ -536,7 +623,7 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
     ).fetchall()
     vals = [r[0] for r in scores]
     n = len(vals)
-    print(f"  Composite score distribution:")
+    print("  Composite score distribution:")
     print(f"    min={vals[0]:.3f}, median={vals[n//2]:.3f}, mean={sum(vals)/n:.3f}, "
            f"p90={vals[int(n*0.9)]:.3f}, max={vals[-1]:.3f}")
 
@@ -746,11 +833,11 @@ def calibrate_thresholds(conn: sqlite3.Connection):
 
     print(f"\n=== Threshold Calibration (blend={blend}) ===")
     print(f"  Distribution: n={n}, min={scores[0]:.3f}, median={scores[min(int(n * 50 / 100), n - 1)]:.3f}, max={scores[-1]:.3f}")
-    print(f"\n  Recommended thresholds:")
+    print("\n  Recommended thresholds:")
     print(f"    accessibility_threshold_pop:         {calibration.pop_threshold:.3f}  (p92, {calibration.pop_count} fillers)")
     print(f"    accessibility_threshold_mainstream:   {calibration.mainstream_threshold:.3f}  (p64, {calibration.mainstream_count} fillers)")
     print(f"    niche: {calibration.niche_count} fillers")
-    print(f"\n  Recommended tier centers:")
+    print("\n  Recommended tier centers:")
     print(f"    tier_center_pop:         {calibration.pop_center:.3f}")
     print(f"    tier_center_mainstream:  {calibration.mainstream_center:.3f}")
     print(f"    tier_center_niche:       {calibration.niche_center:.3f}")
@@ -776,7 +863,7 @@ def calibrate_thresholds(conn: sqlite3.Connection):
 
     # Before/after comparison
     old_cfg = dict(ALL_TUNABLE_PARAMS)
-    print(f"\n  Before -> After:")
+    print("\n  Before -> After:")
     for key, new_val in params.items():
         old_val = old_cfg.get(key, "N/A")
         print(f"    {key}: {old_val} -> {new_val}")
@@ -792,6 +879,7 @@ def main():
     parser.add_argument("--gr", type=float, default=None, help="Override pop_weight_gr")
     parser.add_argument("--library", type=float, default=None, help="Override pop_weight_library")
     parser.add_argument("--nyt", type=float, default=None, help="Override pop_weight_nyt")
+    parser.add_argument("--trove", type=float, default=None, help="Override pop_weight_trove")
     parser.add_argument("--exponent", type=float, default=None, help="Override pop_exponent")
     parser.add_argument("--skip-calibrate", action="store_true", help="Skip threshold calibration")
     args = parser.parse_args()
@@ -831,6 +919,15 @@ def main():
         nyt = {}
         print("  NYT bestsellers: not found (skipping)")
 
+    # Trove Australia holdings (API-keyed optional source)
+    if TROVE_PATH.exists():
+        with open(TROVE_PATH) as f:
+            trove = json.load(f)
+        print(f"  Trove Australia: {len(trove):,} ISBNs")
+    else:
+        trove = {}
+        print("  Trove Australia: not found (skipping)")
+
     conn = sqlite3.connect(args.db)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=OFF")
@@ -845,15 +942,20 @@ def main():
     w_gr = args.gr if args.gr is not None else cfg["pop_weight_gr"]
     w_library = args.library if args.library is not None else cfg["pop_weight_library"]
     w_nyt = args.nyt if args.nyt is not None else cfg.get("pop_weight_nyt", 0.1)
+    w_trove = args.trove if args.trove is not None else cfg.get("pop_weight_trove", 0.05)
     exponent = args.exponent if args.exponent is not None else cfg["pop_exponent"]
-    print(f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, NYT={w_nyt}, exponent={exponent}")
+    print(
+        f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, "
+        f"NYT={w_nyt}, TROVE={w_trove}, exponent={exponent}"
+    )
 
     start = time.time()
     create_tables(conn)
     populate_work_level(conn, spl, ol, w_spl=w_spl, w_ol=w_ol, exponent=exponent,
                         gr=gr, w_gr=w_gr,
                         ottawa_isbn=ottawa_isbn, w_library=w_library,
-                        nyt=nyt, w_nyt=w_nyt)
+                        nyt=nyt, w_nyt=w_nyt,
+                        trove_isbn=trove, w_trove=w_trove)
     score_fillers_level1(conn)
     score_fillers_fallback(conn)
     report(conn)

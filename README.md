@@ -51,7 +51,7 @@ uv run subtitle-gen extract                     # parse into SQLite
 uv run subtitle-gen download-ol                 # Open Library (~9.2 GB)
 uv run subtitle-gen extract-ol                  # parse + deduplicate
 uv run subtitle-gen build-slots                 # extract slot fillers
-uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, etc.
+uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, Trove, etc.
 uv run subtitle-gen populate-popularity         # compute composite scores
 uv run subtitle-gen precompute-vectors          # remix scalar/vector state
 uv run subtitle-gen validate-pipeline           # read-only readiness checks
@@ -65,7 +65,7 @@ The pipeline has explicit contract modules for the cross-stage state that feeds 
 |---|---|---|
 | Source ingestion | LOC MARC files and Open Library dumps | `subtitles` rows with ISBN/source metadata |
 | Slot extraction | Subtitle patterns plus spaCy validation | `pattern_matches` and strict `slot_fillers` candidates |
-| Popularity scoring | SPL, Open Library, Goodreads, NYT, Ottawa/library, and corpus frequency signals | `popularity_data.composite_score`, filler `popularity_score`, and calibrated threshold config values |
+| Popularity scoring | SPL, Open Library, Goodreads, NYT, Ottawa/library, Trove, and corpus frequency signals | `popularity_data.composite_score`, filler `popularity_score`, and calibrated threshold config values |
 | Remix precompute | Strict of-object fillers, spaCy vectors, article statistics | remix classifications, vector/scalar columns, embedding config keys |
 | Tuning | Generated samples, human ratings, LLM ratings, and strict proposal schemas | accepted config changes, rollback-capable proposal records, and rating snapshots |
 | Runtime/serving | Validated SQLite state and request parameters | `GeneratedSubtitle`, `subtitle_to_dict()`, CLI output, local HTTP, and Azure Functions payloads |
@@ -95,7 +95,7 @@ Model and weight state is grouped by purpose rather than treated as one loose di
 |---|---|
 | LLM models | rating model `github_copilot/gpt-5.4-mini`, proposal model `github_copilot/gpt-5.4`, jacket model `gpt-5.4-mini`, responses-only model family |
 | Sampling and tone | weighted sample spread, bias floor, tone targets, tier centers, accessibility thresholds |
-| Popularity | source weights for SPL/Open Library/Goodreads/NYT/library/frequency, exponent, blend defaults, slot multipliers |
+| Popularity | source weights for SPL/Open Library/Goodreads/NYT/library/Trove/frequency, exponent, blend defaults, slot multipliers |
 | Article and remix | article frequency thresholds, remix heuristic threshold, double-`of` rejection toggle, calibrated remix probability and similarity thresholds |
 
 ## Usage
@@ -111,6 +111,12 @@ uv run subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
 ```
 
 Run `subtitle-gen <command> --help` for full options on any command.
+
+Trove Australia is an optional API-keyed popularity source. Set
+`TROVE_API_KEY` or pass `--trove-api-key`, then run a small resumable sample
+with `uv run subtitle-gen download-popularity --sources trove --trove-limit 100`.
+The lookup stores `holdingsCount` as Australian library breadth; physical copy
+counts are marked as proxies unless Trove exposes exact copy fields.
 
 ### Web app
 
@@ -245,7 +251,7 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `build-db` | Build mini SQLite from CSV files (for CI) |
 | `patterns` | Show discovered subtitle patterns by frequency |
 | `slots` | Show available slot fillers |
-| `download-popularity` | Download all popularity data sources (SPL, Goodreads, Ottawa, NYT) |
+| `download-popularity` | Download all popularity data sources (SPL, Goodreads, Ottawa, NYT, Trove) |
 | `populate-popularity` | Build ISBN mappings + compute composite popularity scores |
 | `validate-pipeline` | Run read-only pipeline readiness checks |
 
