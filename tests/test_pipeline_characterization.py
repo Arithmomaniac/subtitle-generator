@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -42,7 +43,7 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_weight_gr": 0.2,
     "pop_weight_nyt": 0.1,
     "pop_weight_library": 0.05,
-    "pop_weight_trove": 0.05,
+    "pop_weight_trove": 0.10,
     "pop_weight_freq": 0.0,
     "pop_exponent": 1.2,
     "pop_base_weight_blend": 0.5,
@@ -164,10 +165,12 @@ def test_observed_pipeline_schema_columns(tmp_path):
 
     assert _columns(conn, "subtitles") >= {
         "id", "title", "subtitle", "lang", "lccn", "source_file", "isbn",
+        "candidate_text", "candidate_source",
     }
     assert _columns(conn, "pattern_matches") >= {
         "id", "subtitle_id", "title", "subtitle", "list_items_json",
         "action_noun", "of_object", "of_article", "action_article",
+        "candidate_source",
     }
     assert _columns(conn, "slot_fillers") >= {
         "id", "slot_type", "filler", "mode", "source_subtitle_id", "freq",
@@ -190,6 +193,45 @@ def test_observed_pipeline_schema_columns(tmp_path):
         "tags", "source",
     }
     assert validate_schema(conn) == []
+
+
+def test_subtitle_candidate_columns_are_backfilled(tmp_path):
+    from subtitle_generator.extract import get_db
+
+    db_path = tmp_path / "legacy-subtitles.db"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE subtitles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT,
+            subtitle TEXT NOT NULL,
+            lang TEXT,
+            lccn TEXT,
+            source_file TEXT,
+            isbn TEXT
+        )
+        """
+    )
+    legacy.execute(
+        """
+        INSERT INTO subtitles (title, subtitle, lang, lccn, source_file, isbn)
+        VALUES ('Book', 'Race, Power, and the Rise of Empire', 'eng', 'lccn', 'loc.mrc', 'isbn')
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = get_db(db_path)
+    row = conn.execute(
+        """
+        SELECT candidate_text, candidate_source
+        FROM subtitles
+        WHERE title = 'Book'
+        """
+    ).fetchone()
+
+    assert row == ("Race, Power, and the Rise of Empire", "subtitle")
 
 
 def test_work_level_popularity_scoring_is_testable_without_db_writes():
@@ -218,7 +260,7 @@ def test_work_level_popularity_scoring_is_testable_without_db_writes():
         weight_goodreads=0.2,
         weight_nyt=0.1,
         weight_library=0.05,
-        weight_trove=0.05,
+        weight_trove=0.10,
         weight_frequency=0.0,
         exponent=1.2,
     )
@@ -266,10 +308,12 @@ def test_filler_scoring_workers_cover_top3_mean_and_fallback():
             work_key TEXT PRIMARY KEY,
             composite_score REAL
         );
-        INSERT INTO slot_fillers (id, slot_type, filler, freq)
+        INSERT INTO slot_fillers (id, slot_type, filler, freq, popularity_score, popularity_level, popularity_confidence)
         VALUES
-            (1, 'list_item', 'future', 100),
-            (2, 'list_item', 'fallback', 99);
+            (1, 'list_item', 'future', 100, NULL, NULL, NULL),
+            (2, 'list_item', 'fallback', 99, NULL, NULL, NULL),
+            (3, 'list_item', 'partial', 9, 7.0, NULL, NULL),
+            (4, 'list_item', 'stale', 4, 0.9, 1, 1.0);
         INSERT INTO subtitles (id, isbn)
         VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
         INSERT INTO slot_filler_sources VALUES
@@ -287,16 +331,23 @@ def test_filler_scoring_workers_cover_top3_mean_and_fallback():
     ).fetchone()[0]
     assert abs(top3_score - ((0.9 + 0.7 + 0.6) / 3)) < 0.0001
 
-    assert pop.update_fallback_filler_scores(conn) == 1
-    fallback = conn.execute(
+    assert pop.update_fallback_filler_scores(conn) == 3
+    fallback_rows = {
+        row[0]: row[1:]
+        for row in conn.execute(
         """
-        SELECT popularity_score, popularity_level, popularity_confidence
+        SELECT id, popularity_score, popularity_level, popularity_confidence
         FROM slot_fillers
-        WHERE id = 2
+        WHERE id IN (2, 3, 4)
         """
-    ).fetchone()
-    assert abs(fallback[0] - 2.0) < 0.0001
-    assert fallback[1:] == (0, 0.0)
+        ).fetchall()
+    }
+    assert abs(fallback_rows[2][0] - 2.0) < 0.0001
+    assert fallback_rows[2][1:] == (0, 0.0)
+    assert abs(fallback_rows[3][0] - 1.0) < 0.0001
+    assert fallback_rows[3][1:] == (0, 0.0)
+    assert abs(fallback_rows[4][0] - math.log10(5)) < 0.0001
+    assert fallback_rows[4][1:] == (0, 0.0)
 
 
 def test_threshold_calibration_workers_cover_percentile_cutoffs():

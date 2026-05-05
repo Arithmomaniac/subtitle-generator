@@ -58,6 +58,27 @@ class SourceTierClassificationResult:
     dry_run: bool
 
 
+@dataclass(frozen=True)
+class SourceTierDistributionRow:
+    candidate_source: str
+    total_count: int
+    labeled_count: int
+    unlabeled_count: int
+    pop_count: int
+    mainstream_count: int
+    niche_count: int
+
+    def tier_share(self, tier: str) -> float:
+        if self.labeled_count <= 0:
+            return 0.0
+        counts = {
+            "pop": self.pop_count,
+            "mainstream": self.mainstream_count,
+            "niche": self.niche_count,
+        }
+        return counts[tier] / self.labeled_count
+
+
 SourceTierClassifier = Callable[
     [tuple[SourceTierCandidate, ...], str],
     tuple[SourceTierPrediction, ...],
@@ -91,6 +112,15 @@ def _pattern_match_columns(conn: sqlite3.Connection) -> set[str]:
     return {row[1] for row in conn.execute("PRAGMA table_info(pattern_matches)")}
 
 
+def _source_subtitle_expr(columns: set[str]) -> str:
+    if "candidate_source" in columns:
+        return (
+            "CASE WHEN candidate_source = 'title' "
+            "THEN '' ELSE COALESCE(subtitle, '') END"
+        )
+    return "COALESCE(subtitle, '')"
+
+
 def load_source_tier_candidates(
     conn: sqlite3.Connection,
     *,
@@ -98,6 +128,7 @@ def load_source_tier_candidates(
     selection: Literal["random", "id"] = "random",
     random_seed: int = 20260501,
     force: bool = False,
+    candidate_source: Literal["all", "subtitle", "title"] = "all",
     migrate: bool = True,
 ) -> tuple[SourceTierCandidate, ...]:
     """Load source-title rows that should be labeled by the LLM."""
@@ -105,19 +136,32 @@ def load_source_tier_candidates(
     if migrate:
         ensure_source_tier_label_columns(conn)
     columns = _pattern_match_columns(conn)
+    subtitle_expr = _source_subtitle_expr(columns)
     where = [
         "COALESCE(title, '') <> ''",
-        "COALESCE(subtitle, '') <> ''",
+        (
+            f"({subtitle_expr} <> '' OR candidate_source = 'title')"
+            if "candidate_source" in columns
+            else "COALESCE(subtitle, '') <> ''"
+        ),
     ]
     if not force and "llm_market_tier" in columns:
         where.append("llm_market_tier IS NULL")
+    if candidate_source != "all":
+        if "candidate_source" not in columns:
+            if candidate_source == "title":
+                return ()
+        else:
+            where.append("COALESCE(NULLIF(candidate_source, ''), 'subtitle') = ?")
+    params = (candidate_source,) if candidate_source != "all" and "candidate_source" in columns else ()
     rows = conn.execute(
         f"""
-        SELECT id, title, subtitle
+        SELECT id, title, {subtitle_expr}
         FROM pattern_matches
         WHERE {" AND ".join(where)}
         ORDER BY id
-        """
+        """,
+        params,
     ).fetchall()
     candidates = [
         SourceTierCandidate(id=row[0], title=row[1], subtitle=row[2])
@@ -140,6 +184,7 @@ def classify_source_tiers(
     selection: Literal["random", "id"] = "random",
     random_seed: int = 20260501,
     force: bool = False,
+    candidate_source: Literal["all", "subtitle", "title"] = "all",
     dry_run: bool = False,
     export_path: Path | None = Path("api/data/source_tier_labels.csv"),
     classifier: SourceTierClassifier | None = None,
@@ -158,6 +203,7 @@ def classify_source_tiers(
         selection=selection,
         random_seed=random_seed,
         force=force,
+        candidate_source=candidate_source,
         migrate=not dry_run,
     )
     if dry_run:
@@ -257,13 +303,14 @@ def export_source_tier_labels(
     ensure_source_tier_label_columns(conn)
     columns = _pattern_match_columns(conn)
     stable_id_column = "subtitle_id" if "subtitle_id" in columns else "id"
+    subtitle_expr = _source_subtitle_expr(columns)
     rows = conn.execute(
         f"""
         SELECT
             {stable_id_column},
             id,
             title,
-            subtitle,
+            {subtitle_expr},
             llm_market_tier,
             llm_market_tier_confidence,
             llm_market_tier_rationale
@@ -282,6 +329,129 @@ def export_source_tier_labels(
         writer.writerow(SOURCE_TIER_LABEL_EXPORT_COLUMNS)
         writer.writerows(cleaned_rows)
     return len(rows)
+
+
+def load_source_tier_distribution(
+    conn: sqlite3.Connection,
+    *,
+    min_confidence: float = 0.0,
+) -> tuple[SourceTierDistributionRow, ...]:
+    """Return labeled/unlabeled source-tier distribution by candidate source."""
+
+    if min_confidence < 0:
+        raise ValueError("min_confidence must be non-negative")
+    ensure_source_tier_label_columns(conn)
+    columns = _pattern_match_columns(conn)
+    source_expr = (
+        "COALESCE(NULLIF(candidate_source, ''), 'subtitle')"
+        if "candidate_source" in columns
+        else "'subtitle'"
+    )
+    rows = conn.execute(
+        f"""
+        SELECT
+            {source_expr} AS source_kind,
+            COUNT(*) AS total_count,
+            SUM(CASE
+                WHEN llm_market_tier IN ('pop', 'mainstream', 'niche')
+                 AND COALESCE(llm_market_tier_confidence, 0.0) >= ?
+                THEN 1 ELSE 0 END) AS labeled_count,
+            SUM(CASE
+                WHEN llm_market_tier IN ('pop', 'mainstream', 'niche')
+                 AND COALESCE(llm_market_tier_confidence, 0.0) >= ?
+                THEN 0 ELSE 1 END) AS unlabeled_count,
+            SUM(CASE
+                WHEN llm_market_tier = 'pop'
+                 AND COALESCE(llm_market_tier_confidence, 0.0) >= ?
+                THEN 1 ELSE 0 END) AS pop_count,
+            SUM(CASE
+                WHEN llm_market_tier = 'mainstream'
+                 AND COALESCE(llm_market_tier_confidence, 0.0) >= ?
+                THEN 1 ELSE 0 END) AS mainstream_count,
+            SUM(CASE
+                WHEN llm_market_tier = 'niche'
+                 AND COALESCE(llm_market_tier_confidence, 0.0) >= ?
+                THEN 1 ELSE 0 END) AS niche_count
+        FROM pattern_matches
+        GROUP BY source_kind
+        ORDER BY source_kind
+        """,
+        (min_confidence,) * 5,
+    ).fetchall()
+    return tuple(
+        SourceTierDistributionRow(
+            candidate_source=row[0],
+            total_count=row[1] or 0,
+            labeled_count=row[2] or 0,
+            unlabeled_count=row[3] or 0,
+            pop_count=row[4] or 0,
+            mainstream_count=row[5] or 0,
+            niche_count=row[6] or 0,
+        )
+        for row in rows
+    )
+
+
+def format_source_tier_distribution_report(
+    rows: tuple[SourceTierDistributionRow, ...],
+    *,
+    min_labeled: int = 100,
+) -> str:
+    """Format a unitary source-tier distribution report."""
+
+    tier_order = ("niche", "mainstream", "pop")
+    lines = [
+        "Source-tier distribution breakdown:",
+        "source,total,labeled,unlabeled,pop,mainstream,niche,pop%,mainstream%,niche%",
+    ]
+    for row in rows:
+        lines.append(
+            f"{row.candidate_source},{row.total_count},{row.labeled_count},"
+            f"{row.unlabeled_count},{row.pop_count},{row.mainstream_count},"
+            f"{row.niche_count},{row.tier_share('pop'):.3f},"
+            f"{row.tier_share('mainstream'):.3f},{row.tier_share('niche'):.3f}"
+        )
+    total_count = sum(row.total_count for row in rows)
+    labeled_count = sum(row.labeled_count for row in rows)
+    unlabeled_count = sum(row.unlabeled_count for row in rows)
+    combined_counts = {
+        "pop": sum(row.pop_count for row in rows),
+        "mainstream": sum(row.mainstream_count for row in rows),
+        "niche": sum(row.niche_count for row in rows),
+    }
+    combined_shares = {
+        tier: combined_counts[tier] / labeled_count if labeled_count else 0.0
+        for tier in ("pop", "mainstream", "niche")
+    }
+    cumulative = 0.0
+    combined_median_tier = tier_order[-1]
+    for tier in tier_order:
+        cumulative += combined_shares[tier]
+        if cumulative >= 0.5:
+            combined_median_tier = tier
+            break
+    lines.append(
+        "Combined post-rebuild shares: "
+        f"pop={combined_shares['pop']:.3f}, "
+        f"mainstream={combined_shares['mainstream']:.3f}, "
+        f"niche={combined_shares['niche']:.3f}"
+    )
+    lines.append(
+        f"Combined rows: total={total_count}, labeled={labeled_count}, "
+        f"unlabeled={unlabeled_count}"
+    )
+    lines.append(f"Combined median tier: {combined_median_tier}")
+    if labeled_count < min_labeled:
+        lines.append(
+            "Gate: NEEDS_LABELS - source-tier distribution should have at least "
+            f"{min_labeled} labeled rows before final calibration."
+        )
+    else:
+        lines.append(
+            "Gate: SOURCE_TIER_READY - use the combined post-rebuild shares/median "
+            "above for calibration."
+        )
+    return "\n".join(lines)
 
 
 def build_source_tier_prompt(candidates: tuple[SourceTierCandidate, ...]) -> str:

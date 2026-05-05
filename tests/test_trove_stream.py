@@ -124,6 +124,54 @@ def test_load_trove_maps_isbn_to_work_key():
     assert work_trove["work-b"]["holding_count"] == 3
 
 
+def test_slot_sources_db_targets_current_valid_pattern_sources(tmp_path):
+    trove = _load_trove_stream_module()
+    db_path = tmp_path / "subtitles.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE subtitles (
+            id INTEGER PRIMARY KEY,
+            isbn TEXT
+        );
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            mode TEXT NOT NULL
+        );
+        CREATE TABLE slot_filler_sources (
+            slot_filler_id INTEGER NOT NULL,
+            subtitle_id INTEGER NOT NULL
+        );
+        CREATE TABLE pattern_matches (
+            subtitle_id INTEGER,
+            list_items_json TEXT
+        );
+        INSERT INTO subtitles VALUES
+            (1, '9781566199094'),
+            (2, '0333337352'),
+            (3, '9780306406157');
+        INSERT INTO slot_fillers VALUES
+            (10, 'strict'),
+            (11, 'strict'),
+            (12, 'loose');
+        INSERT INTO slot_filler_sources VALUES
+            (10, 1),
+            (11, 2),
+            (12, 3);
+        INSERT INTO pattern_matches VALUES
+            (1, '["Race", "Power"]'),
+            (2, '["A", "B", "C", "D"]'),
+            (3, '["Loose", "Source"]');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    isbns = trove._load_isbns_from_db(db_path, target_mode="slot-sources")
+
+    assert isbns == {"9781566199094"}
+
+
 def test_download_by_isbn_propagates_quota_without_marking_processed(tmp_path):
     trove = _load_trove_stream_module()
 
@@ -209,3 +257,38 @@ def test_download_by_isbn_final_checkpoint_includes_last_partial_batch(tmp_path)
     saved_checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
     assert saved_checkpoint["processed_isbns"] == ["9780333337356"]
     assert saved_checkpoint["failed_isbns"] == {}
+
+
+def test_trove_client_retries_connection_reset(monkeypatch):
+    trove = _load_trove_stream_module()
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return b'{"response": {"zone": []}}'
+
+    def fake_urlopen(_req, timeout):
+        assert timeout == 90
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise ConnectionResetError("reset by peer")
+        return FakeResponse()
+
+    monkeypatch.setattr(trove, "urlopen", fake_urlopen)
+    monkeypatch.setattr(trove.time, "sleep", lambda _seconds: None)
+    client = trove.TroveClient(
+        "test-key",
+        rate_per_minute=200,
+        quota_per_minute=200,
+        max_requests=None,
+        checkpoint={},
+    )
+
+    assert client.search("isbn:9780333337356") == []
+    assert calls["count"] == 2

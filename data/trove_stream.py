@@ -351,7 +351,7 @@ class TroveClient:
                     time.sleep(min(60, 5 * (attempt + 1)))
                     continue
                 raise RuntimeError(f"Trove request failed ({exc.code}) for {redacted_url}") from exc
-            except (URLError, TimeoutError) as exc:
+            except (URLError, TimeoutError, ConnectionError) as exc:
                 if attempt < retries:
                     time.sleep(min(60, 2 ** attempt))
                     continue
@@ -442,17 +442,30 @@ def _load_isbns_from_db(path: Path, target_mode: str = "all") -> set[str]:
         }
         isbns: set[str] = set()
         if target_mode == "slot-sources":
-            required = {"slot_filler_sources", "slot_fillers", "subtitles"}
+            required = {
+                "slot_filler_sources",
+                "slot_fillers",
+                "subtitles",
+                "pattern_matches",
+            }
             if not required <= tables:
+                return set()
+            pattern_columns = {
+                row[1] for row in conn.execute("PRAGMA table_info(pattern_matches)")
+            }
+            if not {"subtitle_id", "list_items_json"} <= pattern_columns:
                 return set()
             for (isbn,) in conn.execute("""
                 SELECT DISTINCT s.isbn
                 FROM slot_filler_sources sfs
                 JOIN slot_fillers sf ON sf.id = sfs.slot_filler_id
                 JOIN subtitles s ON s.id = sfs.subtitle_id
+                JOIN pattern_matches pm ON pm.subtitle_id = sfs.subtitle_id
                 WHERE sf.mode = 'strict'
                   AND s.isbn IS NOT NULL
                   AND s.isbn != ''
+                  AND json_valid(pm.list_items_json)
+                  AND json_array_length(pm.list_items_json) IN (2, 3)
             """):
                 isbns.update(isbn_variants(isbn))
             return isbns

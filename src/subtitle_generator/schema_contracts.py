@@ -31,6 +31,7 @@ SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
         table="subtitles",
         columns=frozenset({
             "id", "title", "subtitle", "lang", "lccn", "source_file", "isbn",
+            "candidate_text", "candidate_source",
         }),
     ),
     TableContract(
@@ -39,7 +40,7 @@ SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
         columns=frozenset({
             "id", "subtitle_id", "title", "subtitle", "list_items_json",
             "action_noun", "of_object", "of_article", "action_article",
-            "llm_market_tier", "llm_market_tier_confidence",
+            "candidate_source", "llm_market_tier", "llm_market_tier_confidence",
             "llm_market_tier_rationale",
         }),
     ),

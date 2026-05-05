@@ -565,7 +565,7 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
                        gr: dict | None = None, w_gr: float = 0.2,
                        ottawa_isbn: dict | None = None, w_library: float = 0.05,
                        nyt: dict | None = None, w_nyt: float = 0.1,
-                       trove_isbn: dict | None = None, w_trove: float = 0.05,
+                       trove_isbn: dict | None = None, w_trove: float = 0.10,
                        work_data_cache: dict | None = None):
     """Aggregate SPL + OL + Goodreads + Ottawa + NYT + Trove data at work level.
 
@@ -700,7 +700,15 @@ def update_fallback_filler_scores(conn: sqlite3.Connection) -> int:
             END,
             popularity_level = 0,
             popularity_confidence = 0.0
-        WHERE popularity_level IS NULL AND mode = 'strict'
+        WHERE mode = 'strict'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM slot_filler_sources sfs
+              JOIN subtitles s ON sfs.subtitle_id = s.id
+              JOIN isbn_aliases ia ON ia.isbn = s.isbn
+              JOIN popularity_data pd ON pd.work_key = ia.work_key
+              WHERE sfs.slot_filler_id = slot_fillers.id
+          )
     """).rowcount
 
 
@@ -942,7 +950,7 @@ def main():
     w_gr = args.gr if args.gr is not None else cfg["pop_weight_gr"]
     w_library = args.library if args.library is not None else cfg["pop_weight_library"]
     w_nyt = args.nyt if args.nyt is not None else cfg.get("pop_weight_nyt", 0.1)
-    w_trove = args.trove if args.trove is not None else cfg.get("pop_weight_trove", 0.05)
+    w_trove = args.trove if args.trove is not None else cfg.get("pop_weight_trove", 0.10)
     exponent = args.exponent if args.exponent is not None else cfg["pop_exponent"]
     print(
         f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, "

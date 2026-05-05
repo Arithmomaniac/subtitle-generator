@@ -48,7 +48,7 @@ WITH valid_pattern_sources AS (
 )
 """
     if _table_exists(conn, "slot_filler_sources"):
-        return valid_sources_cte + f""",
+        return valid_sources_cte + """,
 linked_valid_sources AS (
     SELECT sfs.slot_filler_id, MIN(sfs.subtitle_id) AS subtitle_id
     FROM slot_filler_sources sfs

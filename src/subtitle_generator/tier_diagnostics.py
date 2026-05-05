@@ -93,6 +93,15 @@ class TierGateCalibration:
         }
 
 
+def _source_subtitle_expr(columns: set[str]) -> str:
+    if "candidate_source" in columns:
+        return (
+            "CASE WHEN candidate_source = 'title' "
+            "THEN '' ELSE COALESCE(subtitle, '') END"
+        )
+    return "COALESCE(subtitle, '')"
+
+
 def load_source_tier_label_cases(
     conn: sqlite3.Connection,
     *,
@@ -114,12 +123,13 @@ def load_source_tier_label_cases(
     }
     if not required <= columns:
         return ()
+    subtitle_expr = _source_subtitle_expr(columns)
 
     rows = conn.execute(
-        """
+        f"""
         SELECT
             COALESCE(title, ''),
-            COALESCE(subtitle, ''),
+            {subtitle_expr},
             llm_market_tier,
             COALESCE(llm_market_tier_rationale, ''),
             COALESCE(llm_market_tier_confidence, 0.0),

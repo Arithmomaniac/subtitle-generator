@@ -4,6 +4,16 @@ from __future__ import annotations
 
 import re
 
+SUBTITLE_PATTERN_RE = re.compile(
+    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+(?P<article>a|an|the)\s+"
+    r"(?P<action>.+?)\s+of\s+(?P<object>.+)$",
+    re.IGNORECASE,
+)
+SUBTITLE_PATTERN_SQL_LIKE = (
+    "%, % and the % of %",
+    "%, % and a % of %",
+    "%, % and an % of %",
+)
 _TITLE_SUFFIX_SPLIT_RE = re.compile(r"\s*(?::|\s+[-\u2013\u2014]\s+)\s*")
 _TITLE_SUBTITLE_DELIMITER_RE = re.compile(r":|\s+[-\u2013\u2014]\s+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -13,6 +23,12 @@ def _normalized_text(text: str | None) -> str:
     if not text:
         return ""
     return " ".join(_WORD_RE.findall(text.lower()))
+
+
+def looks_like_subtitle_pattern(text: str | None) -> bool:
+    """Return True when text structurally matches the generator source pattern."""
+
+    return bool(text and SUBTITLE_PATTERN_RE.match(text.strip()))
 
 
 def _title_parts(title: str) -> list[str]:
