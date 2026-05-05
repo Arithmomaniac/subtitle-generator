@@ -53,13 +53,16 @@ await test("health returns error on network failure", async () => {
 
 await test("generate sends correct body", async () => {
   let capturedBody;
+  let capturedContentType;
   const mockF = async (url, opts) => {
     capturedBody = JSON.parse(opts.body);
+    capturedContentType = opts.headers["Content-Type"];
     return { ok: true, json: async () => ({ text: "A, B, and the C of D" }) };
   };
   const api = createApi("", mockF);
   await api.generate({ tone: "pop" });
   assert(capturedBody.tone === "pop", "tone sent");
+  assert(capturedContentType === "text/plain;charset=UTF-8", "simple content type sent");
 });
 
 await test("generate with no options sends null tone", async () => {

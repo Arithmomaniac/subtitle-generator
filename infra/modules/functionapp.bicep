@@ -19,6 +19,10 @@ param staticWebsiteUrl string
 @description('Whether to create RBAC role assignments. Requires Microsoft.Authorization/roleAssignments/write.')
 param deployRoleAssignments bool = true
 
+var staticWebsiteOrigin = endsWith(staticWebsiteUrl, '/')
+  ? substring(staticWebsiteUrl, 0, length(staticWebsiteUrl) - 1)
+  : staticWebsiteUrl
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
 }
@@ -67,7 +71,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     }
     siteConfig: {
       cors: {
-        allowedOrigins: [staticWebsiteUrl]
+        allowedOrigins: [staticWebsiteOrigin]
         supportCredentials: false
       }
       appSettings: [

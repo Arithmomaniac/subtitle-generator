@@ -25,7 +25,7 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
     try {
       r = await fetchFn(baseUrl + path, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "text/plain;charset=UTF-8" },
         body: JSON.stringify(body),
       });
     } catch (e) {
