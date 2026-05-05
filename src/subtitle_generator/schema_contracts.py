@@ -77,7 +77,7 @@ SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
         columns=frozenset({
             "id", "subtitle", "system_tone", "thumbs", "tone_override",
             "free_text", "interpreted", "config_snapshot", "created_at",
-            "tags", "source",
+            "tags", "source", "prompt_generated",
         }),
     ),
 )

@@ -50,6 +50,7 @@ export function createApp() {
     jacketMd: "",
     prompt: null,
     toneTier: null,
+    promptGenerated: false,
 
     // ── Init ──
     async init() {
@@ -102,6 +103,7 @@ export function createApp() {
       this.loading = true;
       this._setJacket(null);
       this.prompt = null;
+      this.promptGenerated = false;
 
       const result = await api.generate({
         tone: this.tone || null,
@@ -129,23 +131,25 @@ export function createApp() {
     },
 
     async _flushRating() {
-      if (!this.hasSubtitle || this.selectedTags.length === 0) return;
+      if (!this.hasSubtitle || (this.selectedTags.length === 0 && !this.promptGenerated)) return;
       try {
         await api.rate({
           subtitle: this.subtitle.fullText,
           system_tone: this.tone || null,
           tags: this.selectedTags.slice(),
+          prompt_generated: this.promptGenerated,
         });
       } catch (e) { /* best-effort; don't block generate */ }
     },
 
     _flushRatingBeacon() {
-      if (!this.hasSubtitle || this.selectedTags.length === 0) return;
+      if (!this.hasSubtitle || (this.selectedTags.length === 0 && !this.promptGenerated)) return;
       try {
         const body = JSON.stringify({
           subtitle: this.subtitle.fullText,
           system_tone: this.tone || null,
           tags: this.selectedTags.slice(),
+          prompt_generated: this.promptGenerated,
         });
         const blob = new Blob([body], { type: "application/json" });
         navigator.sendBeacon(apiBase + "/api/rate", blob);
@@ -178,6 +182,7 @@ export function createApp() {
         } else {
           this.prompt = result.prompt;
           this.toneTier = result.tone_tier;
+          this.promptGenerated = true;
           this._setJacket(result.result);
         }
         this.jacketLoading = false;
@@ -227,6 +232,7 @@ export function createApp() {
             const parsed = JSON.parse(data);
             this.prompt = parsed.prompt;
             this.toneTier = parsed.tone_tier;
+            this.promptGenerated = true;
             this._setJacket(parsed.result);
             receivedTerminalEvent = true;
           } else if (eventType === "error") {

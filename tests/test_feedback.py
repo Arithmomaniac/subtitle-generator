@@ -12,6 +12,7 @@ import random
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -388,6 +389,142 @@ def test_handle_rate_accepts_quality_tags():
     print("  PASS: handle_rate_accepts_quality_tags")
 
 
+def test_rating_table_entity_serializes_tags_and_identity():
+    """Table Storage entity shape is stable for deployed rating sync."""
+    from subtitle_generator.rating_storage import build_rating_entity
+
+    entity = build_rating_entity(
+        "A, B, and the C of D",
+        1,
+        "pop",
+        "great",
+        "mainstream",
+        ["interesting", "funny"],
+        source="web_user",
+        prompt_generated=True,
+        now=datetime(2026, 5, 5, 4, 46, 31, tzinfo=timezone.utc),
+        row_key_suffix="abcdef12",
+    )
+
+    assert entity["PartitionKey"] == "2026-05"
+    assert entity["RowKey"] == "2026-05-05T04:46:31+00:00-abcdef12"
+    assert entity["subtitle"] == "A, B, and the C of D"
+    assert entity["thumbs"] == 1
+    assert entity["tone_override"] == "pop"
+    assert entity["free_text"] == "great"
+    assert entity["system_tone"] == "mainstream"
+    assert entity["source"] == "web_user"
+    assert entity["prompt_generated"] is True
+    assert json.loads(entity["tags"]) == ["interesting", "funny"]
+
+    tag_only_entity = build_rating_entity(
+        "A, B, and the C of D",
+        None,
+        None,
+        None,
+        None,
+        ["interesting"],
+        now=datetime(2026, 5, 5, 4, 46, 31, tzinfo=timezone.utc),
+        row_key_suffix="abcdef13",
+    )
+    assert "thumbs" not in tag_only_entity
+    assert tag_only_entity["tone_override"] == ""
+    assert tag_only_entity["free_text"] == ""
+    assert tag_only_entity["system_tone"] == ""
+    assert tag_only_entity["prompt_generated"] is False
+
+
+def test_validate_rating_body_does_not_touch_sqlite():
+    """Azure can validate tag-only ratings before any local SQLite write."""
+    from subtitle_generator.handlers import validate_rating_body
+
+    status, body, payload = validate_rating_body({
+        "subtitle": "A, B, and the C of D",
+        "system_tone": "mainstream",
+        "tags": ["interesting", "broken"],
+        "prompt_generated": True,
+    })
+
+    assert status == 200, body
+    assert payload is not None
+    assert payload.subtitle == "A, B, and the C of D"
+    assert payload.thumbs is None
+    assert payload.system_tone == "mainstream"
+    assert payload.tags == ["interesting", "broken syntax"]
+    assert payload.source == "web_user"
+    assert payload.prompt_generated is True
+
+    status, body, payload = validate_rating_body({
+        "subtitle": "A, B, and the C of D",
+        "tags": ["grammar"],
+    })
+    assert status == 400
+    assert "Invalid tags" in body["error"]
+    assert payload is None
+
+
+def test_sync_rating_entities_filters_stale_and_malformed_tags():
+    """pull-ratings keeps only current tag subsets and reports skip reasons."""
+    from subtitle_generator.cli import _sync_rating_entities
+
+    conn = make_test_db()
+    entities = [
+        {
+            "RowKey": "2026-05-05T04:46:31+00:00-valid",
+            "subtitle": "Valid, Tags, and the Sync of Ratings",
+            "thumbs": 1,
+            "tags": json.dumps(["interesting", "broken"]),
+        },
+        {
+            "RowKey": "2026-05-05T04:46:32+00:00-empty",
+            "subtitle": "Empty, Tags, and the Validity of Subsets",
+            "thumbs": -1,
+            "tags": json.dumps([]),
+            "prompt_generated": True,
+        },
+        {
+            "RowKey": "2026-05-05T04:46:33+00:00-stale",
+            "subtitle": "Stale, Tags, and the Filtering of Rows",
+            "thumbs": 1,
+            "tags": json.dumps(["interesting", "grammar"]),
+        },
+        {
+            "RowKey": "2026-05-05T04:46:34+00:00-malformed",
+            "subtitle": "Malformed, Tags, and the Skipping of Rows",
+            "thumbs": 1,
+            "tags": json.dumps({"tag": "interesting"}),
+        },
+        {
+            "RowKey": "2026-05-05T04:46:31+00:00-valid",
+            "subtitle": "Duplicate, Tags, and the Skipping of Rows",
+            "thumbs": 1,
+            "tags": json.dumps(["interesting"]),
+        },
+    ]
+
+    stats = _sync_rating_entities(conn, entities)
+    rows = conn.execute(
+        "SELECT subtitle, thumbs, tags, source, config_snapshot, prompt_generated FROM human_ratings ORDER BY id"
+    ).fetchall()
+
+    assert stats.synced == 2
+    assert stats.duplicate == 1
+    assert stats.filtered == 1
+    assert stats.malformed == 1
+    assert [row[0] for row in rows] == [
+        "Valid, Tags, and the Sync of Ratings",
+        "Empty, Tags, and the Validity of Subsets",
+    ]
+    assert [json.loads(row[2]) for row in rows] == [["interesting", "broken syntax"], []]
+    assert {row[3] for row in rows} == {"pull_ratings"}
+    assert [json.loads(row[4])["RowKey"] for row in rows] == [
+        "2026-05-05T04:46:31+00:00-valid",
+        "2026-05-05T04:46:32+00:00-empty",
+    ]
+    assert [row[5] for row in rows] == [0, 1]
+    conn.close()
+
+
 def test_empty_summary():
     """get_summary() returns None when no ratings exist."""
     from subtitle_generator.feedback import ensure_ratings_table, get_summary
@@ -413,6 +550,9 @@ if __name__ == "__main__":
         ("cli_review_mock", test_cli_review_mock),
         ("idempotent_table_creation", test_idempotent_table_creation),
         ("handle_rate_accepts_quality_tags", test_handle_rate_accepts_quality_tags),
+        ("rating_table_entity_serializes_tags_and_identity", test_rating_table_entity_serializes_tags_and_identity),
+        ("validate_rating_body_does_not_touch_sqlite", test_validate_rating_body_does_not_touch_sqlite),
+        ("sync_rating_entities_filters_stale_and_malformed_tags", test_sync_rating_entities_filters_stale_and_malformed_tags),
         ("empty_summary", test_empty_summary),
     ]
 

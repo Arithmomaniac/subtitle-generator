@@ -113,5 +113,17 @@ resource funcBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+// RBAC: Storage Table Data Contributor for durable rating feedback writes
+var storageTableDataContributorRole = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
+resource funcTableRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(storageAccount.id, functionApp.id, storageTableDataContributorRole)
+  scope: storageAccount
+  properties: {
+    principalId: functionApp.identity.principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRole)
+    principalType: 'ServicePrincipal'
+  }
+}
+
 output functionAppName string = functionApp.name
 output functionAppPrincipalId string = functionApp.identity.principalId

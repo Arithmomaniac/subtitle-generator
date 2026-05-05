@@ -37,8 +37,19 @@ resource webContainer 'Microsoft.Storage/storageAccounts/blobServices/containers
   }
 }
 
+resource tableService 'Microsoft.Storage/storageAccounts/tableServices@2023-05-01' = {
+  parent: storageAccount
+  name: 'default'
+}
+
+resource ratingsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@2023-05-01' = {
+  parent: tableService
+  name: 'ratings'
+}
+
 // Optional: RBAC for developer principal
 var storageBlobDataContributorRole = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+var storageTableDataContributorRole = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
 resource devBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(principalId)) {
   name: guid(storageAccount.id, principalId, storageBlobDataContributorRole)
@@ -46,6 +57,16 @@ resource devBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (
   properties: {
     principalId: principalId
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageBlobDataContributorRole)
+    principalType: 'User'
+  }
+}
+
+resource devTableRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(principalId)) {
+  name: guid(storageAccount.id, principalId, storageTableDataContributorRole)
+  scope: storageAccount
+  properties: {
+    principalId: principalId
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', storageTableDataContributorRole)
     principalType: 'User'
   }
 }

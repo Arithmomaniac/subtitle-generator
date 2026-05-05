@@ -3,6 +3,8 @@
 # ruff: noqa: E402
 
 import json
+import logging
+import os
 import sys
 from pathlib import Path
 
@@ -19,9 +21,15 @@ from subtitle_generator.handlers import (
     handle_health,
     handle_jacket,
     handle_rate,
+    validate_rating_body,
+)
+from subtitle_generator.rating_storage import (
+    RatingTableWriteError,
+    write_rating_to_table_storage,
 )
 
 app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
+logger = logging.getLogger(__name__)
 
 
 def _json_response(body: dict, status_code: int = 200) -> func.HttpResponse:
@@ -75,6 +83,26 @@ def jacket(req: func.HttpRequest) -> func.HttpResponse:
 # ── POST /api/rate ──────────────────────────────────────────────────
 
 
+def _handle_rate_azure(body: dict) -> tuple[int, dict]:
+    status, resp, payload = validate_rating_body(body)
+    if status != 200:
+        return status, resp
+    assert payload is not None
+
+    entity = write_rating_to_table_storage(
+        payload.subtitle,
+        payload.thumbs,
+        payload.tone_override,
+        payload.free_text,
+        payload.system_tone,
+        payload.tags,
+        source=payload.source,
+        prompt_generated=payload.prompt_generated,
+        required=True,
+    )
+    return 200, {"id": entity["RowKey"], "status": "saved"}
+
+
 @app.route(route="rate", methods=["POST"])
 def rate(req: func.HttpRequest) -> func.HttpResponse:
     try:
@@ -83,10 +111,30 @@ def rate(req: func.HttpRequest) -> func.HttpResponse:
         except ValueError:
             return _error("Request body must be valid JSON")
 
-        status, resp = handle_rate(body)
+        try:
+            if os.environ.get("SUBTITLE_GEN_MODE") == "azure":
+                status, resp = _handle_rate_azure(body)
+            else:
+                status, resp = handle_rate(body)
+                if status == 200:
+                    write_rating_to_table_storage(
+                        body.get("subtitle", ""),
+                        body.get("thumbs"),
+                        body.get("tone_override"),
+                        body.get("free_text"),
+                        body.get("system_tone"),
+                        body.get("tags"),
+                        source=body.get("_source", "web_user"),
+                        prompt_generated=body.get("prompt_generated", False),
+                        required=False,
+                    )
+        except RatingTableWriteError:
+            logger.exception("Failed to persist rating to Azure Table Storage")
+            return _error("Failed to persist rating to durable storage", 500)
         return _json_response(resp, status)
 
     except Exception as exc:
+        logger.exception("Unhandled rate request error")
         return _error(f"Internal error: {exc}", 500)
 
 

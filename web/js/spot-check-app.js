@@ -221,7 +221,7 @@ export function spotCheckApp() {
       } else if (this.phase === "reveal") {
         if (key === "f") { this.toggleTag("funny"); event.preventDefault(); }
         else if (key === "b") { this.toggleTag("boring"); event.preventDefault(); }
-        else if (key === "r") { this.toggleTag("broken"); event.preventDefault(); }
+        else if (key === "r") { this.toggleTag("broken syntax"); event.preventDefault(); }
         else if (key === "n") { this.toggleTag("nonsense"); event.preventDefault(); }
         else if (key === "l") { this.toggleTag("realistic"); event.preventDefault(); }
         else if (key === "i") { this.toggleTag("interesting"); event.preventDefault(); }
