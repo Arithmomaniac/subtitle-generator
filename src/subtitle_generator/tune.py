@@ -866,13 +866,13 @@ def _spot_check_cli(
                 ))
 
             tags_input = click.prompt(
-                click.style("       Tags? [f=funny/b=boring/r=broken/n=nonsense/l=realistic/i=interesting / Enter]", fg="cyan"),
+                click.style("       Tags? [f=funny/b=boring/r=broken syntax/n=nonsense/l=realistic/i=interesting / Enter]", fg="cyan"),
                 default="", show_default=False,
             ).strip().lower()
             tag_map = {
                 "f": "funny",
                 "b": "boring",
-                "r": "broken",
+                "r": "broken syntax",
                 "n": "nonsense",
                 "l": "realistic",
                 "i": "interesting",
@@ -923,7 +923,7 @@ def review_ratings(
     from subtitle_generator.feedback import ensure_ratings_table
     ensure_ratings_table(conn)
 
-    query = "SELECT subtitle, system_tone, thumbs, tone_override, tags, source, created_at FROM human_ratings"
+    query = "SELECT subtitle, system_tone, thumbs, tone_override, tags, source, created_at, prompt_generated FROM human_ratings"
     conditions = []
     params = []
     if since:
@@ -951,7 +951,8 @@ def review_ratings(
     tag_counts = Counter()
     mismatch_examples = []
 
-    for sub, sys_tone, thumbs, tone_override, tags_json, src, created in rows:
+    prompt_generated_count = 0
+    for sub, sys_tone, thumbs, tone_override, tags_json, src, created, prompt_generated in rows:
         if sys_tone and tone_override:
             total += 1
             if sys_tone == tone_override:
@@ -963,30 +964,40 @@ def review_ratings(
         tags = _json.loads(tags_json) if tags_json else []
         for tag in tags:
             tag_counts[tag] += 1
+        if prompt_generated:
+            prompt_generated_count += 1
 
-    if total == 0:
-        click.echo("No tone-rated entries found (need system_tone + tone_override).")
-        return
-
-    accuracy = matches / total
-    click.echo(f"  Tone accuracy: {matches}/{total} ({accuracy:.0%})")
+    accuracy = matches / total if total else None
+    if accuracy is not None:
+        click.echo(f"  Tone accuracy: {matches}/{total} ({accuracy:.0%})")
+    else:
+        click.echo("  Tone accuracy: no tone-rated entries (need system_tone + tone_override).")
     click.echo(f"  Tags: {dict(tag_counts.most_common())}")
+    if prompt_generated_count:
+        click.echo(f"  Prompt generated: {prompt_generated_count}")
 
     summary_lines = [
-        f"## Human Rating Analysis ({total} rated samples)",
-        f"Tone accuracy: {matches}/{total} ({accuracy:.0%})",
+        f"## Human Rating Analysis ({len(rows)} ratings)",
         "",
-        "### Mismatch patterns:",
     ]
-    for (system_tone, felt), count in mismatch_directions.most_common():
-        summary_lines.append(f"  target={system_tone} -> felt={felt}: {count}x")
-    summary_lines.append("")
-    summary_lines.append("### Mismatch examples:")
-    for system_tone, felt, sub in mismatch_examples:
-        summary_lines.append(f"  [{system_tone}->{felt}] {sub}")
+    if accuracy is not None:
+        summary_lines.append(f"Tone accuracy: {matches}/{total} ({accuracy:.0%})")
+        summary_lines.append("")
+        summary_lines.append("### Mismatch patterns:")
+        for (system_tone, felt), count in mismatch_directions.most_common():
+            summary_lines.append(f"  target={system_tone} -> felt={felt}: {count}x")
+        summary_lines.append("")
+        summary_lines.append("### Mismatch examples:")
+        for system_tone, felt, sub in mismatch_examples:
+            summary_lines.append(f"  [{system_tone}->{felt}] {sub}")
+    else:
+        summary_lines.append("Tone accuracy: no tone-rated entries (need system_tone + tone_override)")
     if tag_counts:
         summary_lines.append("")
         summary_lines.append(f"### Quality tags: {dict(tag_counts.most_common())}")
+    if prompt_generated_count:
+        summary_lines.append("")
+        summary_lines.append(f"### Prompt generated: {prompt_generated_count}")
     summary_text = "\n".join(summary_lines)
 
     click.echo(f"\n{summary_text}\n")

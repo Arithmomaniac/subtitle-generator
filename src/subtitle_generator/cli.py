@@ -2,7 +2,9 @@
 
 import sqlite3
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 import click
 
@@ -37,6 +39,21 @@ _VALID_TONES = set(_TONE_CHOICES.keys())
 _TONE_OVERRIDE_MAP = {"p": "pop", "m": "mainstream", "n": "niche"}
 
 
+@dataclass
+class RatingSyncStats:
+    synced: int = 0
+    duplicate: int = 0
+    filtered: int = 0
+    malformed: int = 0
+
+
+def _get_command_conn(ctx) -> tuple[sqlite3.Connection, bool]:
+    """Return the CLI context connection when present, else the default DB."""
+    if ctx.obj and "conn" in ctx.obj:
+        return ctx.obj["conn"], False
+    return get_db(), True
+
+
 def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
     """Compute system tone tier and score for a subtitle."""
     evidence = compute_tier_evidence(subtitle, conn)
@@ -46,7 +63,7 @@ def _get_system_tone(subtitle: str, conn) -> tuple[str, float]:
 _TAG_MAP = {
     "f": "funny",
     "b": "boring",
-    "r": "broken",
+    "r": "broken syntax",
     "n": "nonsense",
     "l": "realistic",
     "i": "interesting",
@@ -83,7 +100,7 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
 
     # Tags
     tags_input = click.prompt(
-        click.style("     Tags? [f=funny / b=boring / r=broken / n=nonsense / l=realistic / i=interesting / Enter]", fg="cyan"),
+        click.style("     Tags? [f=funny / b=boring / r=broken syntax / n=nonsense / l=realistic / i=interesting / Enter]", fg="cyan"),
         default="", show_default=False,
     ).strip().lower()
     tags = [_TAG_MAP[c] for c in tags_input if c in _TAG_MAP] or None
@@ -715,10 +732,13 @@ def spot_check_cmd(ctx, samples: int, source: str):
       subtitle-gen spot-check              # CLI mode, 2 per tier
       subtitle-gen spot-check --samples 3  # 3 per tier = 9 total
     """
-    conn = ctx.obj["conn"]
+    conn, should_close = _get_command_conn(ctx)
     from subtitle_generator.tune import run_spot_check
-    run_spot_check(conn, n_samples=samples, source=source)
-    conn.close()
+    try:
+        run_spot_check(conn, n_samples=samples, source=source)
+    finally:
+        if should_close:
+            conn.close()
 
 
 @cli.command("review-ratings")
@@ -740,11 +760,104 @@ def review_ratings_cmd(ctx, since: str | None, source: str | None, model: str | 
       subtitle-gen review-ratings --source web_user   # end-user only
       subtitle-gen review-ratings --since 2026-04-15  # since date
     """
-    conn = ctx.obj["conn"]
+    conn, should_close = _get_command_conn(ctx)
     from subtitle_generator.tune import review_ratings
     from subtitle_generator.eval_harness import DEFAULT_PROPOSER_MODEL
-    review_ratings(conn, since=since, source=source, model=model or DEFAULT_PROPOSER_MODEL)
-    conn.close()
+    try:
+        review_ratings(conn, since=since, source=source, model=model or DEFAULT_PROPOSER_MODEL)
+    finally:
+        if should_close:
+            conn.close()
+
+
+def _existing_remote_rating_keys(conn: sqlite3.Connection) -> set[str]:
+    """Return RowKeys already imported into human_ratings.config_snapshot."""
+    existing: set[str] = set()
+    rows = conn.execute(
+        "SELECT DISTINCT config_snapshot FROM human_ratings WHERE config_snapshot LIKE '%RowKey%'"
+    ).fetchall()
+    import json as _json
+    for (snap,) in rows:
+        try:
+            parsed = _json.loads(snap)
+        except (_json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("RowKey"), str):
+            existing.add(parsed["RowKey"])
+    return existing
+
+
+def _sync_rating_entities(conn: sqlite3.Connection, entities: Iterable[dict]) -> RatingSyncStats:
+    """Import Azure Table rating entities into local SQLite with validation."""
+    import json as _json
+
+    from subtitle_generator.feedback import (
+        ensure_ratings_table,
+        parse_rating_tags,
+        rating_tags_are_current,
+        store_rating,
+    )
+
+    ensure_ratings_table(conn)
+    existing = _existing_remote_rating_keys(conn)
+    stats = RatingSyncStats()
+
+    for entity in entities:
+        row_key = entity.get("RowKey")
+        if not isinstance(row_key, str) or not row_key:
+            stats.malformed += 1
+            continue
+        if row_key in existing:
+            stats.duplicate += 1
+            continue
+
+        subtitle = entity.get("subtitle")
+        if not isinstance(subtitle, str) or not subtitle:
+            stats.malformed += 1
+            continue
+
+        try:
+            tags = parse_rating_tags(entity.get("tags", "[]"))
+        except ValueError:
+            stats.malformed += 1
+            continue
+        if not rating_tags_are_current(tags):
+            stats.filtered += 1
+            continue
+
+        thumbs_val = entity.get("thumbs")
+        if thumbs_val in ("", None):
+            thumbs_val = None
+        else:
+            try:
+                thumbs_val = int(thumbs_val)
+            except (TypeError, ValueError):
+                stats.malformed += 1
+                continue
+            if thumbs_val not in (1, -1):
+                stats.malformed += 1
+                continue
+
+        store_rating(
+            conn,
+            subtitle,
+            system_tone=entity.get("system_tone") or None,
+            thumbs=thumbs_val,
+            tone_override=entity.get("tone_override") or None,
+            free_text=entity.get("free_text") or None,
+            tags=tags,
+            source="pull_ratings",
+            prompt_generated=bool(entity.get("prompt_generated", False)),
+        )
+        conn.execute(
+            "UPDATE human_ratings SET config_snapshot = ? WHERE id = last_insert_rowid()",
+            (_json.dumps({"RowKey": row_key}),),
+        )
+        conn.commit()
+        existing.add(row_key)
+        stats.synced += 1
+
+    return stats
 
 
 @cli.command()
@@ -1040,26 +1153,7 @@ def pull_ratings_cmd(ctx, since: str | None, account: str | None):
             "azure-data-tables not installed. Run: uv pip install azure-data-tables azure-identity"
         )
 
-    conn = ctx.obj["conn"]
-    from subtitle_generator.feedback import ensure_ratings_table, store_rating
-    ensure_ratings_table(conn)
-
-    # Get existing RowKeys to deduplicate
-    existing = set()
-    try:
-        rows = conn.execute(
-            "SELECT DISTINCT config_snapshot FROM human_ratings WHERE config_snapshot LIKE '%RowKey%'"
-        ).fetchall()
-        import json as _json
-        for (snap,) in rows:
-            try:
-                d = _json.loads(snap)
-                if "RowKey" in d:
-                    existing.add(d["RowKey"])
-            except Exception:
-                pass
-    except Exception:
-        pass
+    conn, should_close = _get_command_conn(ctx)
 
     credential = DefaultAzureCredential()
     service = TableServiceClient(
@@ -1068,48 +1162,22 @@ def pull_ratings_cmd(ctx, since: str | None, account: str | None):
     )
     table = service.get_table_client("ratings")
 
-    import json as _json
     query_filter = None
     if since:
         query_filter = f"RowKey ge '{since}'"
 
-    synced = 0
-    skipped = 0
-    for entity in table.list_entities(filter=query_filter):
-        row_key = entity["RowKey"]
-        if row_key in existing:
-            skipped += 1
-            continue
-
-        tags_raw = entity.get("tags", "[]")
-        try:
-            tags = _json.loads(tags_raw)
-        except Exception:
-            tags = None
-
-        thumbs_val = entity.get("thumbs")
-        if thumbs_val is not None:
-            thumbs_val = int(thumbs_val)
-
-        store_rating(
-            conn,
-            entity.get("subtitle", ""),
-            system_tone=entity.get("system_tone") or None,
-            thumbs=thumbs_val,
-            tone_override=entity.get("tone_override") or None,
-            free_text=entity.get("free_text") or None,
-            tags=tags,
-            source="pull_ratings",
-        )
-        # Store RowKey in config_snapshot for dedup on next sync
-        conn.execute(
-            "UPDATE human_ratings SET config_snapshot = ? WHERE id = last_insert_rowid()",
-            (_json.dumps({"RowKey": row_key}),),
-        )
-        conn.commit()
-        synced += 1
-
-    click.echo(f"Synced {synced} ratings ({skipped} duplicates skipped).")
+    try:
+        stats = _sync_rating_entities(conn, table.list_entities(filter=query_filter))
+    finally:
+        if should_close:
+            conn.close()
+    click.echo(
+        "Synced "
+        f"{stats.synced} ratings "
+        f"({stats.duplicate} duplicates skipped, "
+        f"{stats.filtered} stale tag sets filtered, "
+        f"{stats.malformed} malformed rows skipped)."
+    )
 
 
 _POP_SOURCES = ["spl", "ol", "gr", "ottawa", "nyt", "trove"]

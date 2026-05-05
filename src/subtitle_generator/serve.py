@@ -6,7 +6,6 @@ without starting the server — call ``create_server()`` or ``run()``.
 
 import asyncio
 import json
-import os
 import random
 import uuid
 from http import HTTPStatus
@@ -26,6 +25,7 @@ from subtitle_generator.handlers import (
     handle_rate as _handle_rate,
 )
 from subtitle_generator.jacket import build_jacket_prompt, generate_jacket_from_prompt
+from subtitle_generator.rating_storage import write_rating_to_table_storage
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _WEB_DIR = _PROJECT_ROOT / "web"
@@ -39,52 +39,18 @@ def _handle_rate_local(body: dict) -> tuple[int, dict]:
     """Wrap shared handle_rate with Azure Table Storage dual-write."""
     status, resp = _handle_rate(body)
     if status == 200:
-        _write_to_table_storage(
+        write_rating_to_table_storage(
             body.get("subtitle", ""),
             body.get("thumbs"),
             body.get("tone_override"),
             body.get("free_text"),
             body.get("system_tone"),
             body.get("tags"),
+            source=body.get("_source", "web_user"),
+            prompt_generated=body.get("prompt_generated", False),
+            required=False,
         )
     return status, resp
-
-
-def _write_to_table_storage(
-    subtitle: str, thumbs: int | None, tone_override: str | None,
-    free_text: str | None, system_tone: str | None, tags: list[str] | None,
-) -> None:
-    """Write rating to Azure Table Storage if STORAGE_ACCOUNT_NAME is set."""
-    account_name = os.environ.get("STORAGE_ACCOUNT_NAME")
-    if not account_name:
-        return
-
-    try:
-        from azure.data.tables import TableServiceClient
-        from azure.identity import DefaultAzureCredential
-        from datetime import datetime, timezone
-
-        credential = DefaultAzureCredential()
-        service = TableServiceClient(
-            endpoint=f"https://{account_name}.table.core.windows.net",
-            credential=credential,
-        )
-        table = service.get_table_client("ratings")
-
-        now = datetime.now(timezone.utc)
-        entity = {
-            "PartitionKey": now.strftime("%Y-%m"),
-            "RowKey": f"{now.isoformat()}-{uuid.uuid4().hex[:8]}",
-            "subtitle": subtitle,
-            "thumbs": thumbs,
-            "tone_override": tone_override or "",
-            "free_text": free_text or "",
-            "system_tone": system_tone or "",
-            "tags": json.dumps(tags or []),
-        }
-        table.create_entity(entity)
-    except Exception:
-        pass  # Non-critical — local SQLite is the primary store
 
 
 # -- /api/spot-check/* (local only) ------------------------------------------

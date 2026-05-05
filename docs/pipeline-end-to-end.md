@@ -740,7 +740,7 @@ change. It can include:
 - thumbs up/down
 - system tone
 - human tone override
-- tags such as `interesting`, `realistic`, `funny`, `boring`, `broken`, and
+- tags such as `interesting`, `realistic`, `funny`, `boring`, `broken syntax`, and
   `nonsense`
 - free text
 - config snapshot

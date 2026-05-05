@@ -190,7 +190,7 @@ def test_observed_pipeline_schema_columns(tmp_path):
     assert _columns(conn, "human_ratings") >= {
         "id", "subtitle", "system_tone", "thumbs", "tone_override",
         "free_text", "interpreted", "config_snapshot", "created_at",
-        "tags", "source",
+        "tags", "source", "prompt_generated",
     }
     assert validate_schema(conn) == []
 
@@ -1141,6 +1141,7 @@ def test_handle_rate_contract_persists_rating(tmp_path, monkeypatch):
         "thumbs": 1,
         "tone_override": "pop",
         "tags": ["interesting"],
+        "prompt_generated": True,
         "_source": "contract-test",
     })
 
@@ -1148,10 +1149,10 @@ def test_handle_rate_contract_persists_rating(tmp_path, monkeypatch):
     assert body == {"id": 1, "status": "saved"}
     conn = sqlite3.connect(db_path)
     row = conn.execute(
-        "SELECT thumbs, tone_override, tags, source FROM human_ratings"
+        "SELECT thumbs, tone_override, tags, source, prompt_generated FROM human_ratings"
     ).fetchone()
     conn.close()
-    assert row == (1, "pop", '["interesting"]', "contract-test")
+    assert row == (1, "pop", '["interesting"]', "contract-test", 1)
 
 
 def test_jacket_generation_uses_prepared_prompt_once(monkeypatch):
@@ -1260,6 +1261,37 @@ def test_rating_config_snapshot_preserves_defaults_and_overrides():
     assert snapshot["weighted_sample_spread"] == 0.12
     assert json.loads(row[1]) == ["interesting", "realistic"]
     assert row[2] == "characterization"
+
+
+def test_review_ratings_reports_prompt_only_feedback(capsys, monkeypatch):
+    from subtitle_generator import tune
+    from subtitle_generator.feedback import store_rating
+
+    conn = make_runtime_db()
+    store_rating(
+        conn,
+        "Power, Race, and the Pursuit of Happiness",
+        system_tone="mainstream",
+        tags=["interesting"],
+        source="web_user",
+        prompt_generated=True,
+    )
+
+    captured = {}
+
+    def fake_structured_completion(*args, **kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return SimpleNamespace(diff="--- old\n+++ new\n", reasoning="prompt interest only")
+
+    monkeypatch.setattr(tune, "_load_goals", lambda: "goals")
+    monkeypatch.setattr(tune, "structured_completion", fake_structured_completion)
+
+    tune.review_ratings(conn, source="web_user", model="fake-model")
+
+    output = capsys.readouterr().out
+    assert "Prompt generated: 1" in output
+    assert "Tone accuracy: no tone-rated entries" in output
+    assert "Prompt generated: 1" in captured["prompt"]
 
 
 def test_tuning_config_change_applies_and_reverts_rows():

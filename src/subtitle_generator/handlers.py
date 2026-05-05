@@ -7,6 +7,7 @@ its own response type.
 
 import os
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from subtitle_generator.generate import (
@@ -29,6 +30,18 @@ from subtitle_generator.jacket import (
 
 TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
 VALID_TONES = set(TONE_CHOICES.keys())
+
+
+@dataclass(frozen=True)
+class RatingPayload:
+    subtitle: str
+    thumbs: int | None
+    tone_override: str | None
+    free_text: str | None
+    system_tone: str | None
+    tags: list[str] | None
+    source: str
+    prompt_generated: bool
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -184,20 +197,20 @@ def handle_jacket(body: dict) -> tuple[int, dict]:
         conn.close()
 
 
-def handle_rate(body: dict) -> tuple[int, dict]:
-    """Store a human rating for a subtitle."""
+def validate_rating_body(body: dict) -> tuple[int, dict, RatingPayload | None]:
+    """Validate a rating request body without writing to local storage."""
     subtitle = body.get("subtitle")
     if not subtitle or not isinstance(subtitle, str):
-        return 400, {"error": "subtitle is required and must be a non-empty string"}
+        return 400, {"error": "subtitle is required and must be a non-empty string"}, None
 
     thumbs = body.get("thumbs")
     if thumbs is not None:
         if thumbs not in (1, -1):
-            return 400, {"error": "thumbs must be 1 (up) or -1 (down)"}
+            return 400, {"error": "thumbs must be 1 (up) or -1 (down)"}, None
 
     tone_override = body.get("tone_override")
     if tone_override and tone_override not in ("pop", "mainstream", "niche"):
-        return 400, {"error": "tone_override must be pop, mainstream, or niche"}
+        return 400, {"error": "tone_override must be pop, mainstream, or niche"}, None
 
     free_text = body.get("free_text")
     system_tone = body.get("system_tone")
@@ -205,29 +218,61 @@ def handle_rate(body: dict) -> tuple[int, dict]:
     tags = body.get("tags")
     if tags is not None:
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
-            return 400, {"error": "tags must be an array of strings"}
-        from subtitle_generator.feedback import VALID_RATING_TAGS
+            return 400, {"error": "tags must be an array of strings"}, None
+        from subtitle_generator.feedback import VALID_RATING_TAGS, normalize_rating_tags
 
+        tags = normalize_rating_tags(tags)
         invalid_tags = set(tags) - VALID_RATING_TAGS
         if invalid_tags:
-            return 400, {"error": f"Invalid tags: {', '.join(invalid_tags)}"}
+            return 400, {"error": f"Invalid tags: {', '.join(invalid_tags)}"}, None
 
     source = body.get("_source", "web_user")
+    if not isinstance(source, str) or not source:
+        source = "web_user"
 
+    prompt_generated = body.get("prompt_generated", False)
+    if not isinstance(prompt_generated, bool):
+        return 400, {"error": "prompt_generated must be a boolean"}, None
+
+    return 200, {"status": "validated"}, RatingPayload(
+        subtitle=subtitle,
+        thumbs=thumbs,
+        tone_override=tone_override,
+        free_text=free_text if free_text else None,
+        system_tone=system_tone,
+        tags=tags,
+        source=source,
+        prompt_generated=prompt_generated,
+    )
+
+
+def store_rating_payload(payload: RatingPayload) -> int:
+    """Store a validated rating payload in the local SQLite database."""
     from subtitle_generator.feedback import store_rating
 
     conn = get_db()
     try:
-        row_id = store_rating(
+        return store_rating(
             conn,
-            subtitle,
-            system_tone=system_tone,
-            thumbs=thumbs,
-            tone_override=tone_override,
-            free_text=free_text if free_text else None,
-            tags=tags,
-            source=source,
+            payload.subtitle,
+            system_tone=payload.system_tone,
+            thumbs=payload.thumbs,
+            tone_override=payload.tone_override,
+            free_text=payload.free_text,
+            tags=payload.tags,
+            source=payload.source,
+            prompt_generated=payload.prompt_generated,
         )
-        return 200, {"id": row_id, "status": "saved"}
     finally:
         conn.close()
+
+
+def handle_rate(body: dict) -> tuple[int, dict]:
+    """Store a human rating for a subtitle."""
+    status, resp, payload = validate_rating_body(body)
+    if status != 200:
+        return status, resp
+
+    assert payload is not None
+    row_id = store_rating_payload(payload)
+    return 200, {"id": row_id, "status": "saved"}

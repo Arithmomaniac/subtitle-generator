@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -19,11 +20,41 @@ from subtitle_generator.config import load_tuning_config
 VALID_RATING_TAGS = frozenset({
     "funny",
     "boring",
-    "broken",
+    "broken syntax",
     "nonsense",
     "realistic",
     "interesting",
 })
+
+LEGACY_RATING_TAG_ALIASES = {
+    "broken": "broken syntax",
+}
+
+
+def normalize_rating_tags(tags: list[str]) -> list[str]:
+    """Normalize legacy rating tag names to current canonical tags."""
+    return [LEGACY_RATING_TAG_ALIASES.get(tag, tag) for tag in tags]
+
+
+def parse_rating_tags(value: Any) -> list[str]:
+    """Parse and validate a rating tag payload from JSON or Table Storage."""
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("tags must be valid JSON") from exc
+    else:
+        parsed = value
+    if not isinstance(parsed, list) or not all(isinstance(tag, str) for tag in parsed):
+        raise ValueError("tags must be an array of strings")
+    return normalize_rating_tags(parsed)
+
+
+def rating_tags_are_current(tags: list[str]) -> bool:
+    """Return true when a rating's tags are all current supported options."""
+    return not (set(tags) - VALID_RATING_TAGS)
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -65,6 +96,8 @@ def ensure_ratings_table(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE human_ratings ADD COLUMN tags TEXT DEFAULT '[]'")
     if "source" not in cols:
         conn.execute("ALTER TABLE human_ratings ADD COLUMN source TEXT DEFAULT 'unknown'")
+    if "prompt_generated" not in cols:
+        conn.execute("ALTER TABLE human_ratings ADD COLUMN prompt_generated INTEGER DEFAULT 0")
     conn.commit()
 
 
@@ -83,6 +116,7 @@ def store_rating(
     free_text: str | None = None,
     tags: list[str] | None = None,
     source: str = "unknown",
+    prompt_generated: bool = False,
 ) -> int:
     """Store a human rating. Returns the row id.
 
@@ -94,6 +128,7 @@ def store_rating(
         free_text: Optional free-text comment.
         tags: Quality tags like ["interesting", "realistic", "funny", "boring"].
         source: Origin of this rating ("spot_check", "web_user", "pull_ratings").
+        prompt_generated: Whether the user generated a jacket prompt for this subtitle.
     """
     ensure_ratings_table(conn)
 
@@ -114,10 +149,10 @@ def store_rating(
     cur = conn.execute(
         """INSERT INTO human_ratings
            (subtitle, system_tone, thumbs, tone_override, free_text,
-            interpreted, config_snapshot, tags, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             interpreted, config_snapshot, tags, source, prompt_generated)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (subtitle, system_tone, thumbs, tone_override, free_text,
-         interpreted, config_snapshot, tags_json, source),
+         interpreted, config_snapshot, tags_json, source, int(prompt_generated)),
     )
     conn.commit()
     return cur.lastrowid
@@ -171,7 +206,7 @@ def get_summary(
     ensure_ratings_table(conn)
 
     rows = conn.execute(
-        """SELECT thumbs, system_tone, tone_override, free_text, interpreted, tags
+        """SELECT thumbs, system_tone, tone_override, free_text, interpreted, tags, prompt_generated
            FROM human_ratings
            ORDER BY created_at DESC
            LIMIT ?""",
@@ -218,6 +253,7 @@ def get_summary(
 
     # Tag counts
     tag_counter: Counter = Counter()
+    prompt_generated_count = 0
     for r in rows:
         tags_str = r[5] if len(r) > 5 and r[5] else "[]"
         try:
@@ -226,6 +262,8 @@ def get_summary(
                 tag_counter[tag] += 1
         except (json.JSONDecodeError, TypeError):
             pass
+        if len(r) > 6 and r[6]:
+            prompt_generated_count += 1
 
     return {
         "total_ratings": len(rows),
@@ -237,6 +275,7 @@ def get_summary(
         "recent_comments": recent_comments[:5],
         "interpreted_insights": interpreted_insights[:5],
         "tag_counts": dict(tag_counter.most_common()),
+        "prompt_generated_count": prompt_generated_count,
     }
 
 
@@ -269,5 +308,7 @@ def format_summary_for_proposer(summary: dict) -> str:
     if summary.get("tag_counts"):
         tag_strs = ", ".join(f"{count}× {tag}" for tag, count in summary["tag_counts"].items())
         lines.append(f"- Quality tags: {tag_strs}")
+    if summary.get("prompt_generated_count"):
+        lines.append(f"- Prompt generated: {summary['prompt_generated_count']}×")
 
     return "\n".join(lines)
