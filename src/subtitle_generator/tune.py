@@ -242,7 +242,7 @@ def _score_in_memory(conn: sqlite3.Connection):
     w_gr = cfg.get("pop_weight_gr", 0.2)
     w_library = cfg.get("pop_weight_library", 0.05)
     w_nyt = cfg.get("pop_weight_nyt", 0.1)
-    w_trove = cfg.get("pop_weight_trove", 0.05)
+    w_trove = cfg.get("pop_weight_trove", 0.10)
 
     click.echo(f"  [repopulate] scoring in-memory (SPL={w_spl}, OL={w_ol}, "
                f"GR={w_gr}, LIB={w_library}, NYT={w_nyt}, TROVE={w_trove})...")
@@ -375,7 +375,7 @@ def _run_repopulate_full(conn: sqlite3.Connection):
     w_gr = cfg.get("pop_weight_gr", 0.2)
     w_library = cfg.get("pop_weight_library", 0.05)
     w_nyt = cfg.get("pop_weight_nyt", 0.1)
-    w_trove = cfg.get("pop_weight_trove", 0.05)
+    w_trove = cfg.get("pop_weight_trove", 0.10)
     exponent = cfg.get("pop_exponent", 1.2)
 
     sys.path.insert(0, "data")

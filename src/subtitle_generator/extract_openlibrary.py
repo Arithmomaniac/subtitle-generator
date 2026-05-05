@@ -10,8 +10,11 @@ from urllib.request import Request, urlopen
 import click
 
 from subtitle_generator import __version__
-from subtitle_generator.extract import DATA_DIR
-from subtitle_generator.source_validation import clean_title_and_subtitle
+from subtitle_generator.extract import DATA_DIR, ensure_subtitle_candidate_columns
+from subtitle_generator.source_validation import (
+    clean_title_and_subtitle,
+    looks_like_subtitle_pattern,
+)
 
 OL_DUMP_URL = "https://openlibrary.org/data/ol_dump_editions_latest.txt.gz"
 OL_DUMP_FILENAME = "ol_dump_editions_latest.txt.gz"
@@ -90,6 +93,13 @@ def _clean_ol_subtitle(raw: str) -> str | None:
     return s
 
 
+def _clean_ol_title(raw: str | None) -> str:
+    """Clean an Open Library title value."""
+
+    title = re.sub(r"\s+", " ", (raw or "").strip())
+    return re.sub(r"[\s]*[/:;.]\s*$", "", title).strip()
+
+
 def _normalize_lccn(raw: str) -> str:
     """Normalize LCCN for dedup comparison.
 
@@ -117,13 +127,9 @@ def _build_existing_isbns(conn: sqlite3.Connection) -> set[str]:
 
 def ensure_isbn_column(conn: sqlite3.Connection):
     """Add isbn column to subtitles table if it doesn't exist."""
-    cols = {
-        r[1] for r in conn.execute("PRAGMA table_info(subtitles)").fetchall()
-    }
-    if "isbn" not in cols:
-        conn.execute("ALTER TABLE subtitles ADD COLUMN isbn TEXT")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_subtitles_isbn ON subtitles(isbn)")
-        conn.commit()
+    ensure_subtitle_candidate_columns(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_subtitles_isbn ON subtitles(isbn)")
+    conn.commit()
 
 
 def extract_from_ol_dump(
@@ -190,26 +196,31 @@ def extract_from_ol_dump(
             except (json.JSONDecodeError, IndexError):
                 continue
 
-            # Must have a subtitle
-            subtitle_raw = data.get("subtitle")
-            if not subtitle_raw or not isinstance(subtitle_raw, str):
-                continue
-
             # Language filter
             lang = _map_ol_language(data.get("languages"))
             if english_only and lang != "eng":
                 continue
 
-            # Clean subtitle
-            subtitle = _clean_ol_subtitle(subtitle_raw)
-            if not subtitle:
+            title = _clean_ol_title(data.get("title"))
+            subtitle_raw = data.get("subtitle")
+            subtitle = (
+                _clean_ol_subtitle(subtitle_raw)
+                if isinstance(subtitle_raw, str) and subtitle_raw.strip()
+                else None
+            )
+            if subtitle:
+                cleaned = clean_title_and_subtitle(title, subtitle)
+                if cleaned is None:
+                    continue
+                title, subtitle = cleaned
+                candidate_text = subtitle
+                candidate_source = "subtitle"
+            elif looks_like_subtitle_pattern(title):
+                subtitle = ""
+                candidate_text = title
+                candidate_source = "title"
+            else:
                 continue
-
-            title = (data.get("title") or "").strip()
-            cleaned = clean_title_and_subtitle(title, subtitle)
-            if cleaned is None:
-                continue
-            title, subtitle = cleaned
 
             # Extract identifiers
             lccn_list = data.get("lccn", [])
@@ -243,13 +254,23 @@ def extract_from_ol_dump(
                             continue
                         seen_work_keys.add(work_key)
 
-            batch.append((title, subtitle, lang, lccn, "openlibrary", isbn))
+            batch.append((
+                title,
+                subtitle,
+                lang,
+                lccn,
+                "openlibrary",
+                isbn,
+                candidate_text,
+                candidate_source,
+            ))
             subtitles_found += 1
 
             if len(batch) >= BATCH_SIZE:
                 conn.executemany(
-                    "INSERT INTO subtitles (title, subtitle, lang, lccn, source_file, isbn) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO subtitles "
+                    "(title, subtitle, lang, lccn, source_file, isbn, candidate_text, candidate_source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     batch,
                 )
                 conn.commit()
@@ -264,8 +285,9 @@ def extract_from_ol_dump(
 
     if batch:
         conn.executemany(
-            "INSERT INTO subtitles (title, subtitle, lang, lccn, source_file, isbn) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO subtitles "
+            "(title, subtitle, lang, lccn, source_file, isbn, candidate_text, candidate_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             batch,
         )
         conn.commit()

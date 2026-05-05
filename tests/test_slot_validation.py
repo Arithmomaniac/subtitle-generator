@@ -15,6 +15,7 @@ from subtitle_generator.source_validation import (
     clean_title_and_subtitle,
     clean_title_for_subtitle,
     is_repeated_title_subtitle,
+    looks_like_subtitle_pattern,
 )
 
 
@@ -57,6 +58,13 @@ def test_extract_pattern_matches_allows_two_or_three_list_items_only():
     assert [m["subtitle_id"] for m in matches] == [1, 2]
     assert [len(m["list_items"]) for m in matches] == [2, 3]
     assert rejections["rejected_list_count"] == 1
+
+
+def test_shared_pattern_helper_matches_slot_pattern():
+    assert looks_like_subtitle_pattern("Race, Power, and the Rise of Empire")
+    assert looks_like_subtitle_pattern("Race, Power, and a History of Empire")
+    assert looks_like_subtitle_pattern("Race, Power, and an Account of Empire")
+    assert not looks_like_subtitle_pattern("Race and Power")
 
 
 def test_build_slots_rejects_whole_candidate_when_any_list_item_fails():
@@ -116,6 +124,43 @@ def test_build_slots_tolerates_loc_only_database_without_openlibrary(tmp_path: P
     build_slots(conn)
 
     assert conn.execute("SELECT COUNT(*) FROM pattern_matches").fetchone()[0] == 1
+
+
+def test_build_slots_accepts_title_derived_candidate(tmp_path: Path):
+    db_path = tmp_path / "title-candidate.db"
+    conn = get_db(db_path)
+    conn.execute(
+        """
+        INSERT INTO subtitles (
+            title, subtitle, lang, lccn, source_file, candidate_text, candidate_source
+        )
+        VALUES (
+            'Race, Power, and the Rise of Empire',
+            '',
+            'eng',
+            'lccn',
+            'loc.mrc',
+            'Race, Power, and the Rise of Empire',
+            'title'
+        )
+        """
+    )
+    conn.commit()
+
+    build_slots(conn)
+
+    row = conn.execute(
+        """
+        SELECT title, subtitle, candidate_source, list_items_json, action_noun, of_object
+        FROM pattern_matches
+        """
+    ).fetchone()
+    assert row[:3] == (
+        "Race, Power, and the Rise of Empire",
+        "Race, Power, and the Rise of Empire",
+        "title",
+    )
+    assert row[3:] == ('["Race", "Power"]', "Rise", "Empire")
 
 
 def test_repeated_title_subtitle_detection_cases():

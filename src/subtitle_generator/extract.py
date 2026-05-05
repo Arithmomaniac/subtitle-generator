@@ -7,7 +7,11 @@ from pathlib import Path
 import click
 from pymarc import MARCReader
 
-from subtitle_generator.source_validation import clean_title_and_subtitle
+from subtitle_generator.feedback import ensure_ratings_table
+from subtitle_generator.source_validation import (
+    clean_title_and_subtitle,
+    looks_like_subtitle_pattern,
+)
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 DB_PATH = DATA_DIR / "db" / "subtitles.db"
@@ -23,26 +27,58 @@ def get_db(db_path: Path | None = None) -> sqlite3.Connection:
         CREATE TABLE IF NOT EXISTS subtitles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT,
-            subtitle TEXT NOT NULL,
+            subtitle TEXT NOT NULL DEFAULT '',
             lang TEXT,
             lccn TEXT,
             source_file TEXT,
-            isbn TEXT
+            isbn TEXT,
+            candidate_text TEXT,
+            candidate_source TEXT
         )
     """)
-    cols = {
-        r[1] for r in conn.execute("PRAGMA table_info(subtitles)").fetchall()
-    }
-    if "isbn" not in cols:
-        conn.execute("ALTER TABLE subtitles ADD COLUMN isbn TEXT")
+    ensure_subtitle_candidate_columns(conn)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_subtitles_lang ON subtitles(lang)
     """)
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_subtitles_isbn ON subtitles(isbn)
     """)
+    ensure_ratings_table(conn)
     conn.commit()
     return conn
+
+
+def ensure_subtitle_candidate_columns(conn: sqlite3.Connection) -> None:
+    """Add source-candidate columns and backfill legacy subtitle-derived rows."""
+
+    cols = {
+        r[1] for r in conn.execute("PRAGMA table_info(subtitles)").fetchall()
+    }
+    if "isbn" not in cols:
+        conn.execute("ALTER TABLE subtitles ADD COLUMN isbn TEXT")
+    if "candidate_text" not in cols:
+        conn.execute("ALTER TABLE subtitles ADD COLUMN candidate_text TEXT")
+    if "candidate_source" not in cols:
+        conn.execute("ALTER TABLE subtitles ADD COLUMN candidate_source TEXT")
+    conn.execute(
+        """
+        UPDATE subtitles
+        SET candidate_text = subtitle
+        WHERE candidate_text IS NULL
+          AND subtitle IS NOT NULL
+          AND subtitle != ''
+        """
+    )
+    conn.execute(
+        """
+        UPDATE subtitles
+        SET candidate_source = 'subtitle'
+        WHERE candidate_source IS NULL
+          AND candidate_text IS NOT NULL
+          AND candidate_text != ''
+        """
+    )
+    conn.commit()
 
 
 def _clean_subtitle(raw: str) -> str | None:
@@ -56,6 +92,12 @@ def _clean_subtitle(raw: str) -> str | None:
     if len(s) < 5:
         return None
     return s
+
+
+def _clean_title(raw: str | None) -> str:
+    """Clean and normalize a MARC title value."""
+
+    return re.sub(r"[\s]*[/:;.]\s*$", "", raw or "").strip()
 
 
 def _get_language(record) -> str | None:
@@ -94,35 +136,41 @@ def extract_from_file(
             else:
                 lang = _get_language(record)
 
-            # Get 245$b (subtitle / remainder of title)
             field_245 = record.get("245")
             if not field_245:
                 continue
+
+            title = _clean_title(field_245.get("a", ""))
+
+            # Prefer 245$b when present. If absent, admit title-only records
+            # whose 245$a already has the generator source pattern.
             subtitle_raw = field_245.get("b")
-            if not subtitle_raw:
+            subtitle = _clean_subtitle(subtitle_raw) if subtitle_raw else None
+            if subtitle:
+                cleaned = clean_title_and_subtitle(title, subtitle)
+                if cleaned is None:
+                    continue
+                title, subtitle = cleaned
+                candidate_text = subtitle
+                candidate_source = "subtitle"
+            elif looks_like_subtitle_pattern(title):
+                subtitle = ""
+                candidate_text = title
+                candidate_source = "title"
+            else:
                 continue
-
-            subtitle = _clean_subtitle(subtitle_raw)
-            if not subtitle:
-                continue
-
-            title = field_245.get("a", "")
-            title = re.sub(r"[\s]*[/:;.]\s*$", "", title).strip()
-            cleaned = clean_title_and_subtitle(title, subtitle)
-            if cleaned is None:
-                continue
-            title, subtitle = cleaned
 
             lccn_field = record.get("010")
             lccn = lccn_field.get("a", "").strip() if lccn_field else None
 
-            batch.append((title, subtitle, lang, lccn, source))
+            batch.append((title, subtitle, lang, lccn, source, candidate_text, candidate_source))
             subtitles_found += 1
 
             if len(batch) >= 5000:
                 conn.executemany(
-                    "INSERT INTO subtitles (title, subtitle, lang, lccn, source_file) "
-                    "VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO subtitles "
+                    "(title, subtitle, lang, lccn, source_file, candidate_text, candidate_source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     batch,
                 )
                 conn.commit()
@@ -133,8 +181,9 @@ def extract_from_file(
 
     if batch:
         conn.executemany(
-            "INSERT INTO subtitles (title, subtitle, lang, lccn, source_file) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO subtitles "
+            "(title, subtitle, lang, lccn, source_file, candidate_text, candidate_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             batch,
         )
         conn.commit()

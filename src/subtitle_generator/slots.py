@@ -16,13 +16,14 @@ from subtitle_generator.source_tier_enrichment import (
     SOURCE_TIER_LABEL_COLUMNS,
     VALID_SOURCE_TIERS,
 )
-from subtitle_generator.source_validation import clean_title_and_subtitle
+from subtitle_generator.source_validation import (
+    SUBTITLE_PATTERN_RE,
+    SUBTITLE_PATTERN_SQL_LIKE,
+    clean_title_and_subtitle,
+)
 
 # Regex to match: "A, B[,] and the/a/an C of D"
-PATTERN_RE = re.compile(
-    r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+(?P<article>a|an|the)\s+(?P<action>.+?)\s+of\s+(?P<object>.+)$",
-    re.IGNORECASE,
-)
+PATTERN_RE = SUBTITLE_PATTERN_RE
 
 NOISE_WORDS = {"hearing", "subcommittee", "committee", "congress", "session"}
 ALLOWED_LIST_ITEM_COUNTS = {2, 3}
@@ -327,6 +328,10 @@ def _decompose_prepositional(phrase: str, doc) -> tuple[str, str, str, str, str]
     return topic, topic_pos, prep, complement, complement_pos
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
 def extract_pattern_matches(
     conn: sqlite3.Connection,
     rejection_counts: Counter | None = None,
@@ -337,33 +342,52 @@ def extract_pattern_matches(
     are excluded — they tend to be dissertations, pamphlets, or government
     reports whose language doesn't reflect real published-book subtitles.
     """
+    subtitle_columns = _columns(conn, "subtitles")
+    has_candidate_columns = {"candidate_text", "candidate_source"} <= subtitle_columns
+    candidate_expr = (
+        "COALESCE(NULLIF(candidate_text, ''), subtitle)"
+        if has_candidate_columns
+        else "subtitle"
+    )
+    candidate_source_expr = (
+        "COALESCE(NULLIF(candidate_source, ''), 'subtitle')"
+        if has_candidate_columns
+        else "'subtitle'"
+    )
+    like_clauses = " OR ".join(
+        f"{candidate_expr} LIKE ?"
+        for _pattern in SUBTITLE_PATTERN_SQL_LIKE
+    )
     rows = conn.execute(
-        "SELECT id, title, subtitle FROM subtitles "
+        f"SELECT id, title, subtitle, {candidate_expr}, {candidate_source_expr} "
+        "FROM subtitles "
         "WHERE ("
-        "  subtitle LIKE '%, % and the % of %'"
-        "  OR subtitle LIKE '%, % and a % of %'"
-        "  OR subtitle LIKE '%, % and an % of %'"
+        f"  {like_clauses}"
         ") "
         "AND NOT ("
         "  source_file = 'openlibrary'"
         "  AND (isbn IS NULL OR isbn = '')"
         "  AND (lccn IS NULL OR lccn = '')"
-        ")"
+        ")",
+        SUBTITLE_PATTERN_SQL_LIKE,
     ).fetchall()
 
     matches = []
-    for sid, title, subtitle in rows:
-        cleaned = clean_title_and_subtitle(title, subtitle)
-        if cleaned is None:
-            if rejection_counts is not None:
-                rejection_counts["rejected_repeated_title_subtitle"] += 1
-            continue
-        title, subtitle = cleaned
-        if _is_noise(subtitle):
+    for sid, title, source_subtitle, candidate_text, candidate_source in rows:
+        candidate_text = (candidate_text or "").strip()
+        candidate_source = candidate_source or "subtitle"
+        if candidate_source == "subtitle":
+            cleaned = clean_title_and_subtitle(title, candidate_text)
+            if cleaned is None:
+                if rejection_counts is not None:
+                    rejection_counts["rejected_repeated_title_subtitle"] += 1
+                continue
+            title, candidate_text = cleaned
+        if _is_noise(candidate_text):
             if rejection_counts is not None:
                 rejection_counts["rejected_noise"] += 1
             continue
-        m = PATTERN_RE.match(subtitle)
+        m = PATTERN_RE.match(candidate_text)
         if not m:
             continue
 
@@ -389,7 +413,9 @@ def extract_pattern_matches(
         matches.append({
             "subtitle_id": sid,
             "title": title,
-            "subtitle": subtitle,
+            "subtitle": candidate_text,
+            "source_subtitle": source_subtitle or "",
+            "candidate_source": candidate_source,
             "list_items": items,
             "action_noun": action,
             "of_object": obj,
@@ -409,7 +435,8 @@ def ensure_slot_tables(conn: sqlite3.Connection):
             subtitle TEXT,
             list_items_json TEXT,
             action_noun TEXT,
-            of_object TEXT
+            of_object TEXT,
+            candidate_source TEXT
         )
     """)
     conn.execute("""
@@ -462,6 +489,8 @@ def ensure_slot_tables(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE pattern_matches ADD COLUMN of_article TEXT DEFAULT ''")
     if "action_article" not in pm_cols:
         conn.execute("ALTER TABLE pattern_matches ADD COLUMN action_article TEXT DEFAULT ''")
+    if "candidate_source" not in pm_cols:
+        conn.execute("ALTER TABLE pattern_matches ADD COLUMN candidate_source TEXT DEFAULT 'subtitle'")
     for column, column_type in SOURCE_TIER_LABEL_COLUMNS:
         if column not in pm_cols:
             conn.execute(f"ALTER TABLE pattern_matches ADD COLUMN {column} {column_type}")
@@ -588,8 +617,8 @@ def build_slots(conn: sqlite3.Connection):
         conn.executemany(
             "INSERT OR IGNORE INTO pattern_matches "
             "(id, subtitle_id, title, subtitle, list_items_json, action_noun, of_object, "
-            f"action_article, of_article, {', '.join(label_column_names)}) "
-            f"VALUES ({', '.join('?' for _ in range(9 + len(label_column_names)))})",
+            f"action_article, of_article, candidate_source, {', '.join(label_column_names)}) "
+            f"VALUES ({', '.join('?' for _ in range(10 + len(label_column_names)))})",
             [
                 (
                     preserved_source_tier_labels.get(m["subtitle_id"], (None,))[0],
@@ -601,6 +630,7 @@ def build_slots(conn: sqlite3.Connection):
                     m["of_object"],
                     m["action_article"],
                     m["of_article"],
+                    m.get("candidate_source", "subtitle"),
                     *preserved_source_tier_labels.get(
                         m["subtitle_id"],
                         (None, *empty_label_values),

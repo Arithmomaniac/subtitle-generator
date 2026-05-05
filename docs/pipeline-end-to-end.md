@@ -7,10 +7,10 @@ those checks.
 
 ## TL;DR
 
-subtitle-generator mines real catalog subtitles, extracts pieces that fit the
-pattern `X, Y, and the Z of W`, assigns each piece frequency/popularity/tone
-state, optionally precomputes remix vectors, and serves a generator that draws
-weighted slot fillers from SQLite.
+subtitle-generator mines real catalog title/subtitle records, extracts pieces
+that fit the pattern `X, Y, and the Z of W`, assigns each piece
+frequency/popularity/tone state, optionally precomputes remix vectors, and serves
+a generator that draws weighted slot fillers from SQLite.
 
 The important rule is: **population creates the raw and derived universe,
 serving reads that universe to assemble subtitles and jackets, and tuning only
@@ -45,7 +45,7 @@ flowchart LR
 The highest-level data handoff is:
 
 ```text
-raw records -> subtitles -> slot fillers -> scored fillers -> generated output
+raw records -> source candidates -> validated pattern matches -> slot fillers -> scored fillers -> generated output
 ```
 
 The most important join/key transition is:
@@ -55,7 +55,9 @@ ISBN -> Open Library work_key -> source work popularity -> slot filler score
 ```
 
 Runtime generation is filler-centric. Popularity scoring is work-centric.
-Source extraction is ISBN/title/subtitle-centric.
+Source extraction is ISBN/title/subtitle-centric. The parse target is
+`candidate_text`; source display metadata remains `title` plus the real
+catalog subtitle.
 
 ## Population: build-time data and derived state
 
@@ -108,6 +110,9 @@ uv run subtitle-gen download-popularity
 uv run subtitle-gen populate-popularity
 uv run subtitle-gen precompute-vectors
 uv run subtitle-gen validate-pipeline
+uv run subtitle-gen export-data -o api\data
+uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
+pwsh -File scripts\run-local-e2e.ps1
 ```
 
 `validate-pipeline` checks full serving readiness, including the remix
@@ -121,8 +126,8 @@ The generator is grounded in real book/catalog data:
 
 | Source | Used for | Shape in the pipeline |
 |---|---|---|
-| Library of Congress MARC bulk files | Primary raw subtitle corpus | Downloaded, parsed, and inserted into `subtitles`. |
-| Open Library edition dump | Additional subtitles and ISBN/work identity | Extracted into `subtitles`; provides `work_key` and edition-count prior. |
+| Library of Congress MARC bulk files | Primary raw catalog corpus | Downloaded, parsed, and inserted into `subtitles` as subtitle- or title-derived candidates. |
+| Open Library edition dump | Additional title/subtitle candidates and ISBN/work identity | Extracted into `subtitles`; provides `work_key` and edition-count prior. |
 | Seattle Public Library checkout data | Demand signal | ISBN-keyed checkouts mapped to Open Library works. |
 | Goodreads/UCSD Book Graph | Demand/engagement signal | ISBN-keyed ratings counts mapped to works. |
 | Ottawa/Canadian library data | Library holds/appearances signal | ISBN-keyed library demand mapped to works. |
@@ -132,39 +137,52 @@ The generator is grounded in real book/catalog data:
 Human ratings are not population inputs. They are feedback used by tuning and
 analysis.
 
-### Subtitle extraction
+### Source candidate extraction
 
 Extraction turns LOC/Open Library records into normalized `subtitles` rows.
 It also applies source-level cleanup for repeated title/subtitle corruption
-before rows enter the corpus.
+before rows enter the corpus. The table stores both source metadata and the text
+that downstream slot extraction should parse.
 
 Important fields include:
 
 - `title`
-- `subtitle`
+- `subtitle` — the real catalog subtitle, empty for title-derived rows
+- `candidate_text` — the text tested by `build-slots`
+- `candidate_source` — `subtitle` or `title`
 - `lang`
 - source metadata such as `lccn`, `source_file`, and `isbn`
 
-This stage does not decide whether a subtitle is usable for generation, but it
-does repair obvious metadata corruption when a real title/subtitle split can be
-recovered. Common repairable shapes include `Title: Subtitle` with a duplicated
-subtitle field, `Title: Subtitle Title: Subtitle`, and `Title: Subtitle
-Subtitle`. Rows whose title/subtitle repetition cannot be repaired are skipped
-or later rejected by the candidate-stage guard.
+This stage does not decide whether a candidate is usable for generation. It only
+admits plausible candidates after language, identifier/dedup, cleanup, and a
+lightweight pattern prefilter. If a record has an explicit subtitle, the
+candidate is subtitle-derived. If it lacks a usable subtitle but the title
+itself matches the pattern, the candidate is title-derived and keeps
+`subtitle = ''` so source display stays title-only.
+
+Extraction repairs obvious metadata corruption when a real title/subtitle split
+can be recovered. Common repairable shapes include `Title: Subtitle` with a
+duplicated subtitle field, `Title: Subtitle Title: Subtitle`, and
+`Title: Subtitle Subtitle`. Rows whose title/subtitle repetition cannot be
+repaired are skipped or later rejected by the candidate-stage guard.
 
 ### Pattern matching and slot extraction
 
-`build-slots` looks for subtitles matching:
+`build-slots` looks for `candidate_text` matching:
 
 ```text
 X, Y, and [the/a/an] Z of [the/a/an] W
 ```
 
-The regex match is only the first gate. `slots.py` then repairs source
-title/subtitle duplication when possible, requires exactly two or three original
-list clauses, and uses spaCy plus orthographic filters to reject catalog noise,
+The regex match is only the first gate. `slots.py` then requires exactly two or
+three original list clauses and uses spaCy plus orthographic filters to reject catalog noise,
 weak/jargon fillers, truncation, encoding artifacts, all-caps MARC leakage,
 implausible action nouns, and bad of-objects.
+
+For subtitle-derived candidates, source title/subtitle repair still protects
+against duplicated metadata. For title-derived candidates, equality between
+source title and parse text is expected, so the row is not rejected merely
+because the candidate text equals the title.
 
 Accepted three-clause source subtitles enrich the `list_item` pool, but runtime
 generation still emits two list slots. Four-or-more-clause records are rejected
@@ -182,7 +200,7 @@ Outputs:
 
 | Table | Meaning |
 |---|---|
-| `pattern_matches` | Clean NLP-validated source subtitle decomposed into list items, action noun, of-object, and observed articles. |
+| `pattern_matches` | Clean NLP-validated candidate text decomposed into list items, action noun, of-object, observed articles, and `candidate_source`. |
 | `slot_fillers` | Deduplicated filler inventory by slot type with frequency and later scoring/precompute columns. |
 | `slot_filler_sources` | Many-to-many link from filler to source subtitle; used for attribution and popularity scoring. |
 
@@ -213,6 +231,8 @@ Use the infrastructure command to preview or label a reproducible batch:
 ```bash
 uv run subtitle-gen classify-source-tiers --dry-run --limit 20
 uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10 --selection random --random-seed 20260501
+uv run subtitle-gen classify-source-tiers --candidate-source title --limit 100
+uv run subtitle-gen source-tier-distribution
 ```
 
 By default the command uses hosted Responses `web_search` for each source title.
@@ -227,6 +247,10 @@ generated-output classifier.
 Downstream joins should use `subtitle_id`; `pattern_match_id` reflects the
 current `pattern_matches` row and is not stable when a source title stops
 validating after a rebuild.
+
+Title-derived source rows are projected as title-only for prompts, diagnostics,
+and exported labels. `source-tier-distribution` reports the title/subtitle label
+breakdown and the combined post-rebuild distribution used for calibration.
 
 The lower-level Copilot MCP web-search bridge lives in
 `subtitle_generator.copilot_web_search` as a plain importable module for future
@@ -280,6 +304,11 @@ make them look like high-demand pop titles. NYT appearances get a high floor
 because even partial bestseller-list presence is meaningful. Trove uses
 Australian `holdingsCount` as a library-breadth signal and stores copy counts as
 a documented proxy unless Trove exposes exact copy fields.
+
+After slot-source changes, refresh Trove with `--trove-target-mode slot-sources`.
+That target mode selects ISBNs through current strict `slot_filler_sources`
+backed by valid `pattern_matches`, so stale or rejected source rows do not drive
+Trove requests.
 
 The persisted result is one row per work in `popularity_data`.
 
@@ -757,6 +786,19 @@ Validation includes:
 Use it before tuning, serving, exporting, or investigating strange runtime
 behavior.
 
+When browser-facing data changes, follow validation with:
+
+```bash
+uv run subtitle-gen export-data -o api\data
+uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
+pwsh -File scripts\run-local-e2e.ps1
+```
+
+The local e2e script starts `subtitle-gen serve --no-open` on
+`http://127.0.0.1:8742`, runs the Playwright browser checks against the local
+API and spot-check UI, captures screenshots, and writes logs/artifacts to
+`test-results/local-e2e/`.
+
 ## Debugging mental model
 
 When behavior looks wrong, identify which concern owns the symptom:
@@ -777,8 +819,8 @@ When behavior looks wrong, identify which concern owns the symptom:
 | Artifact | Role |
 |---|---|
 | `data\db\subtitles.db` | Full local SQLite database built from source data. |
-| `subtitles` | Extracted source subtitle records plus title/source metadata. |
-| `pattern_matches` | Clean validated subtitles decomposed into list/action/of-object fields. |
+| `subtitles` | Extracted source records plus title/subtitle metadata, `candidate_text`, and `candidate_source`. |
+| `pattern_matches` | Clean validated candidate text decomposed into list/action/of-object fields and source provenance. |
 | `slot_fillers` | Canonical runtime filler inventory, including frequency, popularity, remix, vector, and scalar state. |
 | `slot_filler_sources` | Links fillers back to source subtitles/books for attribution and popularity scoring. |
 | `popularity_data` | Work-level demand/supply signals and `composite_score`. |

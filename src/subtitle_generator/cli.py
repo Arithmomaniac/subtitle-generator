@@ -870,6 +870,13 @@ def export_data_cmd(output_dir: str):
     help="Seed used when --selection=random.",
 )
 @click.option("--force", is_flag=True, help="Relabel already-labeled rows too.")
+@click.option(
+    "--candidate-source",
+    type=click.Choice(["all", "subtitle", "title"]),
+    default="all",
+    show_default=True,
+    help="Restrict labeling to rows parsed from title-only or subtitle text.",
+)
 @click.option("--dry-run", is_flag=True, help="Show selected rows without calling the LLM.")
 @click.option(
     "--web-search/--no-web-search",
@@ -891,6 +898,7 @@ def classify_source_tiers_cmd(
     selection: str,
     random_seed: int,
     force: bool,
+    candidate_source: str,
     dry_run: bool,
     web_search: bool,
     no_export: bool,
@@ -910,6 +918,7 @@ def classify_source_tiers_cmd(
             selection=selection,
             random_seed=random_seed,
             force=force,
+            candidate_source=candidate_source,
             dry_run=dry_run,
             web_search=web_search,
             export_path=None if no_export else Path(output),
@@ -930,6 +939,45 @@ def classify_source_tiers_cmd(
         click.echo(f"Labeled {result.labeled_count} source-title rows.")
     if result.export_path and not result.dry_run:
         click.echo(f"Exported {result.exported_count} labels to {result.export_path}")
+
+
+@cli.command("source-tier-distribution")
+@click.option(
+    "--min-confidence",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=0.0,
+    show_default=True,
+    help="Minimum LLM confidence for a row to count as labeled.",
+)
+@click.option(
+    "--min-labeled",
+    "--min-labeled-per-source",
+    type=click.IntRange(min=1),
+    default=100,
+    show_default=True,
+    help="Minimum total labeled rows before source-tier calibration is ready.",
+)
+def source_tier_distribution_cmd(
+    min_confidence: float,
+    min_labeled: int,
+):
+    """Report the combined source-tier distribution for calibration."""
+    from subtitle_generator.source_tier_enrichment import (
+        format_source_tier_distribution_report,
+        load_source_tier_distribution,
+    )
+
+    conn = get_db()
+    try:
+        rows = load_source_tier_distribution(conn, min_confidence=min_confidence)
+    finally:
+        conn.close()
+    click.echo(
+        format_source_tier_distribution_report(
+            rows,
+            min_labeled=min_labeled,
+        )
+    )
 
 
 @cli.command("build-db")

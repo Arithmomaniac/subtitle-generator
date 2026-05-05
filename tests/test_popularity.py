@@ -192,6 +192,8 @@ def test_export_import_roundtrip():
         )
     """)
     conn.execute("INSERT INTO subtitles VALUES (1, 'Test Book', 'A Test Subtitle', 'openlibrary')")
+    conn.execute("INSERT INTO config VALUES ('z_export_order_probe', 'last')")
+    conn.execute("INSERT INTO config VALUES ('a_export_order_probe', 'first')")
     conn.execute("INSERT INTO config VALUES ('tone_target_pop_list_item', '0.77')")
     conn.commit()
 
@@ -224,6 +226,9 @@ def test_export_import_roundtrip():
             assert all(
                 not row["key"].startswith("tone_target_") for row in config_rows
             )
+            assert [row["key"] for row in config_rows] == sorted(
+                row["key"] for row in config_rows
+            )
 
         # Import into mini DB
         mini_path = tmp_path / "mini.db"
@@ -245,6 +250,169 @@ def test_export_import_roundtrip():
         mini.close()
 
     print("  PASS: export_import_roundtrip")
+
+
+def test_export_data_filters_stale_pattern_sources(tmp_path):
+    """Export uses only slot/source rows backed by current valid pattern matches."""
+    import csv
+
+    from subtitle_generator.export_db import export_data
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            centroid_dot REAL,
+            norm_sq REAL,
+            token_count INTEGER,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        );
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE subtitles (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT,
+            source_file TEXT
+        );
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            subtitle_id INTEGER,
+            list_items_json TEXT
+        );
+        CREATE TABLE slot_filler_sources (
+            slot_filler_id INTEGER NOT NULL,
+            subtitle_id INTEGER NOT NULL
+        );
+        INSERT INTO subtitles VALUES
+            (10, 'Stale Source', 'A, B, C, D, and the Making of Noise', 'openlibrary'),
+            (11, 'Current Source', 'A, B, and the Making of Signal', 'openlibrary');
+        INSERT INTO pattern_matches VALUES
+            (100, 10, '["A", "B", "C", "D"]'),
+            (101, 11, '["A", "B"]');
+        INSERT INTO slot_fillers (
+            id, slot_type, filler, mode, source_subtitle_id, freq,
+            popularity_score, popularity_level, popularity_confidence
+        )
+        VALUES
+            (1, 'action_noun', 'Noise', 'strict', 10, 1, 0.1, 1, 1.0),
+            (2, 'action_noun', 'Signal', 'strict', 10, 2, 0.2, 1, 1.0);
+        INSERT INTO slot_filler_sources VALUES
+            (1, 10),
+            (2, 10),
+            (2, 11);
+        """
+    )
+    conn.commit()
+
+    stats = export_data(conn, tmp_path)
+    assert stats["slot_fillers.csv"] == 1
+    assert stats["sources.csv"] == 1
+
+    with open(tmp_path / "slot_fillers.csv", encoding="utf-8") as f:
+        slot_rows = list(csv.DictReader(f))
+    assert [row["filler"] for row in slot_rows] == ["Signal"]
+    assert slot_rows[0]["source_subtitle_id"] == "11"
+
+    with open(tmp_path / "sources.csv", encoding="utf-8") as f:
+        source_rows = list(csv.DictReader(f))
+    assert source_rows == [{
+        "slot_filler_id": "2",
+        "title": "Current Source",
+        "subtitle_text": "A, B, and the Making of Signal",
+        "source_tag": "OL",
+    }]
+
+
+def test_export_data_keeps_title_derived_source_title_only(tmp_path):
+    """Title-derived source rows should not export duplicated title/subtitle text."""
+    import csv
+
+    from subtitle_generator.export_db import export_data
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            centroid_dot REAL,
+            norm_sq REAL,
+            token_count INTEGER,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        );
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE subtitles (
+            id INTEGER PRIMARY KEY,
+            title TEXT,
+            subtitle TEXT,
+            source_file TEXT
+        );
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            subtitle_id INTEGER,
+            subtitle TEXT,
+            list_items_json TEXT,
+            candidate_source TEXT
+        );
+        INSERT INTO subtitles VALUES (
+            20,
+            'Race, Power, and the Rise of Empire',
+            '',
+            'openlibrary'
+        );
+        INSERT INTO pattern_matches VALUES (
+            200,
+            20,
+            'Race, Power, and the Rise of Empire',
+            '["Race", "Power"]',
+            'title'
+        );
+        INSERT INTO slot_fillers (
+            id, slot_type, filler, mode, source_subtitle_id, freq,
+            popularity_score, popularity_level, popularity_confidence
+        )
+        VALUES (1, 'action_noun', 'Rise', 'strict', 20, 1, 0.2, 1, 1.0);
+        """
+    )
+    conn.commit()
+
+    stats = export_data(conn, tmp_path)
+
+    assert stats["sources.csv"] == 1
+    with open(tmp_path / "sources.csv", encoding="utf-8") as f:
+        source_rows = list(csv.DictReader(f))
+    assert source_rows == [{
+        "slot_filler_id": "1",
+        "title": "Race, Power, and the Rise of Empire",
+        "subtitle_text": "",
+        "source_tag": "OL",
+    }]
 
 
 def test_jacket_accessibility_blend():
@@ -444,6 +612,173 @@ def test_source_tier_candidate_selection_is_seeded_and_resumable():
     assert first_random == second_random
     assert {candidate.id for candidate in first_random} == {2, 3, 4}
     assert [candidate.id for candidate in forced] == [1, 2, 3, 4]
+
+
+def test_source_tier_title_candidates_render_with_blank_subtitle(tmp_path):
+    import csv
+
+    from subtitle_generator.source_tier_enrichment import (
+        ensure_source_tier_label_columns,
+        export_source_tier_labels,
+        format_source_tier_distribution_report,
+        load_source_tier_distribution,
+        load_source_tier_candidates,
+    )
+    from subtitle_generator.tier_diagnostics import load_source_tier_label_cases
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            subtitle_id INTEGER,
+            title TEXT,
+            subtitle TEXT,
+            candidate_source TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?, ?, ?)",
+        [
+            (
+                1,
+                101,
+                "Race, Power, and the Rise of Empire",
+                "Race, Power, and the Rise of Empire",
+                "title",
+            ),
+            (
+                2,
+                102,
+                "Book B",
+                "Helmontian Chymistry, Law, and the Making of Europe",
+                "subtitle",
+            ),
+        ],
+    )
+    ensure_source_tier_label_columns(conn)
+    conn.execute(
+        """
+        UPDATE pattern_matches
+        SET llm_market_tier = 'pop',
+            llm_market_tier_confidence = 0.9,
+            llm_market_tier_rationale = 'Checked.'
+        WHERE id = 1
+        """
+    )
+    conn.commit()
+
+    candidates = load_source_tier_candidates(
+        conn,
+        limit=2,
+        selection="id",
+        force=True,
+    )
+    assert [(candidate.id, candidate.subtitle) for candidate in candidates] == [
+        (1, ""),
+        (2, "Helmontian Chymistry, Law, and the Making of Europe"),
+    ]
+    title_candidates = load_source_tier_candidates(
+        conn,
+        limit=2,
+        selection="id",
+        force=True,
+        candidate_source="title",
+    )
+    assert [(candidate.id, candidate.subtitle) for candidate in title_candidates] == [
+        (1, "")
+    ]
+
+    cases = load_source_tier_label_cases(conn)
+    assert [(case.title, case.subtitle) for case in cases] == [
+        ("Race, Power, and the Rise of Empire", "")
+    ]
+
+    export_path = tmp_path / "source_tier_labels.csv"
+    assert export_source_tier_labels(conn, export_path) == 1
+    with open(export_path, encoding="utf-8") as f:
+        exported = list(csv.DictReader(f))
+    assert exported[0]["title"] == "Race, Power, and the Rise of Empire"
+    assert exported[0]["subtitle"] == ""
+
+    distribution = load_source_tier_distribution(conn)
+    report = format_source_tier_distribution_report(
+        distribution,
+        min_labeled=2,
+    )
+    assert "title,1,1,0,1,0,0,1.000,0.000,0.000" in report
+    assert "subtitle,1,0,1,0,0,0,0.000,0.000,0.000" in report
+    assert "Gate: NEEDS_LABELS" in report
+
+
+def test_source_tier_distribution_reports_combined_unitary_gate():
+    from subtitle_generator.source_tier_enrichment import (
+        SourceTierDistributionRow,
+        format_source_tier_distribution_report,
+    )
+
+    report = format_source_tier_distribution_report(
+        (
+            SourceTierDistributionRow(
+                candidate_source="subtitle",
+                total_count=100,
+                labeled_count=100,
+                unlabeled_count=0,
+                pop_count=10,
+                mainstream_count=40,
+                niche_count=50,
+            ),
+            SourceTierDistributionRow(
+                candidate_source="title",
+                total_count=20,
+                labeled_count=20,
+                unlabeled_count=0,
+                pop_count=15,
+                mainstream_count=5,
+                niche_count=0,
+            ),
+        ),
+        min_labeled=10,
+    )
+
+    assert "Gate: SOURCE_TIER_READY" in report
+    assert "Combined post-rebuild shares:" in report
+    assert "Combined median tier:" in report
+
+
+def test_source_tier_distribution_combines_labeled_rows_not_total_rows():
+    from subtitle_generator.source_tier_enrichment import (
+        SourceTierDistributionRow,
+        format_source_tier_distribution_report,
+    )
+
+    report = format_source_tier_distribution_report(
+        (
+            SourceTierDistributionRow(
+                candidate_source="subtitle",
+                total_count=5000,
+                labeled_count=4000,
+                unlabeled_count=1000,
+                pop_count=600,
+                mainstream_count=1400,
+                niche_count=2000,
+            ),
+            SourceTierDistributionRow(
+                candidate_source="title",
+                total_count=10000,
+                labeled_count=50,
+                unlabeled_count=9950,
+                pop_count=15,
+                mainstream_count=10,
+                niche_count=25,
+            ),
+        ),
+        min_labeled=100,
+    )
+
+    assert "Combined post-rebuild shares: pop=0.152, mainstream=0.348, niche=0.500" in report
+    assert "Combined rows: total=15000, labeled=4050, unlabeled=10950" in report
 
 
 def test_classify_source_tiers_persists_and_exports_labels(tmp_path):

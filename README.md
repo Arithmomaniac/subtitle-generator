@@ -26,8 +26,8 @@ Celebrity Culture, Theology, and the Collapse of New England
 ## How it works
 
 1. **Download** ~25M MARC records from the LOC bulk distribution (43 files, ~9 GB) and/or ~35M edition records from Open Library (~9.2 GB)
-2. **Extract** 11M+ English subtitles into SQLite (with cross-source deduplication and repair of repeated title/subtitle corruption)
-3. **Pattern match** subtitles matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation. Source subtitles may contribute either two or three list clauses; generated subtitles still use two list slots.
+2. **Extract** 11M+ English source rows into SQLite (with cross-source deduplication and repair of repeated title/subtitle corruption). Records can enter as subtitle-derived candidates or title-derived candidates when the title itself matches the subtitle pattern.
+3. **Pattern match** candidate text matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation. Source subtitles may contribute either two or three list clauses; generated subtitles still use two list slots.
 4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing. Articles (a/an/the) are stripped and stored separately for re-insertion at generation time.
 5. **Score and tune** fillers with popularity, tone, article, and remix parameters stored in SQLite config rows with Python contract views.
 6. **Generate** by randomly drawing one filler per slot — weighted by corpus frequency, popularity, and tone targets. Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
@@ -55,6 +55,9 @@ uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, Trove,
 uv run subtitle-gen populate-popularity         # compute composite scores
 uv run subtitle-gen precompute-vectors          # remix scalar/vector state
 uv run subtitle-gen validate-pipeline           # read-only readiness checks
+uv run subtitle-gen export-data -o api\data     # write runtime CSV artifacts
+uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
+pwsh -File scripts\run-local-e2e.ps1            # browser/API verification
 ```
 
 ### Pipeline contracts and validation
@@ -63,8 +66,8 @@ The pipeline has explicit contract modules for the cross-stage state that feeds 
 
 | Stage | Inputs | Outputs / contracts |
 |---|---|---|
-| Source ingestion | LOC MARC files and Open Library dumps | `subtitles` rows with ISBN/source metadata |
-| Slot extraction | Subtitle patterns plus spaCy validation | `pattern_matches` and strict `slot_fillers` candidates |
+| Source ingestion | LOC MARC files and Open Library dumps | `subtitles` rows with ISBN/source metadata plus `candidate_text` / `candidate_source` provenance |
+| Slot extraction | Title/subtitle pattern candidates plus spaCy validation | `pattern_matches` and strict `slot_fillers` candidates |
 | Popularity scoring | SPL, Open Library, Goodreads, NYT, Ottawa/library, Trove, and corpus frequency signals | `popularity_data.composite_score`, filler `popularity_score`, and calibrated threshold config values |
 | Remix precompute | Strict of-object fillers, spaCy vectors, article statistics | remix classifications, vector/scalar columns, embedding config keys |
 | Tuning | Generated samples, human ratings, LLM ratings, and strict proposal schemas | accepted config changes, rollback-capable proposal records, and rating snapshots |
@@ -75,7 +78,10 @@ Use `uv run subtitle-gen validate-pipeline` before tuning, serving, or exporting
 ### Slot extraction quality gates
 
 `build-slots` treats the broad regex match as a candidate, not as proof that a
-subtitle is usable. A candidate is accepted only after these gates:
+source row is usable. It parses `subtitles.candidate_text`, while `subtitles.title`
+and `subtitles.subtitle` remain source-display metadata. Title-derived rows keep
+an empty source subtitle, so exports and runtime sources render as title-only
+rather than `Title: Title`. A candidate is accepted only after these gates:
 
 | Gate | Behavior |
 |---|---|
@@ -87,7 +93,7 @@ subtitle is usable. A candidate is accepted only after these gates:
 `pattern_matches` contains the clean NLP-validated matches that survived these
 gates. Downstream source attribution, filler popularity, article statistics,
 calibration, remix precompute, export, and serving should be rebuilt from that
-clean set after slot-filter changes.
+clean set after slot-filter or candidate-ingestion changes.
 
 Model and weight state is grouped by purpose rather than treated as one loose dictionary:
 
@@ -115,6 +121,8 @@ Run `subtitle-gen <command> --help` for full options on any command.
 Trove Australia is an optional API-keyed popularity source. Set
 `TROVE_API_KEY` or pass `--trove-api-key`, then run a small resumable sample
 with `uv run subtitle-gen download-popularity --sources trove --trove-limit 100`.
+For rebuilds after slot-source changes, use `--trove-target-mode slot-sources`
+so Trove only refreshes ISBNs attached to current strict valid sources.
 The lookup stores `holdingsCount` as Australian library breadth; physical copy
 counts are marked as proxies unless Trove exposes exact copy fields.
 
@@ -139,7 +147,7 @@ The frontend is a thin Alpine.js client (`web/index.html`) calling the Python AP
 
 ```bash
 uv sync --extra e2e
-uv run playwright install chromium
+uv run playwright install --with-deps chromium
 pwsh -File scripts/run-local-e2e.ps1
 ```
 
@@ -212,6 +220,7 @@ Source-title tier labels can be populated separately for calibration/evaluation:
 uv sync --extra tune
 uv run subtitle-gen classify-source-tiers --dry-run --limit 20
 uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10
+uv run subtitle-gen source-tier-distribution
 ```
 
 `classify-source-tiers` stores labels on `pattern_matches.llm_market_tier*` and
@@ -225,6 +234,10 @@ Pass `--no-web-search` to fall back to title/subtitle-only structured labeling.
 The reusable Copilot MCP bridge lives in `subtitle_generator.copilot_web_search`
 as a plain importable module for future scripts/tools; no FastMCP server is
 required for this workflow.
+
+Use `--candidate-source title` or `--candidate-source subtitle` when you need a
+targeted labeling batch. `source-tier-distribution` reports the title/subtitle
+breakdown and the combined post-rebuild distribution used for calibration.
 
 Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 
@@ -242,6 +255,7 @@ Tuning goals and parameter bounds are documented in `tuning_goals.md`.
 | `jacket` | Standalone jacket generation |
 | `calibrate-remix` | Auto-tune remix parameters via LLM rating |
 | `classify-source-tiers` | LLM-label real source-title market tiers for calibration/evaluation |
+| `source-tier-distribution` | Report source-tier label coverage and the combined post-rebuild calibration mix |
 | `tune` | Autoresearch tuning loop (remix + tone parameters) |
 | `review` | Interactive subtitle rating session |
 | `precompute-vectors` | Recompute remix vector/scalar state after slot extraction changes |
