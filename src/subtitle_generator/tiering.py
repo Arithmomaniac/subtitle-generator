@@ -9,7 +9,9 @@ from dataclasses import dataclass
 
 from subtitle_generator.config import load_tuning_config
 
-TIER_NAMES = frozenset({"pop", "mainstream", "niche"})
+TIER_NAMES = ("pop", "mainstream", "niche")
+_TIER_VALUES = {"pop": 1.0, "mainstream": 0.55, "niche": 0.1}
+_TIER_TIE_BREAK = {"pop": 0, "mainstream": 1, "niche": 2}
 
 _SUBTITLE_RE = re.compile(
     r"^(?P<list_part>.+,\s*.+?)\s*,?\s+and\s+(?:the|a|an)\s+"
@@ -33,6 +35,9 @@ class SlotEvidence:
     popularity_confidence: float
     frequency_score: float
     blended_score: float
+    model_score_pop: float | None = None
+    model_score_mainstream: float | None = None
+    model_score_niche: float | None = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,35 @@ def compute_tier_evidence(
         _lookup_slot_evidence(conn, slot, blend, missing_default)
         for slot in slots
     )
+    model_scores = _aggregate_model_scores(slot_evidence)
+    if model_scores:
+        tier = max(
+            TIER_NAMES,
+            key=lambda name: (model_scores[name], _TIER_TIE_BREAK[name]),
+        )
+        accessibility = sum(model_scores[name] * _TIER_VALUES[name] for name in TIER_NAMES)
+        lower_tail = min(
+            sum(
+                _slot_model_scores(slot)[name] * _TIER_VALUES[name]
+                for name in TIER_NAMES
+            )
+            for slot in slot_evidence
+            if _slot_model_scores(slot)
+        )
+        demand_confidence = sum(
+            max(_slot_model_scores(slot).values())
+            for slot in slot_evidence
+            if _slot_model_scores(slot)
+        ) / len(slot_evidence)
+        return TierEvidence(
+            subtitle=subtitle,
+            tier=tier,
+            accessibility_score=accessibility,
+            lower_tail_score=lower_tail,
+            demand_confidence=demand_confidence,
+            slots=slot_evidence,
+        )
+
     blended_scores = [slot.blended_score for slot in slot_evidence]
     accessibility = sum(blended_scores) / len(blended_scores)
     sorted_scores = sorted(blended_scores)
@@ -151,6 +185,8 @@ def _lookup_slot_evidence(
         "popularity_confidence": "popularity_confidence",
     }
     selected = ["freq"]
+    if "id" in columns:
+        selected.insert(0, "id")
     selected.extend(column for column in optional_columns if column in columns)
     where = "slot_type = ? AND filler = ? COLLATE NOCASE"
     order = "ORDER BY "
@@ -167,12 +203,14 @@ def _lookup_slot_evidence(
         return _default_slot_evidence(slot, blend, missing_default)
 
     values = dict(zip(selected, row, strict=True))
+    filler_id = int(values["id"]) if "id" in values else None
     freq = int(values["freq"] or 1)
     popularity_score = values.get("popularity_score")
     popularity_level = int(values.get("popularity_level") or 0)
     popularity_confidence = float(values.get("popularity_confidence") or 0.0)
     freq_score = math.log10(1 + max(freq, 0))
     blended = classification_score(freq, popularity_score, blend, missing_default)
+    model_scores = _lookup_model_scores(conn, filler_id) if filler_id is not None else None
     return SlotEvidence(
         slot_type=slot.slot_type,
         filler=slot.filler,
@@ -182,6 +220,9 @@ def _lookup_slot_evidence(
         popularity_confidence=popularity_confidence,
         frequency_score=freq_score,
         blended_score=blended,
+        model_score_pop=model_scores.get("pop") if model_scores else None,
+        model_score_mainstream=model_scores.get("mainstream") if model_scores else None,
+        model_score_niche=model_scores.get("niche") if model_scores else None,
     )
 
 
@@ -203,6 +244,55 @@ def _default_slot_evidence(
         frequency_score=freq_score,
         blended_score=blended,
     )
+
+
+def _lookup_model_scores(conn: sqlite3.Connection, slot_filler_id: int) -> dict[str, float] | None:
+    if "slot_filler_model_scores" not in _tables(conn):
+        return None
+    row = conn.execute(
+        """
+        SELECT score_pop, score_mainstream, score_niche
+        FROM slot_filler_model_scores
+        WHERE slot_filler_id = ?
+        """,
+        (slot_filler_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"pop": float(row[0]), "mainstream": float(row[1]), "niche": float(row[2])}
+
+
+def _slot_model_scores(slot: SlotEvidence) -> dict[str, float]:
+    if (
+        slot.model_score_pop is None
+        or slot.model_score_mainstream is None
+        or slot.model_score_niche is None
+    ):
+        return {}
+    return {
+        "pop": slot.model_score_pop,
+        "mainstream": slot.model_score_mainstream,
+        "niche": slot.model_score_niche,
+    }
+
+
+def _aggregate_model_scores(slots: tuple[SlotEvidence, ...]) -> dict[str, float]:
+    per_slot = [_slot_model_scores(slot) for slot in slots]
+    per_slot = [scores for scores in per_slot if scores]
+    if len(per_slot) != len(slots):
+        return {}
+    return {
+        tier: sum(scores[tier] for scores in per_slot) / len(per_slot)
+        for tier in TIER_NAMES
+    }
+
+
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
 
 
 def _columns(conn: sqlite3.Connection, table: str) -> set[str]:

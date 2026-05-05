@@ -1,325 +1,265 @@
 # subtitle-generator
 
-Generate bizarre book subtitles in the pop-nonfiction pattern — *"X, Y, and the Z of W"* — by mining real parts from the Library of Congress MARC database and Open Library, then recombining them slot-machine style. Supports article variants (*"and a/an Z"*) and articles before of-objects (*"of the W"*) based on corpus statistics.
+Generate strange pop-nonfiction subtitles in the pattern:
 
-Optionally generate a **full book jacket** with title, back cover copy, trade journal reviews, and endorsement blurbs from real people — powered by the GitHub Copilot SDK.
+```text
+X, Y, and the Z of W
+```
+
+The project mines real book titles and subtitles from Library of Congress and Open Library data, extracts reusable slot fillers, classifies those fillers into pop/mainstream/niche tiers, and recombines them into new subtitles. The intended result is coherent grammar with surreal nonfiction energy: "Genius of Emissions Trading" is good; broken artifacts like "the Challenge of Christian" are not.
+
+## Current runtime model
+
+Generation now separates two concerns:
+
+| Concern | Runtime behavior |
+|---|---|
+| **Categorization** | Learned book-model probabilities classify each existing slot filler as pop, mainstream, or niche. |
+| **Generation** | The generator still samples from the same validated filler universe; requested tone tiers weight fillers by the learned probability for that tier. |
+| **Guardrail** | A narrow literal-artifact filter removes broken strings and malformed final objects without rejecting funny conceptual collisions. |
+
+The deployment artifact includes `api\data\slot_filler_model_scores.csv` and `api\data\subtitles.mini.db`. The mini DB is built from tracked CSVs, so deployed Azure Functions do not need the full local SQLite database.
 
 ## Examples
 
-**Random subtitles:**
-```
+```text
 Jefferson, Repression, and the Category of Scripture in Lurianic Kabbala
 Greed, Grit, and the Rise of the American Dream
 Faith, Hope, and a Healthy Dose of Laughter
 Celebrity Culture, Theology, and the Collapse of New England
+Hamas, Hard Power, and the Genius of Emissions Trading
 ```
 
-**Full book jacket** (with `--jacket`):
+The optional jacket generator turns a subtitle into a full book-jacket prompt or local LLM-backed jacket:
 
-> **Holy Nation**
-> *Professionals, Pagan Authors, and the Sacramental Vision of the Nation State*
->
-> *Publishers Weekly* — "This compact, argument-driven study contends that modern political life cannot be understood apart from its spiritual assumptions..."
->
-> *Ross Douthat* (NYT columnist) — "A sharp and unusually serious book about the truth everyone keeps trying to avoid..."
-
-## How it works
-
-1. **Download** ~25M MARC records from the LOC bulk distribution (43 files, ~9 GB) and/or ~35M edition records from Open Library (~9.2 GB)
-2. **Extract** 11M+ English source rows into SQLite (with cross-source deduplication and repair of repeated title/subtitle corruption). Records can enter as subtitle-derived candidates or title-derived candidates when the title itself matches the subtitle pattern.
-3. **Pattern match** candidate text matching "X, Y, and [the/a/an] Z of [the/a/an] W" using regex + spaCy NLP validation. Source subtitles may contribute either two or three list clauses; generated subtitles still use two list slots.
-4. **Decompose** into typed slots: list items, action nouns, of-objects — plus sub-parts (modifiers, heads, prepositional complements) for remixing. Articles (a/an/the) are stripped and stored separately for re-insertion at generation time.
-5. **Score and tune** fillers with popularity, tone, article, and remix parameters stored in SQLite config rows with Python contract views.
-6. **Generate** by randomly drawing one filler per slot — weighted by corpus frequency, popularity, and tone targets. Multi-word of-objects can be remixed into novel combinations (e.g., "New York" + "kitsch" from different books)
-7. **Jacket** (optional) — send the subtitle to an LLM (via Copilot SDK) to generate a full book jacket with trade journal reviews and endorsement blurbs from real people
+```text
+Holy Nation
+Professionals, Pagan Authors, and the Sacramental Vision of the Nation State
+```
 
 ## Setup
 
-```bash
+```powershell
 git clone https://github.com/Arithmomaniac/subtitle-generator.git
-cd subtitle-generator
+Set-Location subtitle-generator
 uv sync
 ```
 
-## Pipeline
+Optional extras:
 
-Run these in order to build the database from scratch:
-
-```bash
-uv run subtitle-gen download --parts all       # LOC MARC (~9 GB)
-uv run subtitle-gen extract                     # parse into SQLite
-uv run subtitle-gen download-ol                 # Open Library (~9.2 GB)
-uv run subtitle-gen extract-ol                  # parse + deduplicate
-uv run subtitle-gen build-slots                 # extract slot fillers
-uv run subtitle-gen download-popularity         # SPL, Goodreads, Ottawa, Trove, etc.
-uv run subtitle-gen populate-popularity         # compute composite scores
-uv run subtitle-gen precompute-vectors          # remix scalar/vector state
-uv run subtitle-gen validate-pipeline           # read-only readiness checks
-uv run subtitle-gen export-data -o api\data     # write runtime CSV artifacts
-uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
-pwsh -File scripts\run-local-e2e.ps1            # browser/API verification
-```
-
-### Pipeline contracts and validation
-
-The pipeline has explicit contract modules for the cross-stage state that feeds generation and serving:
-
-| Stage | Inputs | Outputs / contracts |
-|---|---|---|
-| Source ingestion | LOC MARC files and Open Library dumps | `subtitles` rows with ISBN/source metadata plus `candidate_text` / `candidate_source` provenance |
-| Slot extraction | Title/subtitle pattern candidates plus spaCy validation | `pattern_matches` and strict `slot_fillers` candidates |
-| Popularity scoring | SPL, Open Library, Goodreads, NYT, Ottawa/library, Trove, and corpus frequency signals | `popularity_data.composite_score`, filler `popularity_score`, and calibrated threshold config values |
-| Remix precompute | Strict of-object fillers, spaCy vectors, article statistics | remix classifications, vector/scalar columns, embedding config keys |
-| Tuning | Generated samples, human ratings, LLM ratings, and strict proposal schemas | accepted config changes, rollback-capable proposal records, and rating snapshots |
-| Runtime/serving | Validated SQLite state and request parameters | `GeneratedSubtitle`, `subtitle_to_dict()`, CLI output, local HTTP, and Azure Functions payloads |
-
-Use `uv run subtitle-gen validate-pipeline` before tuning, serving, or exporting. It is read-only and fails non-zero when required tables/columns, config values, remix precompute state, popularity coverage, model IDs, or serving handlers are not ready.
-
-### Slot extraction quality gates
-
-`build-slots` treats the broad regex match as a candidate, not as proof that a
-source row is usable. It parses `subtitles.candidate_text`, while `subtitles.title`
-and `subtitles.subtitle` remain source-display metadata. Title-derived rows keep
-an empty source subtitle, so exports and runtime sources render as title-only
-rather than `Title: Title`. A candidate is accepted only after these gates:
-
-| Gate | Behavior |
+| Extra | Use |
 |---|---|
-| List shape | Accept exactly two or three original list clauses before the final `and the/a/an ... of ...` clause. Reject four or more clauses. |
-| List item validation | Reject the whole candidate if any original list clause fails cleanup, artifact, weak/jargon, truncation, or spaCy noun/name validation. The pipeline no longer silently drops bad list items and keeps the rest. |
-| Action/object validation | Reject weak action nouns, malformed of-objects, and SEO/prepositional object starts such as `using`, `with`, or `for`. |
-| Title/subtitle repair | Repair common `Title: Subtitle` duplication before validation. `Title: Subtitle Title: Subtitle` and `Title: Subtitle Subtitle` are uncorrupted to `Title` / `Subtitle` when possible; unrepairable repeated rows are rejected. |
+| `uv sync --extra e2e` | Playwright browser verification |
+| `uv sync --extra tune` | LiteLLM/Pydantic structured LLM tuning and review tools |
+| `uv sync --extra deploy` | Azure Table Storage rating sync |
+| `uv sync --extra ml` | Torch book-model training/distillation |
 
-`pattern_matches` contains the clean NLP-validated matches that survived these
-gates. Downstream source attribution, filler popularity, article statistics,
-calibration, remix precompute, export, and serving should be rebuilt from that
-clean set after slot-filter or candidate-ingestion changes.
+## Daily use
 
-Model and weight state is grouped by purpose rather than treated as one loose dictionary:
-
-| Family | Examples |
-|---|---|
-| LLM models | rating model `github_copilot/gpt-5.4-mini`, proposal model `github_copilot/gpt-5.4`, jacket model `gpt-5.4-mini`, responses-only model family |
-| Sampling and tone | weighted sample spread, bias floor, tone targets, tier centers, accessibility thresholds |
-| Popularity | source weights for SPL/Open Library/Goodreads/NYT/library/Trove/frequency, exponent, blend defaults, slot multipliers |
-| Article and remix | article frequency thresholds, remix heuristic threshold, double-`of` rejection toggle, calibrated remix probability and similarity thresholds |
-
-## Usage
-
-### CLI
-
-```bash
-uv run subtitle-gen generate                    # 10 random subtitles
-uv run subtitle-gen generate --sources          # show source books
-uv run subtitle-gen generate --tone pop         # bias toward accessible
-uv run subtitle-gen generate --jacket           # subtitle + full jacket
+```powershell
+uv run subtitle-gen generate
+uv run subtitle-gen generate --tone pop
+uv run subtitle-gen generate --tone mainstream --sources
+uv run subtitle-gen generate --tone niche --jacket
 uv run subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
+uv run subtitle-gen serve --no-open
 ```
 
-Run `subtitle-gen <command> --help` for full options on any command.
+The local web app runs on `http://127.0.0.1:8742` by default. It exposes the same generation path as the CLI, plus source display, rating tags, prompt building, remix details, and a local-only spot-check page.
 
-Trove Australia is an optional API-keyed popularity source. Set
-`TROVE_API_KEY` or pass `--trove-api-key`, then run a small resumable sample
-with `uv run subtitle-gen download-popularity --sources trove --trove-limit 100`.
-For rebuilds after slot-source changes, use `--trove-target-mode slot-sources`
-so Trove only refreshes ISBNs attached to current strict valid sources.
-The lookup stores `holdingsCount` as Australian library breadth; physical copy
-counts are marked as proxies unless Trove exposes exact copy fields.
+## Build pipeline
 
-### Web app
+Run the full data pipeline only when rebuilding the corpus from raw data:
 
-**Live demo:** [subtitlegenst.z13.web.core.windows.net](https://subtitlegenst.z13.web.core.windows.net/)
-
-```bash
-uv run subtitle-gen serve                       # start on localhost:8742
+```powershell
+uv run subtitle-gen download --parts all
+uv run subtitle-gen extract
+uv run subtitle-gen download-ol
+uv run subtitle-gen extract-ol
+uv run subtitle-gen build-slots
+uv run subtitle-gen download-popularity
+uv run subtitle-gen populate-popularity
+uv run subtitle-gen precompute-vectors
+uv run subtitle-gen validate-pipeline
 ```
 
-The web app provides an interactive UI with:
-- Tone selection and settings panel
-- Color-coded slot display with remix sub-parts
-- Jacket generation with live progress streaming
-- Rendered markdown output with Copy Markdown / Copy HTML buttons
-- Dynamic model picker (queries available Copilot SDK models)
+The pipeline stages are contract-checked. `validate-pipeline` is read-only and verifies schema, config, remix precompute state, popularity coverage, model IDs, and serving readiness.
 
-The frontend is a thin Alpine.js client (`web/index.html`) calling the Python API — all generation logic stays server-side.
+## Book-model tiering workflow
 
-### Local browser verification
+The learned runtime categorizer is produced offline, then installed as slot-filler probabilities.
 
-```bash
-uv sync --extra e2e
+```powershell
+uv sync --extra ml --extra tune
+
+# Build training artifacts from labeled source books and enrichment data.
+uv run subtitle-gen build-book-features
+
+# Train/evaluate richer local models and export distilled runtime scores.
+uv run subtitle-gen train-book-model-torch
+uv run subtitle-gen distill-book-model
+uv run subtitle-gen shadow-book-model
+
+# Install the selected export-slot rollup into the local DB.
+uv run subtitle-gen install-book-model-scores `
+  --input generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv
+```
+
+The runtime table is `slot_filler_model_scores`:
+
+| Column | Meaning |
+|---|---|
+| `slot_filler_id` | References `slot_fillers.id`. |
+| `score_pop` | Probability-like score that this filler belongs in pop-accessible generation. |
+| `score_mainstream` | Probability-like score for mainstream generation. |
+| `score_niche` | Probability-like score for niche generation. |
+| `model_tier` | Highest-scoring learned tier. |
+| `source_prediction_count` | Number of source-book predictions that contributed to the rollup. |
+
+Mini DB builds reject partial model-score coverage when `slot_filler_model_scores.csv` is present. This keeps deployment from silently mixing learned-tier and legacy sampling scales.
+
+## Export and deployment artifacts
+
+After rebuilding slots, popularity, remix vectors, or model scores, regenerate the tracked runtime data:
+
+```powershell
+uv run subtitle-gen export-data -o api\data
+uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
+```
+
+Tracked deployment inputs:
+
+| Path | Purpose |
+|---|---|
+| `api\data\slot_fillers.csv` | Validated strict filler universe and runtime scalar state. |
+| `api\data\slot_filler_model_scores.csv` | Learned tier probabilities used by generation and classification. |
+| `api\data\sources.csv` | Source-book attribution for generated slots. |
+| `api\data\config.csv` | Runtime tuning/config values. |
+| `api\data\subtitles.mini.db` | Built SQLite artifact used by local serving and Azure Functions. |
+
+## Local verification
+
+Run these before deploying runtime or web changes:
+
+```powershell
+uv run subtitle-gen validate-pipeline
+uv run ruff check
+uv run pytest -q
+uv sync --extra deploy --extra tune --extra e2e
 uv run playwright install --with-deps chromium
-pwsh -File scripts/run-local-e2e.ps1
+pwsh -File scripts\run-local-e2e.ps1
 ```
 
-The local e2e script starts the web app on `http://127.0.0.1:8742`, runs the Playwright tests, captures screenshots, and writes logs/artifacts to `test-results/local-e2e/`.
+`scripts\run-local-e2e.ps1` starts `subtitle-gen serve --no-open`, waits for readiness, captures before/after screenshots, runs the home-page flow, runs the local spot-check flow, and writes artifacts to `test-results\local-e2e\`.
 
-### Deployment
+## Browser e2e coverage
 
-The web app supports two modes:
+| File | Scope |
+|---|---|
+| `tests\test_e2e.py` | Home page, mode badge, generation, quality tags, sources, jacket prompt, copy button, settings, tier-filtered regeneration, GitHub link, remix display, mobile overflow, and deployed App Insights telemetry. |
+| `tests\test_e2e_spot_check.py` | Local spot-check page, batch loading, tier rating payloads, keyboard shortcuts, tag toggles, skip flow, summary, load more, hints, and back link. |
+| `scripts\run-local-e2e.ps1` | Local server lifecycle, readiness wait, screenshots, failure capture, and test orchestration. |
 
-| | Local | Deployed |
+To run against deployment manually:
+
+```powershell
+$env:BASE_URL = "https://subtitlegenst.z13.web.core.windows.net"
+uv run python tests\test_e2e.py
+```
+
+The spot-check test is local-only because those endpoints are not deployed.
+
+## GitHub Actions deployment
+
+Deployment is split into infrastructure and application workflows:
+
+| Workflow | Trigger | What it does |
 |---|---|---|
-| **Frontend** | Served by `subtitle-gen serve` | Azure Blob Storage static website |
-| **Backend** | stdlib HTTP server | Azure Functions (Flex Consumption) |
-| **Database** | Full 3 GB SQLite | Mini DB built from CSVs (no vectors) |
-| **Jacket** | Full LLM generation | Prompt-only (copy to your LLM) |
-| **Monitoring** | -- | App Insights + Log Analytics + email alerts |
+| `.github\workflows\deploy-infra.yml` | Push to `infra/**` or manual dispatch | Deploys Bicep resources, static website hosting, monitoring, alerts, and optional RBAC role assignments. |
+| `.github\workflows\deploy.yml` | Push to `master` touching `web/**`, `api/**`, `src/**`, or manual dispatch | Builds the mini DB from CSVs, deploys Azure Functions, uploads the static web app, runs smoke tests, and runs deployed e2e. |
 
-**Infrastructure as code** (Bicep): `infra/main.bicep` creates all Azure resources (storage, function app, monitoring, alerts).
+Required GitHub configuration:
 
-**Data pipeline**: slot data is exported as CSV files (tracked in Git), and the mini SQLite DB is built from them at deploy time:
+| Name | Type | Purpose |
+|---|---|---|
+| `AZURE_CLIENT_ID` | Secret | OIDC client ID for Azure login. |
+| `AZURE_TENANT_ID` | Secret | Azure tenant. |
+| `AZURE_SUBSCRIPTION_ID` | Secret | Azure subscription. |
+| `AZURE_FUNCTIONAPP_NAME` | Variable | Function app name, for example `subtitlegen-func`. |
+| `ALERT_EMAIL` | Secret or workflow input | Optional Azure Monitor alert recipient. |
 
-```bash
-uv run subtitle-gen export-data                 # dump CSVs (after rebuilding slots)
-uv run subtitle-gen build-db                    # build SQLite from CSVs (CI does this)
+The deploy workflow derives the static website storage account from the function app name. For the current production site, e2e targets `https://subtitlegenst.z13.web.core.windows.net`.
+
+## Feedback and tuning
+
+Interactive feedback is stored locally and can be synced from Azure Table Storage when deploy dependencies are installed:
+
+```powershell
+uv run subtitle-gen review
+uv run subtitle-gen generate --review
+uv sync --extra deploy
+uv run subtitle-gen pull-ratings --account subtitlegenst --since 2026-05-01
 ```
 
-**Deploy**:
-1. Configure OIDC: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as GitHub secrets
-2. Set `AZURE_FUNCTIONAPP_NAME` as a GitHub variable
-3. Run `deploy-infra.yml` workflow (creates Azure resources). Set `ALERT_EMAIL` or the workflow `alertEmail` input to enable Azure Monitor email alerts. Keep `deployRoleAssignments` enabled when the workflow identity has `Microsoft.Authorization/roleAssignments/write`; otherwise disable it and apply the documented Storage Blob/Table roles manually.
-4. Run `deploy.yml` workflow (deploys function app + frontend)
+Source-title tier labels are separate from generated-subtitle ratings:
 
-### Tone tiers
-
-The jacket prompt auto-adapts based on the subtitle's accessibility score (derived from filler corpus frequency):
-
-| Tier | Score | Voice | Examples |
-|------|-------|-------|----------|
-| **pop** | > 1.0 | Airport bookstore (Gladwell, Pollan, Bryson) | Race, Power, America |
-| **mainstream** | 0.5-1.0 | Indie bookstore (Solnit, Mishra, Sheldrake) | Tolkien, Brooklyn |
-| **niche** | < 0.5 | University press crossover (Princeton, Yale) | Helmontian Chymistry |
-
-### Remixing
-
-Multi-word of-objects (e.g., "Lurianic Kabbala", "Jews in America") are decomposed into sub-parts and can be recombined into novel pairings. This is enabled by default; use `--no-remix` for original of-objects only.
-
-Run `subtitle-gen calibrate-remix --help` to auto-tune remix parameters with LLM-based rating.
-
-### Tuning
-
-The system includes an autoresearch-inspired tuning loop that uses LLM evaluation to optimize tunable parameters (tone targets, sampling spread, popularity weights, article thresholds, etc.):
-
-```bash
-uv run subtitle-gen tune                        # full pipeline (remix + tone)
-uv run subtitle-gen tune --phase tone           # tone parameters only
-uv run subtitle-gen tune --spot-check           # with human spot-checks
-uv run subtitle-gen tune --show-results         # view experiment history
-```
-
-Human feedback can also be collected interactively and fed into the tuning loop:
-
-```bash
-uv run subtitle-gen review                      # rate 20 subtitles
-uv run subtitle-gen generate --review           # rate while generating
-```
-
-Source-title tier labels can be populated separately for calibration/evaluation:
-
-```bash
+```powershell
 uv sync --extra tune
 uv run subtitle-gen classify-source-tiers --dry-run --limit 20
 uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10
 uv run subtitle-gen source-tier-distribution
 ```
 
-`classify-source-tiers` stores labels on `pattern_matches.llm_market_tier*` and
-exports `api/data/source_tier_labels.csv` keyed by stable `subtitle_id` plus the
-current `pattern_match_id`. It uses the shared pop/mainstream/niche taxonomy
-from `market_tiers.py`, with source-label wording distinct from jacket-tone
-wording. By default, it uses hosted Responses `web_search` once per source
-title; the rationale includes whether the evidence was an exact match,
-weak/adjacent match, or no reliable match.
-Pass `--no-web-search` to fall back to title/subtitle-only structured labeling.
-The reusable Copilot MCP bridge lives in `subtitle_generator.copilot_web_search`
-as a plain importable module for future scripts/tools; no FastMCP server is
-required for this workflow.
+The source-label workflow writes `pattern_matches.llm_market_tier*` and exports `api\data\source_tier_labels.csv`.
 
-Use `--candidate-source title` or `--candidate-source subtitle` when you need a
-targeted labeling batch. `source-tier-distribution` reports the title/subtitle
-breakdown and the combined post-rebuild distribution used for calibration.
+## Architecture map
 
-Tuning goals and parameter bounds are documented in `tuning_goals.md`.
+```text
+src\subtitle_generator\
+  cli.py                         Click command surface
+  generate.py                    Runtime subtitle generation, remixing, guardrails
+  tiering.py                     Runtime pop/mainstream/niche evidence
+  slots.py                       Slot extraction and source cleanup gates
+  export_db.py                   CSV export and mini DB build
+  schema_contracts.py            Full and mini DB schema contracts
+  pipeline_validation.py         Read-only pipeline readiness checks
+  book_model_artifacts.py        Offline feature/label artifact builder
+  book_model_torch.py            Torch teacher training
+  book_model_distillation.py     Exportable runtime student models
+  book_model_shadow.py           Slot-filler rollups for runtime install
+  jacket.py                      Jacket prompt construction and local LLM execution
+  serve.py                       Local stdlib HTTP server
+  handlers.py                    Shared local/Azure request handlers
 
-## Commands
+api\
+  function_app.py                Azure Functions entry point
+  data\                          Tracked CSVs and built mini DB
 
-| Command | Description |
-|---|---|
-| `download` | Download LOC MARC bulk data files |
-| `download-ol` | Download Open Library editions dump |
-| `extract` | Parse MARC files into SQLite |
-| `extract-ol` | Parse Open Library dump (deduplicates against LOC) |
-| `analyze` | POS-tag subtitles, extract structural templates |
-| `build-slots` | Extract clean slot fillers (regex + NLP validated), article stats, and remix sub-parts |
-| `generate` | Random subtitle generation (+ optional jacket, review) |
-| `jacket` | Standalone jacket generation |
-| `calibrate-remix` | Auto-tune remix parameters via LLM rating |
-| `classify-source-tiers` | LLM-label real source-title market tiers for calibration/evaluation |
-| `source-tier-distribution` | Report source-tier label coverage and the combined post-rebuild calibration mix |
-| `tune` | Autoresearch tuning loop (remix + tone parameters) |
-| `review` | Interactive subtitle rating session |
-| `precompute-vectors` | Recompute remix vector/scalar state after slot extraction changes |
-| `serve` | Start the web app locally |
-| `export-db` | Export mini SQLite directly from full DB |
-| `export-data` | Export slot data as CSV files (for Git) |
-| `build-db` | Build mini SQLite from CSV files (for CI) |
-| `patterns` | Show discovered subtitle patterns by frequency |
-| `slots` | Show available slot fillers |
-| `download-popularity` | Download all popularity data sources (SPL, Goodreads, Ottawa, NYT, Trove) |
-| `populate-popularity` | Build ISBN mappings + compute composite popularity scores |
-| `validate-pipeline` | Run read-only pipeline readiness checks |
-
-## Architecture
-
-```
-src/subtitle_generator/
-  generate.py          # subtitle generation with remix + article logic
-  jacket.py            # jacket prompt construction + LLM execution
-  slots.py             # slot extraction + decomposition + article stats
-  source_validation.py # shared title/subtitle repair and source corruption checks
-  config.py            # centralized tuning parameters (20 params, DB-overridable)
-  calibrate.py         # LLM-based remix parameter tuning
-  tune.py              # autoresearch tuning loop (Karpathy-inspired)
-  eval_harness.py      # evaluation infrastructure (rating, tone separation, composite)
-  feedback.py          # human feedback collection + summarization for tuning
-  serve.py             # local HTTP server (stdlib)
-  export_db.py         # mini DB export for deployment
-  parameter_state.py   # typed views over model IDs and tunable parameter families
-  pipeline_validation.py # read-only pipeline readiness checks
-  remix_state.py       # remix precompute contracts and runtime context
-  schema_contracts.py  # stage-aware SQLite schema contracts
-  tuning_state.py      # tuning proposal, decision, and rollback state records
-  cli.py               # Click CLI entry point
-api/
-  function_app.py      # Azure Functions v2 (same Python modules)
-web/
-  index.html           # Alpine.js frontend (thin client)
-  js/services.js       # API layer (injectable fetch)
-  js/subtitle-vm.js    # Pure view-model functions
-  js/app.js            # Alpine x-data component
+web\
+  index.html                     Static Alpine.js app
+  js\                            Browser services/view-model modules
 ```
 
 ## Tech stack
 
-- **Python 3.13** with [uv](https://docs.astral.sh/uv/)
-- **pymarc** — MARC record parsing
-- **spaCy** (`en_core_web_md`) — NLP at build time (POS tagging, NER, word vectors for remix precomputation)
-- **SQLite** — subtitle storage and slot filler tables
-- **click** — CLI framework
-- **GitHub Copilot SDK** — LLM for jacket generation
-- **litellm** + **pydantic** — structured LLM output for tuning and calibration (optional, lazy-imported)
-- **Alpine.js** — reactive frontend (CDN, no build step)
-- **marked.js** — markdown rendering (CDN)
+- Python 3.13 and `uv`
+- SQLite for local corpus state and deployment mini DBs
+- spaCy for build-time NLP and remix precompute
+- Torch for optional offline book-tier modeling
+- Click for CLI commands
+- GitHub Copilot SDK for local jacket generation
+- LiteLLM/Pydantic for structured tuning/modeling reviews
+- Playwright for browser e2e
+- Alpine.js and marked.js for the static frontend
+- Azure Functions, Blob static website hosting, Table Storage, and App Insights for deployment
 
 ## Data sources
 
-### Library of Congress MARC (2016)
-
-[Library of Congress MARC Distribution Services](https://www.loc.gov/cds/products/marcDist.php) — Books All, 2016 retrospective conversion, UTF-8 encoding. ~25M records across 43 files. Free and open access.
-
-### Open Library
-
-[Open Library bulk data dumps](https://openlibrary.org/developers/dumps) — ~35M edition records with a dedicated `subtitle` field (when present). Broader coverage including post-2016 books.
+| Source | Use |
+|---|---|
+| Library of Congress MARC Books All 2016 | Large source-title/subtitle corpus. |
+| Open Library dumps | Additional edition metadata and subtitle/title candidates. |
+| SPL, Goodreads, NYT, Ottawa/library, Trove | Popularity/enrichment signals for offline training and historical scoring. |
 
 ## License
 

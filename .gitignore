@@ -13,3 +13,4 @@ __pycache__/
 
 results.tsv
 test-results/
+generated-artifacts/

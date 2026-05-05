@@ -15,6 +15,7 @@ from typing import Callable, Literal
 from subtitle_generator.market_tiers import MarketTier, source_label_tier_definitions
 from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
 
+SourceTierSelection = Literal["random", "id", "likely-pop"]
 SOURCE_TIER_LABEL_COLUMNS: tuple[tuple[str, str], ...] = (
     ("llm_market_tier", "TEXT"),
     ("llm_market_tier_confidence", "REAL"),
@@ -79,6 +80,77 @@ class SourceTierDistributionRow:
         return counts[tier] / self.labeled_count
 
 
+@dataclass(frozen=True)
+class SourceTierReadiness:
+    rows: tuple[SourceTierDistributionRow, ...]
+    min_confidence: float
+    min_total_labeled: int
+    min_labeled_per_source: int
+    min_labeled_per_tier: int
+
+    @property
+    def labeled_count(self) -> int:
+        return sum(row.labeled_count for row in self.rows)
+
+    @property
+    def unlabeled_count(self) -> int:
+        return sum(row.unlabeled_count for row in self.rows)
+
+    @property
+    def tier_counts(self) -> dict[str, int]:
+        return {
+            "pop": sum(row.pop_count for row in self.rows),
+            "mainstream": sum(row.mainstream_count for row in self.rows),
+            "niche": sum(row.niche_count for row in self.rows),
+        }
+
+    @property
+    def source_deficits(self) -> dict[str, int]:
+        return {
+            row.candidate_source: max(0, self.min_labeled_per_source - row.labeled_count)
+            for row in self.rows
+        }
+
+    @property
+    def tier_deficits(self) -> dict[str, int]:
+        return {
+            tier: max(0, self.min_labeled_per_tier - count)
+            for tier, count in self.tier_counts.items()
+        }
+
+    @property
+    def total_deficit(self) -> int:
+        return max(0, self.min_total_labeled - self.labeled_count)
+
+    @property
+    def ready(self) -> bool:
+        return (
+            self.total_deficit == 0
+            and all(deficit == 0 for deficit in self.source_deficits.values())
+            and all(deficit == 0 for deficit in self.tier_deficits.values())
+        )
+
+    @property
+    def recommended_random_batch(self) -> int:
+        """Estimate a next random batch size from current rare-tier share."""
+
+        if self.ready:
+            return 0
+        base_deficit = max(
+            self.total_deficit,
+            *(self.source_deficits.values() or [0]),
+        )
+        tier_counts = self.tier_counts
+        labeled = max(1, self.labeled_count)
+        tier_estimates = []
+        for tier, deficit in self.tier_deficits.items():
+            if deficit <= 0:
+                continue
+            observed_share = max(tier_counts[tier] / labeled, 0.01)
+            tier_estimates.append(int((deficit / observed_share) + 0.999))
+        return max(base_deficit, *(tier_estimates or [0]))
+
+
 SourceTierClassifier = Callable[
     [tuple[SourceTierCandidate, ...], str],
     tuple[SourceTierPrediction, ...],
@@ -125,7 +197,7 @@ def load_source_tier_candidates(
     conn: sqlite3.Connection,
     *,
     limit: int,
-    selection: Literal["random", "id"] = "random",
+    selection: SourceTierSelection = "random",
     random_seed: int = 20260501,
     force: bool = False,
     candidate_source: Literal["all", "subtitle", "title"] = "all",
@@ -154,15 +226,23 @@ def load_source_tier_candidates(
         else:
             where.append("COALESCE(NULLIF(candidate_source, ''), 'subtitle') = ?")
     params = (candidate_source,) if candidate_source != "all" and "candidate_source" in columns else ()
-    rows = conn.execute(
-        f"""
-        SELECT id, title, {subtitle_expr}
-        FROM pattern_matches
-        WHERE {" AND ".join(where)}
-        ORDER BY id
-        """,
-        params,
-    ).fetchall()
+    if selection == "likely-pop":
+        rows = _load_likely_pop_source_tier_candidate_rows(
+            conn,
+            subtitle_expr=subtitle_expr,
+            where=where,
+            params=params,
+        )
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT id, title, {subtitle_expr}
+            FROM pattern_matches
+            WHERE {" AND ".join(where)}
+            ORDER BY id
+            """,
+            params,
+        ).fetchall()
     candidates = [
         SourceTierCandidate(id=row[0], title=row[1], subtitle=row[2])
         for row in rows
@@ -170,9 +250,52 @@ def load_source_tier_candidates(
     if selection == "random":
         rng = random.Random(random_seed)
         rng.shuffle(candidates)
-    elif selection != "id":
+    elif selection not in {"id", "likely-pop"}:
         raise ValueError(f"Unsupported selection mode: {selection}")
     return tuple(candidates[:limit])
+
+
+def _load_likely_pop_source_tier_candidate_rows(
+    conn: sqlite3.Connection,
+    *,
+    subtitle_expr: str,
+    where: list[str],
+    params: tuple[str, ...],
+) -> list[tuple[int, str, str]]:
+    required_tables = {"slot_filler_sources", "slot_fillers"}
+    existing_tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        )
+    }
+    missing_tables = required_tables - existing_tables
+    if missing_tables:
+        raise RuntimeError(
+            "likely-pop selection requires tables: "
+            + ", ".join(sorted(missing_tables))
+        )
+    filler_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(slot_fillers)")
+    }
+    if "popularity_score" not in filler_columns:
+        raise RuntimeError(
+            "likely-pop selection requires slot_fillers.popularity_score. "
+            "Run populate-popularity first."
+        )
+    return conn.execute(
+        f"""
+        SELECT pm.id, pm.title, {subtitle_expr}
+        FROM pattern_matches pm
+        LEFT JOIN slot_filler_sources sfs ON sfs.subtitle_id = pm.subtitle_id
+        LEFT JOIN slot_fillers sf ON sf.id = sfs.slot_filler_id
+        WHERE {" AND ".join(where)}
+        GROUP BY pm.id, pm.title, {subtitle_expr}
+        ORDER BY COALESCE(MAX(sf.popularity_score), -1) DESC,
+                 COUNT(sf.id) DESC,
+                 pm.id
+        """,
+        params,
+    ).fetchall()
 
 
 def classify_source_tiers(
@@ -181,7 +304,7 @@ def classify_source_tiers(
     limit: int = 20,
     batch_size: int = 10,
     model: str = DEFAULT_RATER_MODEL,
-    selection: Literal["random", "id"] = "random",
+    selection: SourceTierSelection = "random",
     random_seed: int = 20260501,
     force: bool = False,
     candidate_source: Literal["all", "subtitle", "title"] = "all",
@@ -452,6 +575,99 @@ def format_source_tier_distribution_report(
             "above for calibration."
         )
     return "\n".join(lines)
+
+
+def analyze_source_tier_readiness(
+    conn: sqlite3.Connection,
+    *,
+    min_confidence: float = 0.0,
+    min_total_labeled: int = 1000,
+    min_labeled_per_source: int = 100,
+    min_labeled_per_tier: int = 100,
+) -> SourceTierReadiness:
+    """Return coverage readiness for source-tier modeling labels."""
+
+    if min_total_labeled <= 0:
+        raise ValueError("min_total_labeled must be positive")
+    if min_labeled_per_source <= 0:
+        raise ValueError("min_labeled_per_source must be positive")
+    if min_labeled_per_tier <= 0:
+        raise ValueError("min_labeled_per_tier must be positive")
+    return SourceTierReadiness(
+        rows=load_source_tier_distribution(conn, min_confidence=min_confidence),
+        min_confidence=min_confidence,
+        min_total_labeled=min_total_labeled,
+        min_labeled_per_source=min_labeled_per_source,
+        min_labeled_per_tier=min_labeled_per_tier,
+    )
+
+
+def format_source_tier_readiness_report(readiness: SourceTierReadiness) -> str:
+    """Format source-tier label readiness and next-batch guidance."""
+
+    lines = [
+        "# Source-tier label readiness",
+        "",
+        "This report checks whether the existing LLM market-tier labels are broad "
+        "enough for the first book-tier modeling pass.",
+        "",
+        "## Thresholds",
+        "",
+        f"- Minimum confidence: {readiness.min_confidence:.2f}",
+        f"- Minimum total labeled rows: {readiness.min_total_labeled:,}",
+        f"- Minimum labeled rows per source type: {readiness.min_labeled_per_source:,}",
+        f"- Minimum labeled rows per tier: {readiness.min_labeled_per_tier:,}",
+        "",
+        "## Coverage",
+        "",
+        "source,total,labeled,unlabeled,pop,mainstream,niche",
+    ]
+    for row in readiness.rows:
+        lines.append(
+            f"{row.candidate_source},{row.total_count},{row.labeled_count},"
+            f"{row.unlabeled_count},{row.pop_count},{row.mainstream_count},"
+            f"{row.niche_count}"
+        )
+    tier_counts = readiness.tier_counts
+    lines.extend([
+        "",
+        "## Deficits",
+        "",
+        f"- Total labeled deficit: {readiness.total_deficit:,}",
+        "- Source deficits: " + _format_deficits(readiness.source_deficits),
+        "- Tier deficits: " + _format_deficits(readiness.tier_deficits),
+        "",
+        "## Recommendation",
+        "",
+    ])
+    if readiness.ready:
+        lines.append("Gate: SOURCE_TIER_READY - no additional labeling required now.")
+    else:
+        lines.extend([
+            "Gate: NEEDS_LABELS - expand LLM source-tier labels before treating "
+            "the label set as statistically satisfactory.",
+            (
+                "Recommended next random labeling batch: "
+                f"{readiness.recommended_random_batch:,} rows"
+            ),
+            (
+                "Current tier mix: "
+                f"pop={tier_counts['pop']:,}, "
+                f"mainstream={tier_counts['mainstream']:,}, "
+                f"niche={tier_counts['niche']:,}"
+            ),
+            (
+                "Because tiers are only known after labeling, use random or "
+                "source-stratified batches and re-run this report after each batch."
+            ),
+        ])
+    return "\n".join(lines)
+
+
+def _format_deficits(deficits: dict[str, int]) -> str:
+    if not deficits:
+        return "none"
+    return ", ".join(f"{key}={value:,}" for key, value in sorted(deficits.items()))
 
 
 def build_source_tier_prompt(candidates: tuple[SourceTierCandidate, ...]) -> str:

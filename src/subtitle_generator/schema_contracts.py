@@ -108,6 +108,14 @@ MINI_DB_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
             "slot_filler_id", "title", "subtitle_text", "source_tag",
         }),
     ),
+    TableContract(
+        stage="serving_model_scores",
+        table="slot_filler_model_scores",
+        columns=frozenset({
+            "slot_filler_id", "score_pop", "score_mainstream", "score_niche",
+            "model_tier", "source_prediction_count",
+        }),
+    ),
 )
 
 REQUIRED_TABLES_BY_STAGE: dict[str, tuple[str, ...]] = {

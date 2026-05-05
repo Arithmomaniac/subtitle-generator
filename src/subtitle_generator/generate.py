@@ -3,6 +3,7 @@
 import json
 import math
 import random
+import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
@@ -21,6 +22,9 @@ _inflect_engine = inflect.engine()
 MAX_TIER_FILTER_ATTEMPTS = 1000
 DEFAULT_GENERATION_TIER_ATTEMPTS = 25
 _DEFAULT_GENERATION_TIERS = ("pop", "mainstream", "niche")
+_MODEL_SCORE_INDEX = {"pop": 3, "mainstream": 4, "niche": 5}
+_BAD_ONE_WORD_OBJECTS = {"christian", "imf"}
+_BAD_STANDALONE_FILLERS = {"jr", "sr", "xcalibur"}
 
 
 class TierFilterError(RuntimeError):
@@ -77,10 +81,15 @@ def _weighted_sample(
     rng: random.Random | None = None,
     tone_target: float | None = None,
     conn: sqlite3.Connection | None = None,
+    model_tier: str | None = None,
 ) -> list[str]:
     """Pick k unique fillers weighted by sqrt(freq), optionally biased by tone.
 
-    Rows can be (filler, freq) or (filler, freq, popularity_score).
+    Rows can be (filler, freq), (filler, freq, popularity_score), or
+    (filler, freq, popularity_score, score_pop, score_mainstream, score_niche).
+    When ``model_tier`` is present and model scores are available, use learned
+    tier categorization as the sampling signal while keeping frequency as the
+    within-category stabilizer.
     When tone_target is set, applies a log-space Gaussian bias that boosts
     fillers near the target score and suppresses distant ones.
 
@@ -101,8 +110,12 @@ def _weighted_sample(
         freq = r[1]
         pop_score = (r[2] if r[2] is not None else pop_default) if has_pop else pop_default
         w_freq = math.sqrt(freq)
-        w_pop = math.sqrt(max(pop_score, 0.001))
-        weights.append((1 - blend_base) * w_freq + blend_base * w_pop)
+        model_score = _row_model_score(r, model_tier)
+        if model_score is not None:
+            weights.append(w_freq * max(model_score, 0.001))
+        else:
+            w_pop = math.sqrt(max(pop_score, 0.001))
+            weights.append((1 - blend_base) * w_freq + blend_base * w_pop)
 
     if tone_target is not None:
         if not cfg:
@@ -117,7 +130,8 @@ def _weighted_sample(
             score_freq = math.log10(1 + freq)
             filler_score = (1 - bias_blend) * score_freq + bias_blend * pop_score
             bias = math.exp(-((filler_score - tone_target) / spread) ** 2)
-            weights[i] *= (bias_floor + (1 - bias_floor) * bias)
+            if _row_model_score(r, model_tier) is None:
+                weights[i] *= (bias_floor + (1 - bias_floor) * bias)
 
     chosen = []
     # Weighted sampling without replacement
@@ -128,6 +142,15 @@ def _weighted_sample(
         fillers.pop(idx)
         weights.pop(idx)
     return chosen
+
+
+def _row_model_score(row: tuple, model_tier: str | None) -> float | None:
+    if model_tier not in _MODEL_SCORE_INDEX or len(row) <= _MODEL_SCORE_INDEX[model_tier]:
+        return None
+    value = row[_MODEL_SCORE_INDEX[model_tier]]
+    if value is None:
+        return None
+    return float(value)
 
 
 # Module-level for import compatibility — uses defaults when no DB connection
@@ -732,17 +755,75 @@ def _make_rng(seed: int | None) -> random.Random | None:
 
 
 def _load_generation_candidates(conn: sqlite3.Connection) -> GenerationCandidates:
+    if _has_model_scores(conn):
+        select = (
+            "SELECT sf.filler, sf.freq, sf.popularity_score, "
+            "ms.score_pop, ms.score_mainstream, ms.score_niche "
+            "FROM slot_fillers sf "
+            "LEFT JOIN slot_filler_model_scores ms ON ms.slot_filler_id = sf.id "
+            "WHERE sf.slot_type = ? AND sf.mode = 'strict'"
+        )
+        return GenerationCandidates(
+            list_rows=_filter_generation_rows(
+                "list_item", conn.execute(select, ("list_item",)).fetchall(),
+            ),
+            action_rows=_filter_generation_rows(
+                "action_noun", conn.execute(select, ("action_noun",)).fetchall(),
+            ),
+            obj_rows=_filter_generation_rows(
+                "of_object", conn.execute(select, ("of_object",)).fetchall(),
+            ),
+        )
     return GenerationCandidates(
-        list_rows=conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item' AND mode = 'strict'"
-        ).fetchall(),
-        action_rows=conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'action_noun' AND mode = 'strict'"
-        ).fetchall(),
-        obj_rows=conn.execute(
-            "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'of_object' AND mode = 'strict'"
-        ).fetchall(),
+        list_rows=_filter_generation_rows(
+            "list_item",
+            conn.execute(
+                "SELECT filler, freq, popularity_score FROM slot_fillers "
+                "WHERE slot_type = 'list_item' AND mode = 'strict'"
+            ).fetchall(),
+        ),
+        action_rows=_filter_generation_rows(
+            "action_noun",
+            conn.execute(
+                "SELECT filler, freq, popularity_score FROM slot_fillers "
+                "WHERE slot_type = 'action_noun' AND mode = 'strict'"
+            ).fetchall(),
+        ),
+        obj_rows=_filter_generation_rows(
+            "of_object",
+            conn.execute(
+                "SELECT filler, freq, popularity_score FROM slot_fillers "
+                "WHERE slot_type = 'of_object' AND mode = 'strict'"
+            ).fetchall(),
+        ),
     )
+
+
+def _filter_generation_rows(slot_type: str, rows: list[tuple]) -> list[tuple]:
+    return [row for row in rows if not _is_literal_bad_filler(slot_type, row[0])]
+
+
+def _has_model_scores(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'slot_filler_model_scores'"
+    ).fetchone()
+    return row is not None
+
+
+def _is_literal_bad_filler(slot_type: str, filler: str) -> bool:
+    lower = (filler or "").strip().lower()
+    if not lower:
+        return True
+    if lower in _BAD_STANDALONE_FILLERS:
+        return True
+    if re.search(r",\s*(?:jr|sr)\.?$", lower):
+        return True
+    if slot_type == "of_object" and lower in _BAD_ONE_WORD_OBJECTS:
+        return True
+    # Artifact like H.G.W.ells: run-together initials followed by a lowercase tail.
+    if re.search(r"(?:[a-z]\.){2,}[a-z]", lower):
+        return True
+    return False
 
 
 def _has_enough_candidates(
@@ -797,8 +878,9 @@ def _pick_list_items(
     rng: random.Random | None,
     list_target: float | None,
     conn: sqlite3.Connection,
+    model_tier: str | None = None,
 ) -> list[str]:
-    return _weighted_sample(list_rows, 2, rng, list_target, conn)
+    return _weighted_sample(list_rows, 2, rng, list_target, conn, model_tier=model_tier)
 
 
 def _pick_action_noun(
@@ -806,8 +888,11 @@ def _pick_action_noun(
     rng: random.Random | None,
     action_target: float | None,
     conn: sqlite3.Connection,
+    model_tier: str | None = None,
 ) -> str:
-    return _weighted_sample(action_rows, 1, rng, action_target, conn)[0]
+    return _weighted_sample(
+        action_rows, 1, rng, action_target, conn, model_tier=model_tier,
+    )[0]
 
 
 def _pick_of_object_and_remix(
@@ -817,11 +902,14 @@ def _pick_of_object_and_remix(
     adjusted_tone_target: dict[str, float] | None,
     remix_prob: float,
     min_sim: float,
+    model_tier: str | None = None,
 ) -> tuple[str, bool, dict, float | None]:
     obj_target = adjusted_tone_target.get("of_object") if adjusted_tone_target else None
     remix_similarity = None
 
-    of_object = _weighted_sample(obj_rows, 1, rng, obj_target, conn)[0]
+    of_object = _weighted_sample(
+        obj_rows, 1, rng, obj_target, conn, model_tier=model_tier,
+    )[0]
     remixed = False
     remix_parts = {}
 
@@ -843,13 +931,17 @@ def _select_subtitle_parts(
     adjusted_tone_target: dict[str, float] | None,
     remix_prob: float,
     min_sim: float,
+    model_tier: str | None = None,
 ) -> SelectedSubtitleParts:
     list_target = adjusted_tone_target.get("list_item") if adjusted_tone_target else None
     action_target = adjusted_tone_target.get("action_noun") if adjusted_tone_target else None
-    items = _pick_list_items(candidates.list_rows, rng, list_target, conn)
-    action_noun = _pick_action_noun(candidates.action_rows, rng, action_target, conn)
+    items = _pick_list_items(candidates.list_rows, rng, list_target, conn, model_tier)
+    action_noun = _pick_action_noun(
+        candidates.action_rows, rng, action_target, conn, model_tier,
+    )
     of_object, remixed, remix_parts, remix_similarity = _pick_of_object_and_remix(
         conn, candidates.obj_rows, rng, adjusted_tone_target, remix_prob, min_sim,
+        model_tier,
     )
     return SelectedSubtitleParts(
         items=items,
@@ -932,6 +1024,7 @@ def _generate_subtitle_from_candidates(
     adjusted_tone_target: dict[str, float] | None,
     remix_prob: float,
     min_sim: float,
+    model_tier: str | None = None,
 ) -> GeneratedSubtitle:
     rng = _make_rng(seed)
     if not _has_enough_candidates(candidates):
@@ -944,6 +1037,7 @@ def _generate_subtitle_from_candidates(
         adjusted_tone_target,
         remix_prob,
         min_sim,
+        model_tier,
     )
     action_article, of_article = _resolve_articles(
         conn,
@@ -978,6 +1072,7 @@ def generate_subtitle(
         adjusted_tone_target=adjusted_tone_target,
         remix_prob=remix_prob,
         min_sim=min_sim,
+        model_tier=None,
     )
 
 
@@ -1005,6 +1100,7 @@ def generate_subtitles(
             adjusted_tone_target=adjusted_tone_target,
             remix_prob=remix_prob,
             min_sim=min_sim,
+            model_tier=None,
         )
         for i in range(n)
     ]
@@ -1148,6 +1244,7 @@ def generate_subtitle_matching_tiers(
                 adjusted_tone_target=adjusted_tone_target,
                 remix_prob=remix_prob,
                 min_sim=min_sim,
+                model_tier=requested_tier if _has_model_scores(conn) else None,
             )
             tier = compute_tier_evidence(subtitle.text, conn).tier
             observed_tiers[tier] += 1
@@ -1220,6 +1317,7 @@ def generate_subtitles_by_tier(
             adjusted_tone_target=tone_targets[target_tier],
             remix_prob=remix_prob,
             min_sim=min_sim,
+            model_tier=target_tier if _has_model_scores(conn) else None,
         )
         tier = compute_tier_evidence(subtitle.text, conn).tier
         observed_tiers[tier] += 1

@@ -10,16 +10,24 @@ $ErrorActionPreference = "Stop"
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $RootDir
 
-New-Item -ItemType Directory -Force -Path $ArtifactDir | Out-Null
-$ServerLog = Join-Path $ArtifactDir "server.log"
+$ArtifactPath = Join-Path $RootDir $ArtifactDir
+$ServerLog = Join-Path $ArtifactPath "server.log"
+$ScreenshotScript = Join-Path $ArtifactPath "capture_screenshot.py"
 
-function Write-ServerLog {
+function Initialize-E2EArtifacts {
+    New-Item -ItemType Directory -Force -Path $ArtifactPath | Out-Null
     if (Test-Path $ServerLog) {
-        Get-Content $ServerLog
+        Remove-Item $ServerLog -Force
     }
 }
 
-function Test-ServerReady {
+function Write-E2EServerLog {
+    if (Test-Path $ServerLog) {
+        Get-Content $ServerLog | Write-Host
+    }
+}
+
+function Test-E2EServerReady {
     try {
         Invoke-WebRequest -Uri "$BaseUrl/" -UseBasicParsing -TimeoutSec 2 | Out-Null
         return $true
@@ -29,15 +37,8 @@ function Test-ServerReady {
     }
 }
 
-function Save-Screenshot {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path,
-        [Parameter(Mandatory = $true)]
-        [string]$Url
-    )
-
-    $captureScript = @'
+function New-ScreenshotScript {
+    $script = @'
 import asyncio
 import os
 from pathlib import Path
@@ -60,19 +61,26 @@ async def main() -> None:
 
 asyncio.run(main())
 '@
+    Set-Content -Path $ScreenshotScript -Value $script -Encoding UTF8
+}
 
-    $capturePath = Join-Path $ArtifactDir "capture_screenshot.py"
-    Set-Content -Path $capturePath -Value $captureScript -Encoding UTF8
+function Save-E2EScreenshot {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Url
+    )
 
-    $env:E2E_SCREENSHOT_PATH = $Path
+    $env:E2E_SCREENSHOT_PATH = Join-Path $ArtifactPath $Name
     $env:E2E_SCREENSHOT_URL = $Url
-    & uv run python $capturePath
+    & uv run python $ScreenshotScript
     if ($LASTEXITCODE -ne 0) {
         throw "Screenshot capture failed for $Url"
     }
 }
 
-function Invoke-E2ETest {
+function Invoke-E2EPythonTest {
     param(
         [Parameter(Mandatory = $true)]
         [string]$TestPath,
@@ -85,57 +93,68 @@ function Invoke-E2ETest {
     $env:BASE_URL = $BaseUrl
     & uv run python $TestPath
     if ($LASTEXITCODE -ne 0) {
-        Save-Screenshot -Path $FailureScreenshot -Url $FailureUrl
-        throw "$TestPath failed. Artifacts are in $ArtifactDir."
+        Save-E2EScreenshot -Name $FailureScreenshot -Url $FailureUrl
+        throw "$TestPath failed. Artifacts are in $ArtifactPath."
     }
 }
 
-Write-Host "Starting subtitle-generator local server on $BaseUrl"
-$ServerJob = Start-Job -Name "subtitle-generator-e2e-server" -ScriptBlock {
-    param($RootDir, $Port, $ServerLog)
-    Set-Location $RootDir
-    uv run subtitle-gen serve --no-open --port $Port *> $ServerLog
-} -ArgumentList $RootDir, $Port, $ServerLog
+function Start-E2EServer {
+    Write-Host "Starting subtitle-generator local server on $BaseUrl"
+    Start-Job -Name "subtitle-generator-e2e-server" -ScriptBlock {
+        param($WorkingDirectory, $ServerPort, $LogPath)
+        Set-Location $WorkingDirectory
+        uv run subtitle-gen serve --no-open --port $ServerPort *> $LogPath
+    } -ArgumentList $RootDir, $Port, $ServerLog
+}
 
-try {
-    $ready = $false
+function Wait-E2EServerReady {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Management.Automation.Job]$ServerJob
+    )
+
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
-        if (Test-ServerReady) {
-            $ready = $true
-            break
+        if (Test-E2EServerReady) {
+            return
         }
 
         $job = Get-Job -Id $ServerJob.Id
         if ($job.State -ne "Running") {
-            Receive-Job -Id $ServerJob.Id -Keep | Out-Host
+            Receive-Job -Id $ServerJob.Id -Keep | Write-Host
             Write-Host "Local server exited before becoming ready. Server log:"
-            Write-ServerLog
+            Write-E2EServerLog
             exit 1
         }
 
         Start-Sleep -Seconds 1
     }
 
-    if (-not $ready) {
-        Write-Host "Timed out waiting for $BaseUrl. Server log:"
-        Write-ServerLog
-        exit 1
-    }
+    Write-Host "Timed out waiting for $BaseUrl. Server log:"
+    Write-E2EServerLog
+    exit 1
+}
 
-    Save-Screenshot -Path (Join-Path $ArtifactDir "home-before.png") -Url "$BaseUrl/"
-    Invoke-E2ETest `
+Initialize-E2EArtifacts
+New-ScreenshotScript
+$ServerJob = Start-E2EServer
+
+try {
+    Wait-E2EServerReady -ServerJob $ServerJob
+
+    Save-E2EScreenshot -Name "home-before.png" -Url "$BaseUrl/"
+    Invoke-E2EPythonTest `
         -TestPath "tests/test_e2e.py" `
-        -FailureScreenshot (Join-Path $ArtifactDir "home-failure.png") `
+        -FailureScreenshot "home-failure.png" `
         -FailureUrl "$BaseUrl/"
-    Save-Screenshot -Path (Join-Path $ArtifactDir "home-after.png") -Url "$BaseUrl/"
+    Save-E2EScreenshot -Name "home-after.png" -Url "$BaseUrl/"
 
-    Invoke-E2ETest `
+    Invoke-E2EPythonTest `
         -TestPath "tests/test_e2e_spot_check.py" `
-        -FailureScreenshot (Join-Path $ArtifactDir "spot-check-failure.png") `
+        -FailureScreenshot "spot-check-failure.png" `
         -FailureUrl "$BaseUrl/spot-check.html"
-    Save-Screenshot -Path (Join-Path $ArtifactDir "spot-check-after.png") -Url "$BaseUrl/spot-check.html"
+    Save-E2EScreenshot -Name "spot-check-after.png" -Url "$BaseUrl/spot-check.html"
 
-    Write-Host "Local e2e tests passed. Artifacts are in $ArtifactDir."
+    Write-Host "Local e2e tests passed. Artifacts are in $ArtifactPath."
 }
 finally {
     if ($ServerJob) {

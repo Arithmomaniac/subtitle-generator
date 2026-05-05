@@ -1,6 +1,6 @@
 [project]
 name = "subtitle-generator"
-version = "0.6.3"
+version = "0.7.0"
 description = "Generate bizarre book subtitles by mixing real parts from Library of Congress MARC records"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -19,6 +19,9 @@ dependencies = [
 tune = ["litellm>=1.72.0", "pydantic>=2.0"]
 deploy = ["azure-data-tables>=12.5", "azure-identity>=1.25"]
 e2e = ["playwright>=1.56.0"]
+ml = [
+    "torch>=2.11.0",
+]
 
 [project.scripts]
 subtitle-gen = "subtitle_generator.cli:cli"
@@ -33,6 +36,12 @@ packages = ["src/subtitle_generator"]
 [tool.uv.sources]
 en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 en-core-web-md = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_md-3.8.0/en_core_web_md-3.8.0-py3-none-any.whl" }
+torch = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [dependency-groups]
 dev = [
