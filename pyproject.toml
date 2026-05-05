@@ -1,6 +1,6 @@
 [project]
 name = "subtitle-generator"
-version = "0.6.1"
+version = "0.6.2"
 description = "Generate bizarre book subtitles by mixing real parts from Library of Congress MARC records"
 readme = "README.md"
 requires-python = ">=3.13"
