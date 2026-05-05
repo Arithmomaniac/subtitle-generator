@@ -43,6 +43,11 @@ async def test():
         telemetry_posts: list[str] = []
         telemetry_statuses: list[int] = []
 
+        async def dismiss_dialog(dialog):
+            await dialog.dismiss()
+
+        page.on("dialog", dismiss_dialog)
+
         def capture_telemetry_request(request):
             if request.method == "POST" and is_app_insights_track_url(request.url):
                 telemetry_posts.append(request.post_data or "")
@@ -95,8 +100,6 @@ async def test():
             except Exception:
                 if gen_attempt < 2:
                     print(f"  Cold start timeout, retrying ({gen_attempt + 1}/3)...")
-                    # Dismiss any alert dialog
-                    page.on("dialog", lambda d: d.dismiss())
                     await page.wait_for_timeout(5000)
                 else:
                     raise

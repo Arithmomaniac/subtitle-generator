@@ -54,7 +54,7 @@ def _error(msg: str, status_code: int = 400) -> func.HttpResponse:
 
 
 def _preflight_response() -> func.HttpResponse:
-    return func.HttpResponse(status_code=204, headers=CORS_HEADERS)
+    return func.HttpResponse("", status_code=200, headers=CORS_HEADERS)
 
 
 # ── POST /api/generate ──────────────────────────────────────────────
