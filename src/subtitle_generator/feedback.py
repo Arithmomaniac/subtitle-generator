@@ -13,8 +13,6 @@ import sqlite3
 from collections import Counter
 from typing import Any
 
-from pydantic import BaseModel
-
 from subtitle_generator.config import load_tuning_config
 
 VALID_RATING_TAGS = frozenset({
@@ -55,19 +53,6 @@ def parse_rating_tags(value: Any) -> list[str]:
 def rating_tags_are_current(tags: list[str]) -> bool:
     """Return true when a rating's tags are all current supported options."""
     return not (set(tags) - VALID_RATING_TAGS)
-
-# ---------------------------------------------------------------------------
-# Pydantic schemas
-# ---------------------------------------------------------------------------
-
-
-class HumanFeedbackInterp(BaseModel):
-    """LLM-interpreted structure from a free-text human comment."""
-
-    sentiment: str  # positive / negative / neutral
-    tone_signal: str | None  # too-pop / too-niche / good-tone / None
-    actionable_insight: str  # one-sentence summary for the proposer
-
 
 # ---------------------------------------------------------------------------
 # DB setup
@@ -176,9 +161,18 @@ Classify this comment:
 """
 
 
-def interpret_free_text(comment: str) -> HumanFeedbackInterp:
+def interpret_free_text(comment: str):
     """Use a cheap LLM call to interpret free-text feedback."""
+    from pydantic import BaseModel
+
     from subtitle_generator.eval_harness import structured_completion
+
+    class HumanFeedbackInterp(BaseModel):
+        """LLM-interpreted structure from a free-text human comment."""
+
+        sentiment: str  # positive / negative / neutral
+        tone_signal: str | None  # too-pop / too-niche / good-tone / None
+        actionable_insight: str  # one-sentence summary for the proposer
 
     return structured_completion(
         model="github_copilot/gpt-5.4-mini",
