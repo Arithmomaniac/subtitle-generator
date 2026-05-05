@@ -83,7 +83,7 @@ async def test():
 
         # 3. Click Generate (with cold-start retry)
         print("TEST 3: Generate subtitle")
-        gen_btn = page.locator("button:has-text('Generate')").first
+        gen_btn = page.locator("button.btn-primary:has-text('Generate')")
         for gen_attempt in range(3):
             await gen_btn.click()
             try:

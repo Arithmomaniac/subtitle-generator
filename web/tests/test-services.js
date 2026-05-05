@@ -79,6 +79,12 @@ await test("generate returns error on HTTP failure", async () => {
   assert(r.error === "bad input", "error message forwarded");
 });
 
+await test("generate returns error on network failure", async () => {
+  const api = createApi("", async () => { throw new Error("network"); });
+  const r = await api.generate({ tone: "pop" });
+  assert(r.error === "network", "network error message forwarded");
+});
+
 // ── jacket ──
 
 await test("jacket sends correct body for dry_run", async () => {

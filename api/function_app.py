@@ -32,11 +32,20 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 logger = logging.getLogger(__name__)
 
 
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400",
+}
+
+
 def _json_response(body: dict, status_code: int = 200) -> func.HttpResponse:
     return func.HttpResponse(
         json.dumps(body),
         status_code=status_code,
         mimetype="application/json",
+        headers=CORS_HEADERS,
     )
 
 
@@ -44,11 +53,18 @@ def _error(msg: str, status_code: int = 400) -> func.HttpResponse:
     return _json_response({"error": msg}, status_code)
 
 
+def _preflight_response() -> func.HttpResponse:
+    return func.HttpResponse(status_code=204, headers=CORS_HEADERS)
+
+
 # ── POST /api/generate ──────────────────────────────────────────────
 
 
-@app.route(route="generate", methods=["POST"])
+@app.route(route="generate", methods=["POST", "OPTIONS"])
 def generate(req: func.HttpRequest) -> func.HttpResponse:
+    if req.method == "OPTIONS":
+        return _preflight_response()
+
     try:
         try:
             body = req.get_json()
@@ -65,8 +81,11 @@ def generate(req: func.HttpRequest) -> func.HttpResponse:
 # ── POST /api/jacket ────────────────────────────────────────────────
 
 
-@app.route(route="jacket", methods=["POST"])
+@app.route(route="jacket", methods=["POST", "OPTIONS"])
 def jacket(req: func.HttpRequest) -> func.HttpResponse:
+    if req.method == "OPTIONS":
+        return _preflight_response()
+
     try:
         try:
             body = req.get_json()
@@ -103,8 +122,11 @@ def _handle_rate_azure(body: dict) -> tuple[int, dict]:
     return 200, {"id": entity["RowKey"], "status": "saved"}
 
 
-@app.route(route="rate", methods=["POST"])
+@app.route(route="rate", methods=["POST", "OPTIONS"])
 def rate(req: func.HttpRequest) -> func.HttpResponse:
+    if req.method == "OPTIONS":
+        return _preflight_response()
+
     try:
         try:
             body = req.get_json()
@@ -141,7 +163,10 @@ def rate(req: func.HttpRequest) -> func.HttpResponse:
 # ── GET /api/health ─────────────────────────────────────────────────
 
 
-@app.route(route="health", methods=["GET"])
+@app.route(route="health", methods=["GET", "OPTIONS"])
 def health(req: func.HttpRequest) -> func.HttpResponse:
+    if req.method == "OPTIONS":
+        return _preflight_response()
+
     status, resp = handle_health()
     return _json_response(resp, status)

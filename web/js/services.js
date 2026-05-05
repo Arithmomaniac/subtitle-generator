@@ -21,11 +21,16 @@ export function trackMetric(name, value, props) {
  */
 export function createApi(baseUrl = "", fetchFn = fetch) {
   async function post(path, body) {
-    const r = await fetchFn(baseUrl + path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+    let r;
+    try {
+      r = await fetchFn(baseUrl + path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      return { error: e?.message || "Network error" };
+    }
     if (!r.ok) {
       const err = await r.json().catch(() => ({ error: r.statusText }));
       return { error: err.error || r.statusText };
