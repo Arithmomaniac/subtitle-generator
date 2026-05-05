@@ -26,6 +26,10 @@ def _can_filter_to_current_pattern_matches(conn: sqlite3.Connection) -> bool:
     return {"subtitle_id", "list_items_json"} <= _columns(conn, "pattern_matches")
 
 
+def _model_scores_table_exists(conn: sqlite3.Connection) -> bool:
+    return _table_exists(conn, "slot_filler_model_scores")
+
+
 def _exportable_slot_fillers_cte(conn: sqlite3.Connection) -> str:
     """Return a CTE exposing slot fillers that still satisfy current slot gates."""
 
@@ -139,6 +143,39 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
                     row[idx] = ""
             w.writerow(row)
     stats["slot_fillers.csv"] = len(rows)
+
+    # -- optional model tier probabilities (runtime pure-categorization weights) --
+    model_path = output_dir / "slot_filler_model_scores.csv"
+    if _model_scores_table_exists(source_conn):
+        rows = source_conn.execute(
+            exportable_cte
+            + """
+            SELECT
+                sf.id,
+                COALESCE(ms.score_pop, 0.0),
+                COALESCE(ms.score_mainstream, 0.0),
+                COALESCE(ms.score_niche, 0.0),
+                COALESCE(ms.model_tier, ''),
+                COALESCE(ms.source_prediction_count, 0)
+            FROM exportable_slot_fillers sf
+            JOIN slot_filler_model_scores ms ON ms.slot_filler_id = sf.id
+            ORDER BY sf.id
+            """
+        ).fetchall()
+        with open(model_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "slot_filler_id",
+                "score_pop",
+                "score_mainstream",
+                "score_niche",
+                "model_tier",
+                "source_prediction_count",
+            ])
+            w.writerows(rows)
+        stats["slot_filler_model_scores.csv"] = len(rows)
+    elif model_path.exists():
+        model_path.unlink()
 
     # -- config --
     rows = source_conn.execute(
@@ -266,12 +303,56 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
         conn.executemany("INSERT INTO sources VALUES (?, ?, ?, ?)", rows)
         stats["sources"] = len(rows)
 
+    # -- optional model tier probabilities --
+    conn.execute("""
+        CREATE TABLE slot_filler_model_scores (
+            slot_filler_id INTEGER PRIMARY KEY,
+            score_pop REAL NOT NULL DEFAULT 0.0,
+            score_mainstream REAL NOT NULL DEFAULT 0.0,
+            score_niche REAL NOT NULL DEFAULT 0.0,
+            model_tier TEXT,
+            source_prediction_count INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY (slot_filler_id) REFERENCES slot_fillers(id)
+        )
+    """)
+    model_scores_path = data_dir / "slot_filler_model_scores.csv"
+    if model_scores_path.exists():
+        with open(model_scores_path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = [
+                (
+                    int(row["slot_filler_id"]),
+                    float(row["score_pop"] or 0.0),
+                    float(row["score_mainstream"] or 0.0),
+                    float(row["score_niche"] or 0.0),
+                    row.get("model_tier") or None,
+                    int(row.get("source_prediction_count") or 0),
+                )
+                for row in reader
+            ]
+            conn.executemany(
+                "INSERT INTO slot_filler_model_scores VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            stats["slot_filler_model_scores"] = len(rows)
+            if len(rows) != stats["slot_fillers"]:
+                raise RuntimeError(
+                    "slot_filler_model_scores.csv must cover every exported "
+                    f"slot filler ({len(rows):,} scores for "
+                    f"{stats['slot_fillers']:,} slot fillers)."
+                )
+    else:
+        stats["slot_filler_model_scores"] = 0
+
     # -- indexes --
     conn.execute("CREATE INDEX idx_sf_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX idx_sf_slot_type_pos ON slot_fillers(slot_type, pos_tag)")
     conn.execute("CREATE INDEX idx_sf_slot_type_prep ON slot_fillers(slot_type, prep)")
     conn.execute("CREATE INDEX idx_sf_filler ON slot_fillers(filler)")
     conn.execute("CREATE INDEX idx_sources_filler ON sources(slot_filler_id)")
+    conn.execute(
+        "CREATE INDEX idx_model_scores_tier ON slot_filler_model_scores(model_tier)"
+    )
 
     conn.commit()
     issues = validate_schema(conn, MINI_DB_SCHEMA_CONTRACTS)

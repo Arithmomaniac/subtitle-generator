@@ -1,5 +1,6 @@
 """CLI entry point for subtitle-generator."""
 
+import csv
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -953,6 +954,83 @@ def export_data_cmd(output_dir: str):
         click.echo(f"  {filename}: {count:,} rows ({size_kb:.0f} KB)")
 
 
+@cli.command("install-book-model-scores")
+@click.option(
+    "--input",
+    "input_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-slot.csv"),
+    show_default=True,
+    help="Filler rollup CSV with avg_score_pop/mainstream/niche columns.",
+)
+def install_book_model_scores(input_path: Path):
+    """Install learned slot-filler tier probabilities into the local DB."""
+
+    conn = get_db()
+    required_columns = {
+        "slot_filler_id",
+        "avg_score_pop",
+        "avg_score_mainstream",
+        "avg_score_niche",
+    }
+    inserted = 0
+    missing = 0
+    try:
+        with input_path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            missing_columns = required_columns - set(reader.fieldnames or ())
+            if missing_columns:
+                raise click.ClickException(
+                    "Model score CSV is missing required columns: "
+                    + ", ".join(sorted(missing_columns))
+                )
+            with conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS slot_filler_model_scores (
+                        slot_filler_id INTEGER PRIMARY KEY,
+                        score_pop REAL NOT NULL,
+                        score_mainstream REAL NOT NULL,
+                        score_niche REAL NOT NULL,
+                        model_tier TEXT,
+                        source_prediction_count INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY(slot_filler_id) REFERENCES slot_fillers(id)
+                    )
+                """)
+                conn.execute("DELETE FROM slot_filler_model_scores")
+                for row in reader:
+                    filler_id = row.get("slot_filler_id")
+                    if not filler_id:
+                        missing += 1
+                        continue
+                    conn.execute(
+                        """
+                        INSERT INTO slot_filler_model_scores (
+                            slot_filler_id, score_pop, score_mainstream, score_niche,
+                            model_tier, source_prediction_count
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            int(filler_id),
+                            float(row["avg_score_pop"]),
+                            float(row["avg_score_mainstream"]),
+                            float(row["avg_score_niche"]),
+                            row.get("book_model_tier") or None,
+                            int(row.get("source_prediction_count") or 0),
+                        ),
+                    )
+                    inserted += 1
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_model_scores_tier "
+                    "ON slot_filler_model_scores(model_tier)"
+                )
+    finally:
+        conn.close()
+    click.echo(f"Installed {inserted:,} model score rows from {input_path}.")
+    if missing:
+        click.echo(f"Skipped {missing:,} rows without slot_filler_id.")
+
+
 @cli.command("classify-source-tiers")
 @click.option("--limit", default=20, show_default=True, help="Maximum rows to label.")
 @click.option(
@@ -971,7 +1049,7 @@ def export_data_cmd(output_dir: str):
 )
 @click.option(
     "--selection",
-    type=click.Choice(["random", "id"]),
+    type=click.Choice(["random", "id", "likely-pop"]),
     default="random",
     show_default=True,
     help="How to choose unlabeled pattern_matches rows.",
@@ -1091,6 +1169,717 @@ def source_tier_distribution_cmd(
             min_labeled=min_labeled,
         )
     )
+
+
+@cli.command("source-tier-readiness")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to inspect.")
+@click.option(
+    "--min-confidence",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=0.0,
+    show_default=True,
+    help="Minimum LLM confidence for a row to count as labeled.",
+)
+@click.option(
+    "--min-total-labeled",
+    type=click.IntRange(min=1),
+    default=1000,
+    show_default=True,
+    help="Minimum total labeled rows before the label set is ready.",
+)
+@click.option(
+    "--min-labeled-per-source",
+    type=click.IntRange(min=1),
+    default=100,
+    show_default=True,
+    help="Minimum labeled rows per candidate source.",
+)
+@click.option(
+    "--min-labeled-per-tier",
+    type=click.IntRange(min=1),
+    default=100,
+    show_default=True,
+    help="Minimum labeled rows per market tier.",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/source_tier_readiness.md"),
+    show_default=True,
+    help="Markdown report output path.",
+)
+@click.option("--stdout", "print_stdout", is_flag=True, help="Print the report too.")
+def source_tier_readiness_cmd(
+    db_path: Path,
+    min_confidence: float,
+    min_total_labeled: int,
+    min_labeled_per_source: int,
+    min_labeled_per_tier: int,
+    output: Path,
+    print_stdout: bool,
+):
+    """Report whether source-tier labels are ready for book modeling."""
+
+    from subtitle_generator.source_tier_enrichment import (
+        analyze_source_tier_readiness,
+        format_source_tier_readiness_report,
+    )
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        readiness = analyze_source_tier_readiness(
+            conn,
+            min_confidence=min_confidence,
+            min_total_labeled=min_total_labeled,
+            min_labeled_per_source=min_labeled_per_source,
+            min_labeled_per_tier=min_labeled_per_tier,
+        )
+    finally:
+        conn.close()
+    report = format_source_tier_readiness_report(readiness)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(report, encoding="utf-8")
+    click.echo(f"Wrote source-tier readiness to {output}")
+    if print_stdout:
+        click.echo(report)
+
+
+@cli.command("book-model-inventory")
+@click.option(
+    "--db",
+    "full_db",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to inspect.",
+)
+@click.option(
+    "--mini-db",
+    type=click.Path(path_type=Path),
+    default=Path("api/data/subtitles.mini.db"),
+    show_default=True,
+    help="Mini SQLite database to inspect.",
+)
+@click.option(
+    "--api-db",
+    type=click.Path(path_type=Path),
+    default=Path("api/data/db/subtitles.db"),
+    show_default=True,
+    help="API SQLite database to inspect.",
+)
+@click.option(
+    "--export-dir",
+    type=click.Path(path_type=Path),
+    default=Path("api/data"),
+    show_default=True,
+    help="CSV export directory to inspect.",
+)
+@click.option(
+    "--output",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book_model_inventory.md"),
+    show_default=True,
+    help="Markdown report output path.",
+)
+@click.option("--stdout", "print_stdout", is_flag=True, help="Print the report too.")
+def book_model_inventory_cmd(
+    full_db: Path,
+    mini_db: Path,
+    api_db: Path,
+    export_dir: Path,
+    output: Path,
+    print_stdout: bool,
+):
+    """Write the offline book-model inventory report."""
+
+    from subtitle_generator.book_model_inventory import (
+        build_inventory,
+        format_inventory_markdown,
+    )
+
+    inventory = build_inventory(
+        full_db=full_db,
+        mini_db=mini_db,
+        api_db=api_db,
+        export_dir=export_dir,
+    )
+    report = format_inventory_markdown(inventory)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(report, encoding="utf-8")
+    click.echo(f"Wrote book-model inventory to {output}")
+    if print_stdout:
+        click.echo(report)
+
+
+@cli.command("build-book-features")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model"),
+    show_default=True,
+    help="Directory for generated feature/label artifacts.",
+)
+@click.option(
+    "--metadata-csv",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional offline book_metadata.csv sidecar to join into features.",
+)
+def build_book_features_cmd(
+    db_path: Path,
+    output_dir: Path,
+    metadata_csv: Path | None,
+):
+    """Build offline book_features and book_labels artifacts."""
+
+    from subtitle_generator.book_model_artifacts import build_book_model_artifacts
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_book_model_artifacts(
+            conn,
+            output_dir,
+            metadata_path=metadata_csv,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.feature_count:,} feature rows to {result.features_path}"
+    )
+    click.echo(
+        f"Wrote {result.label_count:,} label rows to {result.labels_path}"
+    )
+    click.echo(f"Wrote coverage report to {result.report_path}")
+
+
+@cli.command("build-book-metadata")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model"),
+    show_default=True,
+    help="Directory for generated metadata sidecar artifacts.",
+)
+@click.option(
+    "--ol-dump",
+    type=click.Path(path_type=Path),
+    default=DATA_DIR / "raw" / "ol_dump_editions_latest.txt.gz",
+    show_default=True,
+    help="Open Library editions dump to scan for offline-only metadata.",
+)
+@click.option(
+    "--loc-raw-dir",
+    type=click.Path(path_type=Path),
+    default=DATA_DIR / "raw",
+    show_default=True,
+    help="Directory containing LOC MARC files referenced by subtitles.source_file.",
+)
+@click.option(
+    "--max-ol-lines",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Debug limit for Open Library lines; 0 scans the full dump.",
+)
+@click.option(
+    "--max-loc-records-per-file",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Debug limit for each LOC MARC file; 0 scans full files.",
+)
+def build_book_metadata_cmd(
+    db_path: Path,
+    output_dir: Path,
+    ol_dump: Path,
+    loc_raw_dir: Path,
+    max_ol_lines: int,
+    max_loc_records_per_file: int,
+):
+    """Build an offline raw LOC/Open Library metadata sidecar for book modeling."""
+
+    from subtitle_generator.book_metadata_enrichment import build_book_metadata_artifact
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_book_metadata_artifact(
+            conn,
+            output_dir=output_dir,
+            ol_dump_path=ol_dump,
+            loc_raw_dir=loc_raw_dir,
+            max_ol_lines=max_ol_lines,
+            max_loc_records_per_file=max_loc_records_per_file,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote metadata for {result.enriched_count:,}/{result.target_count:,} "
+        f"source rows to {result.metadata_path}"
+    )
+    click.echo(f"Wrote metadata report to {result.report_path}")
+
+
+@cli.command("train-book-model")
+@click.option(
+    "--features",
+    "features_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/book_features.csv"),
+    show_default=True,
+    help="book_features CSV path.",
+)
+@click.option(
+    "--labels",
+    "labels_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/book_labels.csv"),
+    show_default=True,
+    help="book_labels CSV path.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model"),
+    show_default=True,
+    help="Directory for generated prediction artifacts.",
+)
+def train_book_model_cmd(
+    features_path: Path,
+    labels_path: Path,
+    output_dir: Path,
+):
+    """Train an interpretable offline book-tier baseline."""
+
+    from subtitle_generator.book_model_baseline import train_book_tier_baseline
+
+    try:
+        result = train_book_tier_baseline(
+            features_path=features_path,
+            labels_path=labels_path,
+            output_dir=output_dir,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Wrote {result.prediction_count:,} predictions to {result.predictions_path}"
+    )
+    click.echo(f"Wrote baseline report to {result.report_path}")
+    click.echo(
+        "Validation: "
+        f"n={result.validation_count:,}, "
+        f"accuracy={result.validation_accuracy:.3f}, "
+        f"macro={result.validation_macro_accuracy:.3f}"
+    )
+
+
+@cli.command("train-book-model-torch")
+@click.option(
+    "--features",
+    "features_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/book_features.csv"),
+    show_default=True,
+    help="book_features CSV path.",
+)
+@click.option(
+    "--labels",
+    "labels_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/book_labels.csv"),
+    show_default=True,
+    help="book_labels CSV path.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model"),
+    show_default=True,
+    help="Directory for generated Torch prediction artifacts.",
+)
+@click.option("--epochs", type=click.IntRange(min=1), default=300, show_default=True)
+@click.option("--learning-rate", type=float, default=0.02, show_default=True)
+@click.option("--hidden-dim", type=click.IntRange(min=1), default=64, show_default=True)
+@click.option("--hash-dim", type=click.IntRange(min=32), default=2048, show_default=True)
+@click.option("--random-seed", default=20260505, show_default=True)
+@click.option(
+    "--device",
+    type=click.Choice(["auto", "cpu", "cuda"]),
+    default="auto",
+    show_default=True,
+    help="Training device. auto uses CUDA when available.",
+)
+@click.option(
+    "--feature-set",
+    type=click.Choice([
+        "export-current",
+        "export-slot",
+        "persisted",
+        "popularity",
+        "interactions",
+        "metadata",
+        "all",
+    ]),
+    default="all",
+    show_default=True,
+    help="Feature family ablation to train.",
+)
+@click.option(
+    "--semantic-vectors",
+    type=click.Choice(["none", "spacy"]),
+    default="none",
+    show_default=True,
+    help="Add pretrained semantic document vectors to the input features.",
+)
+def train_book_model_torch_cmd(
+    features_path: Path,
+    labels_path: Path,
+    output_dir: Path,
+    epochs: int,
+    learning_rate: float,
+    hidden_dim: int,
+    hash_dim: int,
+    random_seed: int,
+    device: str,
+    feature_set: str,
+    semantic_vectors: str,
+):
+    """Train a gradient-descent offline book-tier model with PyTorch."""
+
+    from subtitle_generator.book_model_torch import train_book_tier_torch
+
+    try:
+        result = train_book_tier_torch(
+            features_path=features_path,
+            labels_path=labels_path,
+            output_dir=output_dir,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            hidden_dim=hidden_dim,
+            hash_dim=hash_dim,
+            random_seed=random_seed,
+            device=device,
+            feature_set=feature_set,
+            semantic_vectors=semantic_vectors,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Wrote {result.prediction_count:,} Torch predictions to "
+        f"{result.predictions_path}"
+    )
+    click.echo(f"Wrote Torch report to {result.report_path}")
+    click.echo(
+        "Validation: "
+        f"n={result.validation_count:,}, "
+        f"accuracy={result.validation_accuracy:.3f}, "
+        f"macro={result.validation_macro_accuracy:.3f}, "
+        f"device={result.training_device}"
+    )
+
+
+@cli.command("distill-book-model")
+@click.option(
+    "--features",
+    "features_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/book_features.csv"),
+    show_default=True,
+    help="book_features CSV path.",
+)
+@click.option(
+    "--labels",
+    "labels_path",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/book_labels.csv"),
+    show_default=True,
+    help="Original book_labels CSV path.",
+)
+@click.option(
+    "--teacher-predictions",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/torch-all-spacy/book_torch_predictions.csv"),
+    show_default=True,
+    help="Rich teacher prediction CSV path.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/distill-export-slot"),
+    show_default=True,
+    help="Directory for distillation artifacts.",
+)
+@click.option(
+    "--feature-set",
+    type=click.Choice(["export-current", "export-slot"]),
+    default="export-slot",
+    show_default=True,
+    help="Export-focused feature set for the student model.",
+)
+@click.option(
+    "--device",
+    type=click.Choice(["auto", "cpu", "cuda"]),
+    default="auto",
+    show_default=True,
+    help="Training device. auto uses CUDA when available.",
+)
+@click.option("--epochs", type=click.IntRange(min=1), default=300, show_default=True)
+@click.option("--learning-rate", type=float, default=0.02, show_default=True)
+@click.option("--hidden-dim", type=click.IntRange(min=1), default=64, show_default=True)
+@click.option("--hash-dim", type=click.IntRange(min=32), default=2048, show_default=True)
+def distill_book_model_cmd(
+    features_path: Path,
+    labels_path: Path,
+    teacher_predictions: Path,
+    output_dir: Path,
+    feature_set: str,
+    device: str,
+    epochs: int,
+    learning_rate: float,
+    hidden_dim: int,
+    hash_dim: int,
+):
+    """Train an export-focused student from the rich offline teacher."""
+
+    from subtitle_generator.book_model_distillation import distill_exportable_book_model
+
+    try:
+        result = distill_exportable_book_model(
+            features_path=features_path,
+            labels_path=labels_path,
+            teacher_predictions_path=teacher_predictions,
+            output_dir=output_dir,
+            feature_set=feature_set,
+            device=device,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            hidden_dim=hidden_dim,
+            hash_dim=hash_dim,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Wrote teacher labels to {result.teacher_labels_path}")
+    click.echo(f"Wrote student predictions to {result.student_predictions_path}")
+    click.echo(f"Wrote distillation report to {result.distillation_report_path}")
+    click.echo(
+        "Distillation: "
+        f"agreement={result.agreement:.3f}, "
+        f"validation_macro={result.validation_macro_accuracy:.3f}"
+    )
+
+
+@cli.command("shadow-book-model")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--prediction",
+    "predictions",
+    multiple=True,
+    nargs=2,
+    metavar="LABEL PATH",
+    type=(str, click.Path(path_type=Path)),
+    default=(
+        (
+            "export-current",
+            Path("generated-artifacts/book-model/distill-export-current/book_torch_predictions.csv"),
+        ),
+        (
+            "export-slot",
+            Path("generated-artifacts/book-model/distill-export-slot/book_torch_predictions.csv"),
+        ),
+    ),
+    show_default=True,
+    help="Student prediction pair to roll up. Can be provided multiple times.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/shadow-rollups"),
+    show_default=True,
+    help="Directory for shadow rollup artifacts.",
+)
+@click.option("--samples", type=click.IntRange(min=1), default=12, show_default=True)
+@click.option("--random-seed", default=20260505, show_default=True)
+def shadow_book_model_cmd(
+    db_path: Path,
+    predictions: tuple[tuple[str, Path], ...],
+    output_dir: Path,
+    samples: int,
+    random_seed: int,
+):
+    """Aggregate student predictions onto fillers and write shadow reports."""
+
+    from subtitle_generator.book_model_shadow import ShadowInput, build_shadow_rollups
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_shadow_rollups(
+            conn,
+            output_dir=output_dir,
+            prediction_inputs=tuple(
+                ShadowInput(label=label, predictions_path=path)
+                for label, path in predictions
+            ),
+            sample_count=samples,
+            random_seed=random_seed,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    for path in result.rollup_paths:
+        click.echo(f"Wrote rollups to {path}")
+    click.echo(f"Wrote shadow report to {result.report_path}")
+
+
+@cli.command("deployment-gate")
+@click.option(
+    "--rollup",
+    "rollups",
+    multiple=True,
+    nargs=2,
+    metavar="LABEL PATH",
+    type=(str, click.Path(path_type=Path)),
+    default=(
+        (
+            "export-current",
+            Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-current.csv"),
+        ),
+        (
+            "export-slot",
+            Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-slot.csv"),
+        ),
+    ),
+    show_default=True,
+    help="Student rollup CSV pair to evaluate. Can be provided multiple times.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/deployment-gate"),
+    show_default=True,
+    help="Directory for deployment gate artifacts.",
+)
+@click.option("--samples", type=click.IntRange(min=1), default=24, show_default=True)
+@click.option("--random-seed", default=20260505, show_default=True)
+@click.option("--model", default=None, help="LLM reviewer model. Defaults to rater model.")
+@click.option("--dry-run", is_flag=True, help="Write samples without LLM review.")
+def deployment_gate_cmd(
+    rollups: tuple[tuple[str, Path], ...],
+    output_dir: Path,
+    samples: int,
+    random_seed: int,
+    model: str | None,
+    dry_run: bool,
+):
+    """LLM-review candidate model/blend strategies for deployment."""
+
+    from subtitle_generator.book_model_deployment_gate import run_deployment_gate_review
+    from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
+
+    try:
+        result = run_deployment_gate_review(
+            rollup_paths={label: path for label, path in rollups},
+            output_dir=output_dir,
+            sample_count=samples,
+            random_seed=random_seed,
+            model=model or DEFAULT_RATER_MODEL,
+            dry_run=dry_run,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Wrote {result.comparison_count:,} samples to {result.samples_path}")
+    click.echo(f"Wrote {result.reviewed_count:,} reviews to {result.reviews_path}")
+    click.echo(f"Wrote deployment gate report to {result.report_path}")
+
+
+@cli.command("label-combination-risk")
+@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to sample from.")
+@click.option("--samples", type=click.IntRange(min=1), default=60, show_default=True, help="Number of fixed-seed samples to label.")
+@click.option("--seed", default=20260505, show_default=True, help="Seed base for sample generation.")
+@click.option("--model", default=None, help="LLM model to use. Defaults to the configured rater model.")
+@click.option("--dry-run", is_flag=True, help="Generate samples without LLM labeling.")
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model"),
+    show_default=True,
+    help="Directory for generated combination-risk artifacts.",
+)
+def label_combination_risk_cmd(
+    db_path: Path,
+    samples: int,
+    seed: int,
+    model: str | None,
+    dry_run: bool,
+    output_dir: Path,
+):
+    """Sample and LLM-label beyond-the-pale combination risk."""
+
+    from subtitle_generator.combination_risk import label_combination_risk
+    from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = label_combination_risk(
+            conn,
+            output_dir=output_dir,
+            samples=samples,
+            seed=seed,
+            model=model or DEFAULT_RATER_MODEL,
+            dry_run=dry_run,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Wrote {result.sample_count:,} samples to {result.samples_path}")
+    click.echo(f"Wrote combination-risk report to {result.report_path}")
+    if not dry_run:
+        click.echo(
+            f"Labeled {result.labeled_count:,} samples; "
+            f"nonsensical={result.nonsensical_count:,}"
+        )
 
 
 @cli.command("build-db")

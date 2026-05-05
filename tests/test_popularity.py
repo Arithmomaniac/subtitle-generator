@@ -9,6 +9,8 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 
@@ -247,9 +249,207 @@ def test_export_import_roundtrip():
         assert "vector_sum" in columns, "mini DB must preserve the remix runtime schema"
         assert "popularity_level" in columns
         assert "popularity_confidence" in columns
+        assert "slot_filler_model_scores" in {
+            row[0] for row in mini.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
         mini.close()
 
     print("  PASS: export_import_roundtrip")
+
+
+def test_model_score_csv_imports_to_mini_db(tmp_path):
+    from subtitle_generator.export_db import build_mini_db
+
+    (tmp_path / "slot_fillers.csv").write_text(
+        "\n".join([
+            "id,slot_type,filler,mode,source_subtitle_id,freq,pos_tag,prep,remix_type,remix_prep,remix_word_count,centroid_dot,norm_sq,token_count,popularity_score,popularity_level,popularity_confidence",
+            "1,list_item,Race,strict,,10,,,,,,,,,0.8,1,1.0",
+            "2,list_item,Archives,strict,,10,,,,,,,,,0.1,0,1.0",
+        ]),
+        encoding="utf-8",
+    )
+    (tmp_path / "config.csv").write_text("key,value\n", encoding="utf-8")
+    (tmp_path / "sources.csv").write_text(
+        "slot_filler_id,title,subtitle_text,source_tag\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "slot_filler_model_scores.csv").write_text(
+        "\n".join([
+            "slot_filler_id,score_pop,score_mainstream,score_niche,model_tier,source_prediction_count",
+            "1,0.9,0.08,0.02,pop,3",
+            "2,0.05,0.1,0.85,niche,2",
+        ]),
+        encoding="utf-8",
+    )
+
+    stats = build_mini_db(tmp_path, tmp_path / "mini.db")
+    mini = sqlite3.connect(tmp_path / "mini.db")
+    row = mini.execute(
+        "SELECT score_pop, score_niche, model_tier FROM slot_filler_model_scores WHERE slot_filler_id = 2"
+    ).fetchone()
+    mini.close()
+
+    assert stats["slot_filler_model_scores"] == 2
+    assert row == (0.05, 0.85, "niche")
+
+
+def test_model_scores_drive_tier_classification_and_generation():
+    from subtitle_generator.generate import generate_subtitle_matching_tiers
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            centroid_dot REAL,
+            norm_sq REAL,
+            token_count INTEGER,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE slot_filler_model_scores (
+            slot_filler_id INTEGER PRIMARY KEY,
+            score_pop REAL NOT NULL,
+            score_mainstream REAL NOT NULL,
+            score_niche REAL NOT NULL,
+            model_tier TEXT,
+            source_prediction_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    next_id = 1
+    for slot_type in ("list_item", "action_noun", "of_object"):
+        for filler, pop_score, niche_score in (
+            ("PopThing", 0.9, 0.05),
+            ("NicheThing", 0.05, 0.9),
+        ):
+            conn.execute(
+                """
+                INSERT INTO slot_fillers (
+                    id, slot_type, filler, mode, freq, popularity_score,
+                    popularity_level, popularity_confidence
+                )
+                VALUES (?, ?, ?, 'strict', 100, 0.5, 1, 1.0)
+                """,
+                (next_id, slot_type, filler),
+            )
+            conn.execute(
+                "INSERT INTO slot_filler_model_scores VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    next_id,
+                    pop_score,
+                    0.1,
+                    niche_score,
+                    "pop" if pop_score > niche_score else "niche",
+                    1,
+                ),
+            )
+            next_id += 1
+    conn.commit()
+
+    pop_evidence = compute_tier_evidence(
+        "PopThing, PopThing, and the PopThing of PopThing",
+        conn,
+    )
+    niche_evidence = compute_tier_evidence(
+        "NicheThing, NicheThing, and the NicheThing of NicheThing",
+        conn,
+    )
+    generated = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers={"niche"},
+        seed=1,
+        max_attempts=3,
+    )
+
+    assert pop_evidence.tier == "pop"
+    assert niche_evidence.tier == "niche"
+    assert "NicheThing" in generated.text
+
+
+def test_literal_bad_generation_guardrail_rejects_known_artifacts():
+    from subtitle_generator.generate import _is_literal_bad_filler
+
+    assert _is_literal_bad_filler("of_object", "Christian")
+    assert _is_literal_bad_filler("of_object", "Imf")
+    assert _is_literal_bad_filler("list_item", "H.G.W.ells")
+    assert _is_literal_bad_filler("of_object", "Con Men, Jr")
+    assert not _is_literal_bad_filler("of_object", "Emissions Trading")
+    assert not _is_literal_bad_filler("of_object", "Second Indochina War")
+
+
+def test_literal_bad_guardrail_applies_without_model_scores():
+    from subtitle_generator.generate import _load_generation_candidates
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1,
+            popularity_score REAL
+        )
+    """)
+    conn.executemany(
+        """
+        INSERT INTO slot_fillers (slot_type, filler, mode, freq, popularity_score)
+        VALUES (?, ?, 'strict', 10, 0.5)
+        """,
+        [
+            ("list_item", "Policy"),
+            ("action_noun", "Genius"),
+            ("of_object", "Christian"),
+            ("of_object", "Emissions Trading"),
+        ],
+    )
+
+    candidates = _load_generation_candidates(conn)
+
+    assert [row[0] for row in candidates.obj_rows] == ["Emissions Trading"]
+
+
+def test_mini_db_rejects_partial_model_score_coverage(tmp_path):
+    from subtitle_generator.export_db import build_mini_db
+
+    (tmp_path / "slot_fillers.csv").write_text(
+        "\n".join([
+            "id,slot_type,filler,mode,source_subtitle_id,freq,pos_tag,prep,remix_type,remix_prep,remix_word_count,centroid_dot,norm_sq,token_count,popularity_score,popularity_level,popularity_confidence",
+            "1,list_item,Race,strict,,10,,,,,,,,,0.8,1,1.0",
+            "2,list_item,Archives,strict,,10,,,,,,,,,0.1,0,1.0",
+        ]),
+        encoding="utf-8",
+    )
+    (tmp_path / "config.csv").write_text("key,value\n", encoding="utf-8")
+    (tmp_path / "sources.csv").write_text(
+        "slot_filler_id,title,subtitle_text,source_tag\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "slot_filler_model_scores.csv").write_text(
+        "\n".join([
+            "slot_filler_id,score_pop,score_mainstream,score_niche,model_tier,source_prediction_count",
+            "1,0.9,0.08,0.02,pop,3",
+        ]),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="cover every exported slot filler"):
+        build_mini_db(tmp_path, tmp_path / "mini.db")
 
 
 def test_export_data_filters_stale_pattern_sources(tmp_path):
@@ -614,6 +814,74 @@ def test_source_tier_candidate_selection_is_seeded_and_resumable():
     assert [candidate.id for candidate in forced] == [1, 2, 3, 4]
 
 
+def test_source_tier_candidate_selection_can_prioritize_likely_pop():
+    from subtitle_generator.source_tier_enrichment import (
+        ensure_source_tier_label_columns,
+        load_source_tier_candidates,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE pattern_matches (
+            id INTEGER PRIMARY KEY,
+            subtitle_id INTEGER,
+            title TEXT,
+            subtitle TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE slot_filler_sources (
+            slot_filler_id INTEGER,
+            subtitle_id INTEGER
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            popularity_score REAL
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO pattern_matches VALUES (?, ?, ?, ?)",
+        [
+            (1, 101, "Book A", "Scholars, Archives, and the Study of Law"),
+            (2, 102, "Book B", "Secrets, Power, and the Future of Food"),
+            (3, 103, "Book C", "Local Records, Families, and the Work of History"),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO slot_fillers VALUES (?, ?)",
+        [
+            (11, 0.2),
+            (12, 1.9),
+            (13, 0.8),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO slot_filler_sources VALUES (?, ?)",
+        [
+            (11, 101),
+            (12, 102),
+            (13, 103),
+        ],
+    )
+    ensure_source_tier_label_columns(conn)
+
+    candidates = load_source_tier_candidates(
+        conn,
+        limit=3,
+        selection="likely-pop",
+    )
+
+    assert [candidate.id for candidate in candidates] == [2, 3, 1]
+
+
 def test_source_tier_title_candidates_render_with_blank_subtitle(tmp_path):
     import csv
 
@@ -779,6 +1047,80 @@ def test_source_tier_distribution_combines_labeled_rows_not_total_rows():
 
     assert "Combined post-rebuild shares: pop=0.152, mainstream=0.348, niche=0.500" in report
     assert "Combined rows: total=15000, labeled=4050, unlabeled=10950" in report
+
+
+def test_source_tier_readiness_reports_tier_deficits():
+    from subtitle_generator.source_tier_enrichment import (
+        SourceTierDistributionRow,
+        SourceTierReadiness,
+        format_source_tier_readiness_report,
+    )
+
+    readiness = SourceTierReadiness(
+        rows=(
+            SourceTierDistributionRow(
+                candidate_source="subtitle",
+                total_count=500,
+                labeled_count=150,
+                unlabeled_count=350,
+                pop_count=5,
+                mainstream_count=45,
+                niche_count=100,
+            ),
+            SourceTierDistributionRow(
+                candidate_source="title",
+                total_count=100,
+                labeled_count=20,
+                unlabeled_count=80,
+                pop_count=1,
+                mainstream_count=9,
+                niche_count=10,
+            ),
+        ),
+        min_confidence=0.0,
+        min_total_labeled=200,
+        min_labeled_per_source=50,
+        min_labeled_per_tier=25,
+    )
+
+    report = format_source_tier_readiness_report(readiness)
+
+    assert "Gate: NEEDS_LABELS" in report
+    assert "Total labeled deficit: 30" in report
+    assert "title=30" in report
+    assert "pop=19" in report
+    assert "Recommended next random labeling batch:" in report
+
+
+def test_source_tier_readiness_ready_when_thresholds_are_met():
+    from subtitle_generator.source_tier_enrichment import (
+        SourceTierDistributionRow,
+        SourceTierReadiness,
+        format_source_tier_readiness_report,
+    )
+
+    readiness = SourceTierReadiness(
+        rows=(
+            SourceTierDistributionRow(
+                candidate_source="subtitle",
+                total_count=200,
+                labeled_count=100,
+                unlabeled_count=100,
+                pop_count=30,
+                mainstream_count=30,
+                niche_count=40,
+            ),
+        ),
+        min_confidence=0.0,
+        min_total_labeled=100,
+        min_labeled_per_source=100,
+        min_labeled_per_tier=25,
+    )
+
+    report = format_source_tier_readiness_report(readiness)
+
+    assert "Gate: SOURCE_TIER_READY" in report
+    assert readiness.recommended_random_batch == 0
 
 
 def test_classify_source_tiers_persists_and_exports_labels(tmp_path):
