@@ -177,7 +177,7 @@ uv run subtitle-gen build-db                    # build SQLite from CSVs (CI doe
 **Deploy**:
 1. Configure OIDC: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` as GitHub secrets
 2. Set `AZURE_FUNCTIONAPP_NAME` as a GitHub variable
-3. Run `deploy-infra.yml` workflow (creates Azure resources)
+3. Run `deploy-infra.yml` workflow (creates Azure resources). Set `ALERT_EMAIL` or the workflow `alertEmail` input to enable Azure Monitor email alerts. Keep `deployRoleAssignments` enabled when the workflow identity has `Microsoft.Authorization/roleAssignments/write`; otherwise disable it and apply the documented Storage Blob/Table roles manually.
 4. Run `deploy.yml` workflow (deploys function app + frontend)
 
 ### Tone tiers

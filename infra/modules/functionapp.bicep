@@ -16,6 +16,9 @@ param appInsightsConnectionString string
 @description('Static website URL (for CORS)')
 param staticWebsiteUrl string
 
+@description('Whether to create RBAC role assignments. Requires Microsoft.Authorization/roleAssignments/write.')
+param deployRoleAssignments bool = true
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
 }
@@ -103,7 +106,7 @@ resource deployContainer 'Microsoft.Storage/storageAccounts/blobServices/contain
 
 // RBAC: Storage Blob Data Owner for the Function App (needed for deployment + $web writes)
 var storageBlobDataOwnerRole = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
-resource funcBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource funcBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments) {
   name: guid(storageAccount.id, functionApp.id, storageBlobDataOwnerRole)
   scope: storageAccount
   properties: {
@@ -115,7 +118,7 @@ resource funcBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 
 // RBAC: Storage Table Data Contributor for durable rating feedback writes
 var storageTableDataContributorRole = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
-resource funcTableRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource funcTableRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments) {
   name: guid(storageAccount.id, functionApp.id, storageTableDataContributorRole)
   scope: storageAccount
   properties: {

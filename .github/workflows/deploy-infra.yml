@@ -2,7 +2,7 @@ name: Deploy Infrastructure
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     paths: ['infra/**']
   workflow_dispatch:
     inputs:
@@ -14,6 +14,15 @@ on:
         description: 'Azure region'
         required: true
         default: 'eastus'
+      alertEmail:
+        description: 'Optional email address for Azure Monitor alerts'
+        required: false
+        default: ''
+      deployRoleAssignments:
+        description: 'Create Azure RBAC role assignments (requires roleAssignments/write)'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   id-token: write
@@ -44,6 +53,8 @@ jobs:
           parameters: >
             environmentName=${{ inputs.environmentName || 'subtitlegen' }}
             location=${{ inputs.location || 'eastus' }}
+            alertEmail=${{ inputs.alertEmail || secrets.ALERT_EMAIL || '' }}
+            deployRoleAssignments=${{ github.event_name != 'workflow_dispatch' || inputs.deployRoleAssignments }}
           deploymentName: ${{ inputs.environmentName || 'subtitlegen' }}-${{ github.run_number }}
 
       - name: Enable static website

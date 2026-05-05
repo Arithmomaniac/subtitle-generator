@@ -5,6 +5,7 @@ param appInsightsId string
 param location string
 
 @description('Email address for alert notifications')
+@secure()
 param alertEmail string
 
 @description('Function App name (for alert naming)')

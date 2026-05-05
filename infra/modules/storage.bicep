@@ -7,6 +7,9 @@ param location string
 @description('Principal ID for RBAC (optional, for dev access)')
 param principalId string = ''
 
+@description('Whether to create RBAC role assignments. Requires Microsoft.Authorization/roleAssignments/write.')
+param deployRoleAssignments bool = true
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: storageAccountName
   location: location
@@ -51,7 +54,7 @@ resource ratingsTable 'Microsoft.Storage/storageAccounts/tableServices/tables@20
 var storageBlobDataContributorRole = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 var storageTableDataContributorRole = '0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3'
 
-resource devBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(principalId)) {
+resource devBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments && !empty(principalId)) {
   name: guid(storageAccount.id, principalId, storageBlobDataContributorRole)
   scope: storageAccount
   properties: {
@@ -61,7 +64,7 @@ resource devBlobRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (
   }
 }
 
-resource devTableRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(principalId)) {
+resource devTableRbac 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployRoleAssignments && !empty(principalId)) {
   name: guid(storageAccount.id, principalId, storageTableDataContributorRole)
   scope: storageAccount
   properties: {

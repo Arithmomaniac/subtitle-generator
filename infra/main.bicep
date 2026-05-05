@@ -12,7 +12,11 @@ param location string = 'eastus'
 param principalId string = ''
 
 @description('Email address for alert notifications')
+@secure()
 param alertEmail string = ''
+
+@description('Whether to create RBAC role assignments. Requires Microsoft.Authorization/roleAssignments/write.')
+param deployRoleAssignments bool = true
 
 var resourceGroupName = '${environmentName}-rg'
 var storageAccountName = replace(toLower('${environmentName}st'), '-', '')
@@ -33,6 +37,7 @@ module storage 'modules/storage.bicep' = {
     storageAccountName: storageAccountName
     location: location
     principalId: principalId
+    deployRoleAssignments: deployRoleAssignments
   }
 }
 
@@ -56,10 +61,11 @@ module functionApp 'modules/functionapp.bicep' = {
     storageAccountName: storage.outputs.storageAccountName
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     staticWebsiteUrl: storage.outputs.staticWebsiteUrl
+    deployRoleAssignments: deployRoleAssignments
   }
 }
 
-module alerts 'modules/alerts.bicep' = {
+module alerts 'modules/alerts.bicep' = if (!empty(alertEmail)) {
   name: 'alerts'
   scope: rg
   params: {
