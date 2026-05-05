@@ -19,9 +19,8 @@ param staticWebsiteUrl string
 @description('Whether to create RBAC role assignments. Requires Microsoft.Authorization/roleAssignments/write.')
 param deployRoleAssignments bool = true
 
-var staticWebsiteOrigin = endsWith(staticWebsiteUrl, '/')
-  ? substring(staticWebsiteUrl, 0, length(staticWebsiteUrl) - 1)
-  : staticWebsiteUrl
+var parsedStaticWebsiteUrl = parseUri(staticWebsiteUrl)
+var staticWebsiteOrigin = '${parsedStaticWebsiteUrl.scheme}://${parsedStaticWebsiteUrl.host}'
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' existing = {
   name: storageAccountName
