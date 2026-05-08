@@ -20,6 +20,35 @@ The generator does not invent new slot fillers. It recombines validated real
 pieces. The learned model changes which pieces surface for a requested tier; it
 does not add new text to the pool.
 
+## What changed in the learned-tier rewrite
+
+The old runtime tiering path used frequency, popularity, and tone-target
+heuristics directly. During the ML rewrite, an intermediate scalar
+`book_model_score` framing was tried and rejected: it compressed pop,
+mainstream, and niche behavior onto a single line and then blended that scalar
+back into the legacy popularity path. That was not the desired behavior.
+
+The final design is pure categorization:
+
+| Piece | Final behavior |
+|---|---|
+| `score_pop` | Probability-like score that a filler belongs in pop-accessible generation. |
+| `score_mainstream` | Probability-like score for mainstream generation. |
+| `score_niche` | Probability-like score for niche generation. |
+| Requested tier `T` | Generation weights existing fillers roughly as `sqrt(freq) * score_T`. |
+
+The model classifies existing fillers; it does not generate or approve new text.
+This keeps the strict filler universe, source attribution, article handling, and
+remix safety gates intact while letting the requested tier choose a different
+slice of that same universe.
+
+The rewrite also narrowed the quality guardrail. "Funny nonsense" such as
+`Emissions Trading` or `Second Indochina War` is allowed when it is grammatical
+and usable as nonfiction-title absurdity. Only literal artifacts are blocked,
+such as bare adjective-shaped final objects (`Christian`), typo/acronym
+artifacts (`Imf`), run-together initials (`H.G.W.ells`), suffix artifacts
+(`Con Men, Jr`), and known standalone artifacts (`Xcalibur`).
+
 ## Runtime data flow
 
 ```text
@@ -163,13 +192,55 @@ Typical flow:
 
 ```powershell
 uv sync --extra ml --extra tune
+
+# Optional offline enrichment from Open Library and LOC raw data.
+uv run subtitle-gen build-book-metadata
+
+# Build source-book features and labels.
 uv run subtitle-gen build-book-features
+
+# Train local models and distill exportable students.
+uv run subtitle-gen train-book-model
 uv run subtitle-gen train-book-model-torch
 uv run subtitle-gen distill-book-model
+
+# Roll student predictions up to slot fillers.
 uv run subtitle-gen shadow-book-model
+
+# Optional: generate fixed samples for human/ad hoc LLM review.
+uv run subtitle-gen categorization-gate --dry-run
+
+# Install the selected export-slot rollup into the full local DB.
 uv run subtitle-gen install-book-model-scores `
   --input generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv
 ```
+
+`scripts\run-book-model-pipeline.ps1` wraps the same commands in step-gated
+PowerShell. It defaults to the safe inventory step; expensive training,
+installation, export, mini-DB build, validation, and optional review sampling
+are explicit steps or switches:
+
+```powershell
+pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
+pwsh -File scripts\run-book-model-pipeline.ps1 `
+  -Steps Features,Torch,Distill,Shadow,CategorizationGate `
+  -PlanOnly
+pwsh -File scripts\run-book-model-pipeline.ps1 `
+  -Steps CategorizationGate `
+  -ReviewGates
+```
+
+The review gates are optional sanity-check tooling. They do not grade the real
+books, train the model, compute deployed weights, or block export by themselves.
+The core weight-production path is labeled source books -> features/labels ->
+train/distill -> shadow rollups -> install/export scores.
+
+The two optional review gates answer different questions:
+
+| Command | Purpose | Status |
+|---|---|---|
+| `deployment-gate` | Legacy scalar/blend strategy comparison from the rejected intermediate design. | Kept for historical comparison and regression checks. |
+| `categorization-gate` | Pure per-tier categorization comparison against legacy sampling for requested pop/mainstream/niche tiers. | Preferred gate for learned-tier runtime changes. |
 
 The installed table is:
 
@@ -185,6 +256,12 @@ The installed table is:
 `install-book-model-scores` replaces the table atomically. If the CSV is missing
 required columns or contains invalid rows, the old score table is left intact.
 
+The rollup CSV from `shadow-book-model`, especially
+`generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv`,
+is the source for installed runtime scores. The generated reports, predictions,
+and gate outputs under `generated-artifacts\book-model\` are local review
+artifacts and are intentionally not deployment inputs.
+
 ## Export and mini DB
 
 After rebuilding slot, popularity, remix, or model-score state, regenerate the
@@ -195,7 +272,7 @@ uv run subtitle-gen export-data -o api\data
 uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
 ```
 
-Tracked files:
+Tracked deployment inputs:
 
 | File | Purpose |
 |---|---|
@@ -203,7 +280,14 @@ Tracked files:
 | `api\data\slot_filler_model_scores.csv` | Learned runtime tier probabilities. |
 | `api\data\sources.csv` | Source-book attribution. |
 | `api\data\config.csv` | Runtime configuration. |
-| `api\data\subtitles.mini.db` | Built SQLite artifact for local serving and Azure Functions. |
+| `api\data\source_tier_labels.csv` | Offline source-label evidence exported for training/evaluation continuity. |
+
+Ignored local/CI-built artifacts:
+
+| Path | Purpose |
+|---|---|
+| `api\data\subtitles.mini.db` | Built SQLite artifact for local serving and Azure Functions; CI rebuilds it from tracked CSVs in `.github\workflows\deploy.yml`. |
+| `generated-artifacts\` | Local reports, features, predictions, rollups, and gate outputs. |
 
 If `slot_filler_model_scores.csv` exists, `build-db` requires one score row for
 every exported slot filler. Partial coverage is rejected so deployment cannot

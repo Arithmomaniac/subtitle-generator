@@ -18,7 +18,7 @@ Generation now separates two concerns:
 | **Generation** | The generator still samples from the same validated filler universe; requested tone tiers weight fillers by the learned probability for that tier. |
 | **Guardrail** | A narrow literal-artifact filter removes broken strings and malformed final objects without rejecting funny conceptual collisions. |
 
-The deployment artifact includes `api\data\slot_filler_model_scores.csv` and `api\data\subtitles.mini.db`. The mini DB is built from tracked CSVs, so deployed Azure Functions do not need the full local SQLite database.
+The deployment inputs include tracked CSVs such as `api\data\slot_filler_model_scores.csv`. The ignored mini DB at `api\data\subtitles.mini.db` is built from those CSVs locally and in CI, so deployed Azure Functions do not need the full local SQLite database.
 
 ## Examples
 
@@ -100,9 +100,19 @@ uv run subtitle-gen train-book-model-torch
 uv run subtitle-gen distill-book-model
 uv run subtitle-gen shadow-book-model
 
+# Optional: generate fixed samples for human/ad hoc LLM review.
+uv run subtitle-gen categorization-gate --dry-run
+
 # Install the selected export-slot rollup into the local DB.
 uv run subtitle-gen install-book-model-scores `
   --input generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv
+```
+
+For repeatable runs, use the checked-in step runner:
+
+```powershell
+pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
+pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Features,Torch,Distill,Shadow,CategorizationGate -PlanOnly
 ```
 
 The runtime table is `slot_filler_model_scores`:
@@ -135,7 +145,14 @@ Tracked deployment inputs:
 | `api\data\slot_filler_model_scores.csv` | Learned tier probabilities used by generation and classification. |
 | `api\data\sources.csv` | Source-book attribution for generated slots. |
 | `api\data\config.csv` | Runtime tuning/config values. |
-| `api\data\subtitles.mini.db` | Built SQLite artifact used by local serving and Azure Functions. |
+| `api\data\source_tier_labels.csv` | Offline source-label evidence for training/evaluation continuity. |
+
+Ignored build outputs:
+
+| Path | Purpose |
+|---|---|
+| `api\data\subtitles.mini.db` | Built SQLite artifact used by local serving and Azure Functions; CI rebuilds it from CSVs. |
+| `generated-artifacts\` | Local reports, model features, predictions, rollups, and gate outputs. |
 
 ## Local verification
 
