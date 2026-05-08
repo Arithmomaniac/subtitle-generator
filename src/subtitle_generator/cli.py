@@ -1830,6 +1830,74 @@ def deployment_gate_cmd(
     click.echo(f"Wrote deployment gate report to {result.report_path}")
 
 
+@cli.command("categorization-gate")
+@click.option(
+    "--rollup",
+    "rollups",
+    multiple=True,
+    nargs=2,
+    metavar="LABEL PATH",
+    type=(str, click.Path(path_type=Path)),
+    default=(
+        (
+            "export-current",
+            Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-current.csv"),
+        ),
+        (
+            "export-slot",
+            Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-slot.csv"),
+        ),
+    ),
+    show_default=True,
+    help="Student rollup CSV pair to evaluate. Can be provided multiple times.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/categorization-gate"),
+    show_default=True,
+    help="Directory for pure categorization gate artifacts.",
+)
+@click.option(
+    "--samples-per-tier",
+    type=click.IntRange(min=1),
+    default=12,
+    show_default=True,
+)
+@click.option("--random-seed", default=20260505, show_default=True)
+@click.option("--model", default=None, help="LLM reviewer model. Defaults to rater model.")
+@click.option("--dry-run", is_flag=True, help="Write samples without LLM review.")
+def categorization_gate_cmd(
+    rollups: tuple[tuple[str, Path], ...],
+    output_dir: Path,
+    samples_per_tier: int,
+    random_seed: int,
+    model: str | None,
+    dry_run: bool,
+):
+    """LLM-review pure learned tier categorization samples."""
+
+    from subtitle_generator.book_model_categorization_gate import (
+        run_categorization_gate_review,
+    )
+    from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
+
+    try:
+        result = run_categorization_gate_review(
+            rollup_paths={label: path for label, path in rollups},
+            output_dir=output_dir,
+            samples_per_tier=samples_per_tier,
+            random_seed=random_seed,
+            model=model or DEFAULT_RATER_MODEL,
+            dry_run=dry_run,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Wrote {result.comparison_count:,} samples to {result.samples_path}")
+    click.echo(f"Wrote {result.reviewed_count:,} reviews to {result.reviews_path}")
+    click.echo(f"Wrote categorization gate report to {result.report_path}")
+
+
 @cli.command("label-combination-risk")
 @click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to sample from.")
 @click.option("--samples", type=click.IntRange(min=1), default=60, show_default=True, help="Number of fixed-seed samples to label.")
