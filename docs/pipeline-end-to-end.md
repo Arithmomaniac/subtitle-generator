@@ -1,81 +1,75 @@
 # End-to-end pipeline walkthrough
 
-This walkthrough explains how subtitle-generator moves from raw catalog data to
-runtime generation, browser verification, and deployment. It is the operational
-companion to `subtitle-gen validate-pipeline` and the schema contracts in
-`src\subtitle_generator`.
+This document explains the pipeline in the order you would run it from a clean
+local database to a deployed generator. It is not a history of implementation
+changes. Each stage names the command, the state it consumes, the state it
+writes, and why that state matters at runtime.
 
-## Core idea
-
-The project now has two separate runtime responsibilities:
-
-| Responsibility | Owner | Runtime effect |
-|---|---|---|
-| **Filler universe** | `build-slots`, popularity enrichment, remix precompute | Decides which real source-derived slot fillers are valid at all. |
-| **Tier categorization** | Offline book-model artifacts and `slot_filler_model_scores` | Scores each existing filler for pop/mainstream/niche generation. |
-| **Generation** | `generate.py` | Samples existing fillers using frequency plus the requested tier score. |
-| **Literal guardrail** | `generate.py` | Filters broken artifacts without rejecting funny absurdity. |
-
-The generator does not invent new slot fillers. It recombines validated real
-pieces. The learned model changes which pieces surface for a requested tier; it
-does not add new text to the pool.
-
-## What changed in the learned-tier rewrite
-
-The old runtime tiering path used frequency, popularity, and tone-target
-heuristics directly. During the ML rewrite, an intermediate scalar
-`book_model_score` framing was tried and rejected: it compressed pop,
-mainstream, and niche behavior onto a single line and then blended that scalar
-back into the legacy popularity path. That was not the desired behavior.
-
-The final design is pure categorization:
-
-| Piece | Final behavior |
-|---|---|
-| `score_pop` | Probability-like score that a filler belongs in pop-accessible generation. |
-| `score_mainstream` | Probability-like score for mainstream generation. |
-| `score_niche` | Probability-like score for niche generation. |
-| Requested tier `T` | Generation weights existing fillers roughly as `sqrt(freq) * score_T`. |
-
-The model classifies existing fillers; it does not generate or approve new text.
-This keeps the strict filler universe, source attribution, article handling, and
-remix safety gates intact while letting the requested tier choose a different
-slice of that same universe.
-
-The rewrite also narrowed the quality guardrail. "Funny nonsense" such as
-`Emissions Trading` or `Second Indochina War` is allowed when it is grammatical
-and usable as nonfiction-title absurdity. Only literal artifacts are blocked,
-such as bare adjective-shaped final objects (`Christian`), typo/acronym
-artifacts (`Imf`), run-together initials (`H.G.W.ells`), suffix artifacts
-(`Con Men, Jr`), and known standalone artifacts (`Xcalibur`).
-
-## Runtime data flow
+The short version:
 
 ```text
-raw records
-  -> source candidates
-  -> validated pattern matches
-  -> slot fillers
-  -> popularity/remix/model-score enrichment
+raw catalog records
+  -> parsed source candidates
+  -> strict slot fillers
+  -> popularity and remix enrichment
+  -> runtime config calibration
+  -> labeled source-book training rows
+  -> rich Torch teacher
+  -> exportable Torch student
+  -> filler-level pop/mainstream/niche scores
+  -> tracked CSVs
   -> mini DB
   -> CLI, local web, Azure Functions
 ```
 
-The most important runtime tables are:
+Runtime generation never invents new filler text. All ML work changes how the
+generator weights existing strict fillers for a requested tier.
 
-| Table | Purpose |
+## Vocabulary
+
+| Term | Meaning |
 |---|---|
-| `subtitles` | Raw and normalized source-title/subtitle rows in the full local DB. |
-| `pattern_matches` | Clean parsed source candidates that passed slot validation. |
-| `slot_fillers` | Canonical runtime filler inventory, frequency, popularity, article, and remix state. |
-| `slot_filler_sources` | Source attribution from fillers back to source books. |
-| `slot_filler_model_scores` | Learned pop/mainstream/niche probabilities for each deployed filler. |
-| `config` | Runtime tuning values, article thresholds, remix constants, and generation ratios. |
+| Tier | One of `pop`, `mainstream`, or `niche`. A requested tier changes which existing fillers are weighted higher; it is not a separate generator. |
+| Source book | A real Library of Congress or Open Library record used as evidence. Source books can provide labels, popularity signals, and slot fillers. |
+| Source candidate | A source title/subtitle string that might match the `X, Y, and the Z of W` pattern. |
+| Slot | One position in the generated pattern: `list_item`, `action_noun`, or `of_object`. |
+| Slot filler | A deduplicated phrase that can fill one slot, such as a list item or final of-object. |
+| Strict filler universe | The set of fillers that passed extraction and validation gates. Runtime generation samples only from this universe. |
+| Remix | Recombining parts of a multi-word `of_object` to make a new final object while staying close to real source phrasing. |
+| Runtime config | Rows in the DB `config` table that tune generation behavior and are exported to `api\data\config.csv`. |
+| Teacher model | The rich offline Torch model trained with the broadest feature set. |
+| Student model | The exportable Torch model trained to imitate the teacher using durable/export-safe features. |
+| Rollup | Aggregation from book-level predictions back onto filler-level scores. |
 
-Only a subset is deployed. The mini DB contains the runtime-facing state:
-`slot_fillers`, `slot_filler_model_scores`, `sources`, and `config`.
+## 0. Runtime contract
 
-## Full rebuild sequence
+The deployed generator has four responsibilities:
+
+| Responsibility | Runtime state | Effect |
+|---|---|---|
+| Filler universe | `slot_fillers` | Defines which source-derived fillers are allowed at all. |
+| Tier categorization | `slot_filler_model_scores` | Gives each filler `score_pop`, `score_mainstream`, and `score_niche`. |
+| Generation | `generate.py` | Samples strict fillers using frequency and the requested tier score. |
+| Literal guardrail | `generate.py` | Blocks broken artifacts without blocking funny absurdity. |
+
+When model scores are present, requested tier `T` uses:
+
+```text
+weight = sqrt(freq) * score_T
+```
+
+If model scores are absent, generation falls back to legacy
+frequency/popularity/tone-target weighting. Deployment is expected to include a
+complete `slot_filler_model_scores.csv`, so the fallback is mainly for old local
+DBs and debugging.
+
+The guardrail is intentionally narrow. It rejects literal artifacts such as bare
+adjective-shaped final objects (`Christian`), typo/acronym artifacts (`Imf`),
+run-together initials (`H.G.W.ells`), suffix artifacts (`Con Men, Jr`), and
+known standalone artifacts (`Xcalibur`). It does not reject grammatical
+nonfiction absurdity such as `Emissions Trading` or `Second Indochina War`.
+
+## 1. Download and extract source records
 
 Run this when rebuilding the corpus from raw third-party data:
 
@@ -84,68 +78,63 @@ uv run subtitle-gen download --parts all
 uv run subtitle-gen extract
 uv run subtitle-gen download-ol
 uv run subtitle-gen extract-ol
-uv run subtitle-gen build-slots
-uv run subtitle-gen download-popularity
-uv run subtitle-gen populate-popularity
-uv run subtitle-gen precompute-vectors
-uv run subtitle-gen validate-pipeline
 ```
 
-`validate-pipeline` is read-only. It checks schema, required config values,
-popularity coverage, remix precompute state, model IDs, and serving readiness.
+These commands create normalized source rows in the full local SQLite DB.
 
-## Source ingestion
-
-`extract` and `extract-ol` normalize Library of Congress and Open Library records
-into `subtitles`.
-
-Important columns:
-
-| Column | Meaning |
+| Table/field | Meaning |
 |---|---|
-| `title` | Display title from the source record. |
-| `subtitle` | Display subtitle from the source record; empty for title-derived candidates. |
-| `candidate_text` | The text `build-slots` parses. |
-| `candidate_source` | `subtitle` or `title`. |
-| `isbn`, `lccn`, `source_file`, `lang` | Identifier and provenance metadata. |
+| `subtitles.title` | Source title display text. |
+| `subtitles.subtitle` | Source subtitle display text, when present. |
+| `subtitles.candidate_text` | Text that slot extraction will parse. |
+| `subtitles.candidate_source` | Whether the candidate came from title or subtitle text. |
+| `isbn`, `lccn`, `source_file`, `lang` | Identifier and provenance metadata used later by enrichment and modeling. |
 
 Extraction repairs obvious title/subtitle duplication when it can recover a real
-split. Rows that cannot be repaired are rejected before they can become runtime
-fillers.
+split. Rows that cannot be repaired remain out of the runtime filler path.
 
-## Slot extraction
+## 2. Build the strict filler universe
 
-`build-slots` looks for:
+```powershell
+uv run subtitle-gen build-slots
+```
+
+`build-slots` searches for source candidates shaped like:
 
 ```text
 X, Y, and [the/a/an] Z of [the/a/an] W
 ```
 
-The regex match is only a candidate. `slots.py` then applies stricter gates:
+The regex match is only the first pass. `slots.py` then applies stricter gates:
 
 | Gate | Behavior |
 |---|---|
-| List shape | Accept exactly two or three source list clauses; generated output still uses two. |
+| List shape | Accept exactly two or three source list clauses; generated output uses two. |
 | List item validation | Reject the whole candidate if any original list item is malformed. |
 | Action noun validation | Reject weak, truncated, or implausible action nouns. |
 | Of-object validation | Reject malformed final objects and bad starts such as `using`, `with`, or `for`. |
 | Source repair | Preserve title-only source display for title-derived candidates. |
 
-Accepted source candidates create:
+Accepted candidates create the runtime universe:
 
 | Output | Meaning |
 |---|---|
 | `pattern_matches` | Parsed source rows with list items, action noun, of-object, and observed articles. |
 | `slot_fillers` | Deduplicated strict fillers by slot type. |
-| `slot_filler_sources` | Links from fillers to source subtitles/books. |
+| `slot_filler_sources` | Links from fillers back to source books. |
 
-## Popularity enrichment
+Everything later, including ML, works inside this strict universe. The book model
+does not add new fillers.
 
-Popularity is still useful as source evidence and as a fallback signal, but it is
-no longer the primary deployed tier classifier when model scores are present.
+## 3. Add popularity evidence
 
-`populate-popularity` maps source data to Open Library work keys, combines demand
-signals, and pushes work-level scores down to fillers:
+```powershell
+uv run subtitle-gen download-popularity
+uv run subtitle-gen populate-popularity
+```
+
+Popularity is source evidence and fallback signal. It is not the final deployed
+tier classifier when model scores are present.
 
 | Source | Signal |
 |---|---|
@@ -156,7 +145,7 @@ signals, and pushes work-level scores down to fillers:
 | Trove Australia | Library breadth via `holdingsCount`. |
 | Open Library edition count | Prior/confidence signal, not a direct popularity vote. |
 
-The resulting filler columns remain:
+The key filler fields are:
 
 | Column | Meaning |
 |---|---|
@@ -164,108 +153,298 @@ The resulting filler columns remain:
 | `popularity_level` | Coarse availability of source popularity evidence. |
 | `popularity_confidence` | Confidence in the popularity score. |
 
-## Remix precompute
+Popularity matters because it gives the models and fallback generator demand
+evidence, but it is too blunt to distinguish all pop/mainstream/niche behavior.
 
-`precompute-vectors` prepares runtime-safe remix information for multi-word
-of-objects. It stores scalar data so serving can evaluate remix coherence without
-loading spaCy or full vectors.
+## 4. Precompute runtime-safe remix features
 
-Key fields:
+```powershell
+uv run subtitle-gen precompute-vectors
+```
+
+Runtime remixing cannot load build-time NLP dependencies. This step stores scalar
+fields that let serving evaluate remix coherence cheaply.
+
+Remix is only for multi-word `of_object` fillers. The precompute step classifies
+which final objects can be decomposed safely:
 
 | Field | Meaning |
 |---|---|
-| `remix_type` | Type 1 compound noun phrase or Type 2 prepositional phrase. |
-| `remix_prep` | Preposition for Type 2 remixes. |
+| `remix_type` | `type1` for a two- or three-word compound noun phrase; `type2` for a noun phrase containing a preposition. |
+| `remix_prep` | The preposition used by a Type 2 remix, such as `in`, `of`, or `for`. |
 | `remix_word_count` | Original phrase length. |
 | `centroid_dot`, `norm_sq`, `token_count` | Scalar vector approximation fields. |
 | `centroid_norm`, `avg_cross_sim_t1`, `avg_cross_sim_t2` | Config constants for runtime similarity approximation. |
 
-Runtime remixing composes candidate parts and rejects low-similarity combinations
-with the scalar approximation. It does not load build-time NLP dependencies.
+Examples:
 
-## Book-model tier categorization
+| Remix class | Original shape | How it recombines |
+|---|---|---|
+| Type 1 compound | `American Public Identity` | Splits into modifier/head-like parts and recombines with compatible compound parts. |
+| Type 2 prepositional | `Knowledge in Late Antiquity` | Preserves the preposition frame and recombines topic/complement-like parts. |
+| Not remixable | one-word objects or unsafe compounds | Stays atomic and can still be sampled as a normal `of_object`. |
 
-The learned tier model is offline-only. It consumes source-book features and
-exports runtime scores for existing fillers.
+Generation can then compose candidate parts and reject low-similarity remixes
+without spaCy or full vector state.
 
-Typical flow:
+## 5. Check runtime config at the boundary it affects
+
+Runtime constants live in the full DB `config` table, then get exported to
+`api\data\config.csv` and packaged into the mini DB. In a normal rerun, these
+rows may already exist; you do not rerun every tuner just because you are
+retraining the book model.
+
+The timing depends on what the constant feeds:
+
+| If you change... | Run or rerun here | Then rerun... | Why |
+|---|---|---|---|
+| `pop_weight_*`, `pop_exponent` | Before or during `populate-popularity` | `populate-popularity`, `build-book-features`, model training, export | These change `slot_fillers.popularity_score`, which is both runtime fallback state and model input. |
+| `remix_calibrated_remix_prob`, `remix_calibrated_min_sim` | After slots, popularity, and remix precompute exist | final sample checks and `export-data` | CLI/API defaults and sample review gates consume these values directly. |
+| `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | After generation can produce realistic samples | final sample checks and `export-data` | These are generation heuristics; changing them does not retrain weights unless you use generated samples as review evidence. |
+| `generation_tier_ratio_pop/mainstream/niche` | Before final runtime validation/export | `export-data`, `build-db` | These control the default tier mix when no explicit tone is requested. |
+| `tier_center_*`, `accessibility_threshold_*`, `weighted_sample_*`, `pop_base_weight_blend`, `pop_classification_blend`, `pop_missing_default` | Before fallback diagnostics or legacy sampling checks | diagnostics, sample checks, export if changed | These mostly affect fallback tiering/legacy sampling when model scores are missing, plus diagnostic evidence. |
+
+Useful commands:
 
 ```powershell
-uv sync --extra ml --extra tune
+# Remix defaults: grid-search min_sim and remix probability on generated samples.
+uv sync --extra tune
+uv run subtitle-gen calibrate-remix --samples 50
 
-# Optional offline enrichment from Open Library and LOC raw data.
-uv run subtitle-gen build-book-metadata
+# Current autoresearch loop is intentionally narrow: article/remix heuristics.
+uv run subtitle-gen tune --phase all --samples 50 --iterations 30
 
-# Build source-book features and labels.
+# Fallback tier thresholds from source-title labels; not the primary classifier
+# when slot_filler_model_scores is complete.
+uv run subtitle-gen calibrate-tier-gates --apply
+```
+
+The feedback loop is:
+
+```text
+current DB state + config
+  -> generate or score fixed sample sets
+  -> inspect/score outputs
+  -> write updated config rows
+  -> rerun the affected downstream boundary
+  -> export config.csv if the change should deploy
+```
+
+For a book-model refresh, use the existing config rows unless you are explicitly
+changing a runtime knob. The refresh consumes those rows through generation,
+feature extraction, validation, and export; it does not imply retuning them.
+
+## 6. Prepare source-book labels
+
+Source-book labels are the supervision signal for the book model. They are
+separate from generated-subtitle feedback.
+
+```powershell
+uv sync --extra tune
+uv run subtitle-gen classify-source-tiers --dry-run --limit 20
+uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10
+uv run subtitle-gen source-tier-distribution
+```
+
+The label workflow writes `pattern_matches.llm_market_tier*` in the full local DB
+and exports `api\data\source_tier_labels.csv`. Those labels feed offline
+training and evaluation; they are not read by the deployed mini DB.
+
+The current labeled set is imbalanced:
+
+| Label | Count | Consequence |
+|---|---:|---|
+| pop | 48 | Very sparse; pop validation metrics are directional. |
+| mainstream | 220 | Enough to learn broad trade/nonfiction texture, but still limited. |
+| niche | 1,032 | Dominates the label set and pulls naive models toward niche. |
+
+The Torch trainer uses class and sample weighting so niche does not completely
+dominate the loss, but this label distribution still shapes every model.
+
+## 7. Build book-model features
+
+```powershell
+uv sync --extra ml
 uv run subtitle-gen build-book-features
+```
 
-# Train local models and distill exportable students.
+For the richest run, include offline metadata first:
+
+```powershell
+uv run subtitle-gen build-book-metadata
+uv run subtitle-gen build-book-features `
+  --metadata-csv generated-artifacts\book-model\book_metadata.csv
+```
+
+`build-book-features` joins source rows, tier labels, filler links, popularity,
+optional metadata, and slot-derived text into book-level training artifacts:
+
+| Artifact | Meaning |
+|---|---|
+| `generated-artifacts\book-model\book_features.csv` | One row per labeled/source candidate with numeric and text features. |
+| `generated-artifacts\book-model\book_labels.csv` | Training labels aligned by `pattern_match_id`. |
+| `generated-artifacts\book-model\book_feature_label_report.md` | Coverage report for labels and feature availability. |
+
+These artifacts are ignored local outputs. They are meant to be regenerated, not
+committed.
+
+## 8. Run the baseline model
+
+```powershell
 uv run subtitle-gen train-book-model
-uv run subtitle-gen train-book-model-torch
-uv run subtitle-gen distill-book-model
+```
 
-# Roll student predictions up to slot fillers.
+The baseline is an interpretable calibration model. It uses text, centroid,
+provenance, and scalar features to check whether the labels are learnable before
+moving to the two-stage Torch path.
+
+Latest rerun:
+
+| Model | Pop | Mainstream | Niche | Role |
+|---|---:|---:|---:|---|
+| Baseline predictions | 955 | 2,398 | 3,340 | Calibration artifact, not deployed. |
+
+This broad distribution is useful as a sanity check, but the baseline is not the
+source of runtime weights.
+
+## 9. Train the rich Torch teacher
+
+```powershell
+uv run subtitle-gen train-book-model-torch `
+  --output-dir generated-artifacts\book-model\torch-all-spacy `
+  --feature-set all `
+  --semantic-vectors spacy
+```
+
+This is the first gradient-descent model in the deployed path. It is allowed to
+use the broadest offline feature set because it is a research/training artifact,
+not something production loads.
+
+| Feature family | Examples | Why it matters |
+|---|---|---|
+| Persisted/source features | title/subtitle text, candidate source, language, ISBN/LCCN/work-key flags | The source book's own wording is the strongest direct tier signal. |
+| Popularity features | checkouts, ratings, edition count, bestseller/list/library signals | Useful, but not sufficient: popularity alone cannot separate mainstream from niche academic texture. |
+| Slot interaction text | list-item pairs, action/object pairs, slot-frame text | Captures what kind of subtitle grammar produced the filler. |
+| Offline metadata | publisher, format, subjects, call numbers, page counts | Helps separate academic, trade, religious, and reference-book neighborhoods. |
+| spaCy semantic vector | 300-dimensional document vector over source text | Adds broad semantic similarity that sparse hashed tokens cannot infer. |
+
+Feature-family ablations showed why the teacher combines signals:
+
+| Teacher feature set | Validation exact/macro | Takeaway |
+|---|---:|---|
+| Persisted/source features | 0.782 / 0.480 | Source shape helps, but misses much of the tier boundary. |
+| Popularity features | 0.789 / 0.501 | Popularity helps slightly more than source shape, but is too blunt alone. |
+| Slot interactions | 0.805 / 0.469 | Slot grammar is useful for examples, but weak standalone. |
+| Metadata | 0.808 / 0.483 | Metadata adds signal, but not enough alone. |
+| All rich hashed features | 0.782 / 0.529 | Combining families matters more than any single family. |
+| All rich + spaCy vectors | 0.812 / 0.566 | Semantic vectors gave the best macro result and became the teacher candidate. |
+
+Latest validated rerun:
+
+| Model | Pop | Mainstream | Niche | Validation |
+|---|---:|---:|---:|---|
+| Rich Torch teacher predictions | 264 | 1,867 | 4,562 | 0.782 exact / 0.565 macro |
+
+The teacher is intentionally offline-rich. It is not directly exportable.
+
+## 10. Distill exportable Torch students
+
+```powershell
+uv run subtitle-gen distill-book-model `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --output-dir generated-artifacts\book-model\distill-export-current `
+  --feature-set export-current
+
+uv run subtitle-gen distill-book-model `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --output-dir generated-artifacts\book-model\distill-export-slot `
+  --feature-set export-slot
+```
+
+Distillation is the second gradient-descent stage. The student learns to imitate
+the rich teacher using only durable/export-safe features.
+
+| Student | Export-safe signal | Pop | Mainstream | Niche | Teacher agreement |
+|---|---|---:|---:|---:|---:|
+| `export-current` | title/subtitle text plus basic source shape | 261 | 1,895 | 4,537 | 95.8% |
+| `export-slot` | `export-current` plus slot aggregate scalars such as source-link count, distinct strict filler count, max filler popularity, and average filler popularity | 389 | 2,080 | 4,224 | 87.8% |
+
+`export-slot` is the selected runtime source. It agrees less tightly with the
+teacher than `export-current`, but its slot aggregate features move the export
+toward a broader pop/mainstream pool. That is desirable for generation because
+the deployed scores are sampling weights over strict fillers, not final claims
+about a book's market category.
+
+## 11. Roll book predictions up to fillers
+
+```powershell
 uv run subtitle-gen shadow-book-model
+```
 
-# Optional: generate fixed samples for human/ad hoc LLM review.
+`shadow-book-model` joins book-level predictions back through
+`slot_filler_sources` and averages prediction probabilities for each strict
+filler.
+
+| Rollup column | Meaning |
+|---|---|
+| `avg_score_pop` | Average predicted pop probability across source books that contributed this filler. |
+| `avg_score_mainstream` | Average predicted mainstream probability. |
+| `avg_score_niche` | Average predicted niche probability. |
+| `book_model_tier` | Highest average score after rollup. |
+| `source_prediction_count` | Number of source-book predictions behind the filler score. |
+
+The selected `export-slot` rollup now produces this deployed distribution:
+
+| Rollup | Pop | Mainstream | Niche |
+|---|---:|---:|---:|
+| Prior checked-in export | 463 | 2,867 | 10,870 |
+| Latest validated export | 762 | 3,770 | 9,668 |
+
+The filler universe is unchanged; only the learned probabilities changed. This
+is why a refreshed `slot_filler_model_scores.csv` can broaden pop/mainstream
+generation without changing which text is allowed.
+
+## 12. Optional sample review gates
+
+The review gates are optional sanity-check tooling. They do not grade real
+books, train models, compute weights, or block export by themselves.
+
+```powershell
 uv run subtitle-gen categorization-gate --dry-run
+```
 
-# Install the selected export-slot rollup into the full local DB.
+| Command | Purpose | Status |
+|---|---|---|
+| `categorization-gate` | Generate fixed pure-categorization samples for human/ad hoc LLM review. | Preferred review check for learned-tier runtime behavior. |
+| `deployment-gate` | Legacy scalar/blend strategy comparison from the rejected intermediate design. | Kept for historical comparison and regression checks. |
+
+`categorization-gate` samples from the same strict, literal-filtered filler
+universe as runtime. Dry-run writes sample/report artifacts without LLM review.
+Use `-ReviewGates` in the runner only when you actually want LLM judging.
+
+## 13. Install selected scores into the full DB
+
+```powershell
 uv run subtitle-gen install-book-model-scores `
   --input generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv
 ```
 
-`scripts\run-book-model-pipeline.ps1` wraps the same commands in step-gated
-PowerShell. It defaults to the safe inventory step; expensive training,
-installation, export, mini-DB build, validation, and optional review sampling
-are explicit steps or switches:
+`install-book-model-scores` replaces the local `slot_filler_model_scores` table
+atomically.
 
-```powershell
-pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
-pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps Features,Torch,Distill,Shadow,CategorizationGate `
-  -PlanOnly
-pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps CategorizationGate `
-  -ReviewGates
-```
-
-The review gates are optional sanity-check tooling. They do not grade the real
-books, train the model, compute deployed weights, or block export by themselves.
-The core weight-production path is labeled source books -> features/labels ->
-train/distill -> shadow rollups -> install/export scores.
-
-The two optional review gates answer different questions:
-
-| Command | Purpose | Status |
-|---|---|---|
-| `deployment-gate` | Legacy scalar/blend strategy comparison from the rejected intermediate design. | Kept for historical comparison and regression checks. |
-| `categorization-gate` | Pure per-tier categorization comparison against legacy sampling for requested pop/mainstream/niche tiers. | Preferred gate for learned-tier runtime changes. |
-
-The installed table is:
-
-| Column | Meaning |
+| Installed column | Source rollup column |
 |---|---|
-| `slot_filler_id` | References `slot_fillers.id`. |
-| `score_pop` | Learned probability-like score for pop generation. |
-| `score_mainstream` | Learned probability-like score for mainstream generation. |
-| `score_niche` | Learned probability-like score for niche generation. |
-| `model_tier` | Highest-scoring tier. |
-| `source_prediction_count` | Number of source predictions contributing to the rollup. |
+| `slot_filler_id` | `slot_filler_id` |
+| `score_pop` | `avg_score_pop` |
+| `score_mainstream` | `avg_score_mainstream` |
+| `score_niche` | `avg_score_niche` |
+| `model_tier` | `book_model_tier` |
+| `source_prediction_count` | `source_prediction_count` |
 
-`install-book-model-scores` replaces the table atomically. If the CSV is missing
-required columns or contains invalid rows, the old score table is left intact.
+If the CSV is missing required columns or contains invalid rows, the old score
+table is left intact.
 
-The rollup CSV from `shadow-book-model`, especially
-`generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv`,
-is the source for installed runtime scores. The generated reports, predictions,
-and gate outputs under `generated-artifacts\book-model\` are local review
-artifacts and are intentionally not deployment inputs.
-
-## Export and mini DB
-
-After rebuilding slot, popularity, remix, or model-score state, regenerate the
-tracked deployment data:
+## 14. Export tracked deployment CSVs and build the mini DB
 
 ```powershell
 uv run subtitle-gen export-data -o api\data
@@ -280,20 +459,38 @@ Tracked deployment inputs:
 | `api\data\slot_filler_model_scores.csv` | Learned runtime tier probabilities. |
 | `api\data\sources.csv` | Source-book attribution. |
 | `api\data\config.csv` | Runtime configuration. |
-| `api\data\source_tier_labels.csv` | Offline source-label evidence exported for training/evaluation continuity. |
+| `api\data\source_tier_labels.csv` | Offline source-label evidence for training/evaluation continuity. |
 
 Ignored local/CI-built artifacts:
 
 | Path | Purpose |
 |---|---|
-| `api\data\subtitles.mini.db` | Built SQLite artifact for local serving and Azure Functions; CI rebuilds it from tracked CSVs in `.github\workflows\deploy.yml`. |
+| `api\data\subtitles.mini.db` | Built SQLite artifact for local serving and Azure Functions; CI rebuilds it from tracked CSVs. |
 | `generated-artifacts\` | Local reports, features, predictions, rollups, and gate outputs. |
 
 If `slot_filler_model_scores.csv` exists, `build-db` requires one score row for
 every exported slot filler. Partial coverage is rejected so deployment cannot
 silently mix learned-tier sampling with legacy popularity sampling.
 
-## Runtime generation
+## 15. Repeat the book-model path with the runner
+
+For repeatable operation, prefer the checked-in runner:
+
+```powershell
+pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
+
+pwsh -File scripts\run-book-model-pipeline.ps1 `
+  -Steps Features,Baseline,Torch,Distill,Shadow,CategorizationGate
+
+pwsh -File scripts\run-book-model-pipeline.ps1 `
+  -Steps InstallScores,ExportData,BuildDb,Validate
+```
+
+The runner defaults to the safe inventory step. Expensive training,
+installation, export, mini-DB build, validation, and optional review sampling
+are explicit steps. It fails fast when a native command fails.
+
+## 16. Runtime generation and classification
 
 Generation loads strict candidates for:
 
@@ -303,32 +500,14 @@ Generation loads strict candidates for:
 | `action_noun` | One sampled action noun. |
 | `of_object` | One sampled final object, optionally remixed. |
 
-When a requested tier has model scores, sampling uses:
+When complete model scores are present, generation uses the requested tier score
+as the sampling signal:
 
 ```text
 weight = sqrt(freq) * score_for_requested_tier
 ```
 
-When model scores are unavailable, generation falls back to the legacy
-frequency/popularity/tone-target weighting. This keeps local development and
-older DBs usable, but deployment is expected to include complete model scores.
-
-The literal-bad guardrail applies in both paths. It filters known broken artifact
-shapes such as:
-
-| Rejected shape | Why |
-|---|---|
-| bare final object `Christian` | Adjective-shaped incomplete object. |
-| `Imf` | Acronym/typo artifact. |
-| `H.G.W.ells` | Run-together initials artifact. |
-| `Con Men, Jr` | Suffix artifact that does not parse as a final object. |
-
-It does not reject valid absurdity such as `Emissions Trading` or `Second
-Indochina War`.
-
-## Runtime tier classification
-
-`compute_tier_evidence()` classifies generated subtitles.
+`compute_tier_evidence()` classifies generated subtitles:
 
 | DB state | Classifier behavior |
 |---|---|
@@ -338,7 +517,7 @@ Indochina War`.
 The classifier also returns compatibility evidence such as per-slot details,
 accessibility score, lower-tail score, and demand confidence for UI/debugging.
 
-## Serving surfaces
+## 17. Serving surfaces
 
 ```text
 CLI -> generate.py / jacket.py
@@ -346,7 +525,7 @@ local web -> serve.py -> handlers.py -> shared runtime modules
 Azure Functions -> api\function_app.py -> handlers.py -> shared runtime modules
 ```
 
-`handlers.py` is the shared API boundary for:
+`handlers.py` is the shared API boundary:
 
 | Handler | Purpose |
 |---|---|
@@ -359,38 +538,31 @@ The frontend is intentionally thin. It renders API results, shows sources and
 remix parts, captures feedback, and builds jacket prompts. Runtime decisions stay
 server-side.
 
-## Local browser verification
+## 18. Validate locally
 
-Install browser dependencies once:
+Run these before deployment or merging changes:
+
+```powershell
+uv run subtitle-gen validate-pipeline
+uv run ruff check
+uv run ty check
+uv run pytest -q
+```
+
+For web/API or browser-facing changes, run the local e2e gate:
 
 ```powershell
 uv sync --extra deploy --extra tune --extra e2e
 uv run playwright install --with-deps chromium
-```
-
-Run the local e2e gate:
-
-```powershell
 pwsh -File scripts\run-local-e2e.ps1
 ```
 
-The script:
+`scripts\run-local-e2e.ps1` starts `subtitle-gen serve --no-open` on
+`http://127.0.0.1:8742`, waits for readiness, captures before/after
+screenshots, runs `tests\test_e2e.py`, runs `tests\test_e2e_spot_check.py`, and
+writes artifacts to `test-results\local-e2e`.
 
-1. Starts `subtitle-gen serve --no-open` on `http://127.0.0.1:8742`.
-2. Waits for readiness.
-3. Captures `home-before.png`.
-4. Runs `tests\test_e2e.py`.
-5. Captures `home-after.png`.
-6. Runs `tests\test_e2e_spot_check.py`.
-7. Captures `spot-check-after.png`.
-8. Stops the server and leaves logs/screenshots in `test-results\local-e2e`.
-
-The home-page e2e covers generation, quality tags, sources, jacket prompt
-building, settings, hard tier-filter regeneration, remix display, mobile layout,
-and deployed App Insights telemetry. The spot-check e2e covers local-only batch
-rating, keyboard shortcuts, tag toggles, skip flow, summary, and navigation.
-
-## Deployment
+## 19. Deploy
 
 Deployment is handled by GitHub Actions:
 
@@ -409,48 +581,8 @@ Required GitHub configuration:
 | `AZURE_FUNCTIONAPP_NAME` | Variable |
 | `ALERT_EMAIL` | Optional secret or workflow input |
 
-For the current production site, deployed e2e targets:
+The production site currently targets:
 
 ```text
 https://subtitlegenst.z13.web.core.windows.net
 ```
-
-## Feedback and tuning
-
-Human feedback is stored, reviewed, and used to guide future work. It is not
-immediately applied to runtime generation.
-
-```powershell
-uv run subtitle-gen review
-uv run subtitle-gen generate --review
-uv sync --extra deploy
-uv run subtitle-gen pull-ratings --account subtitlegenst --since 2026-05-01
-```
-
-Source-title labels are separate from generated-subtitle ratings:
-
-```powershell
-uv sync --extra tune
-uv run subtitle-gen classify-source-tiers --dry-run --limit 20
-uv run subtitle-gen classify-source-tiers --limit 200 --batch-size 10
-uv run subtitle-gen source-tier-distribution
-```
-
-The source-label workflow writes `pattern_matches.llm_market_tier*` and exports
-`api\data\source_tier_labels.csv`. Those labels can feed offline training and
-evaluation, but they are not read directly by the deployed mini DB.
-
-## Quality gate before deployment
-
-Run this before creating or merging a deployment PR:
-
-```powershell
-uv run subtitle-gen validate-pipeline
-uv run ruff check
-uv run ty check
-uv run pytest -q
-pwsh -File scripts\run-local-e2e.ps1
-```
-
-Review the diff, bump the package version, create a feature branch, open a PR,
-wait for CI, then merge only after all checks are green.
