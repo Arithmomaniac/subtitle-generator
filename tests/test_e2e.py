@@ -11,6 +11,7 @@ Run against deployment:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from collections.abc import Callable
@@ -25,6 +26,25 @@ AI_INGEST_HOSTS = (
     "applicationinsights.azure.com",
     "dc.services.visualstudio.com",
 )
+REMIX_GENERATE_RESPONSE = {
+    "text": "Archives, Ballads, and the Quest of American Democracy",
+    "item1": "Archives",
+    "item2": "Ballads",
+    "action_noun": "Quest",
+    "of_object": "American Democracy",
+    "remixed": True,
+    "remix_parts": {"modifier": "American", "head": "Democracy"},
+    "remix_similarity": 0.734,
+    "of_article": "",
+    "action_article": "the",
+    "sources": {
+        "item1": {"title": "Archive Tales", "tag": "niche"},
+        "item2": {"title": "Ballad Book", "tag": "mainstream"},
+        "action_noun": {"title": "Quest Source", "tag": "pop"},
+        "of_modifier": {"title": "America Source", "tag": "mainstream"},
+        "of_head": {"title": "Democracy Source", "tag": "mainstream"},
+    },
+}
 
 
 @dataclass
@@ -198,28 +218,38 @@ async def test_footer_remix_and_mobile(page: Page) -> None:
     assert await github_link.count() > 0, "No GitHub link in footer"
     print("  PASS: GitHub link present")
 
-    print("TEST 10: Generate until remix")
+    print("TEST 10: Remix rendering")
     await page.locator("select").first.select_option("")
+    remix_route = "**/api/generate"
+
+    async def fulfill_remix(route) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(REMIX_GENERATE_RESPONSE),
+        )
+
+    await page.route(remix_route, fulfill_remix)
     generate_button = page.locator("button.btn-primary:has-text('Generate')")
-    got_remix = False
-    for attempt in range(30):
+    try:
         await generate_button.click()
         await page.wait_for_function(
-            "() => document.querySelectorAll('.slot').length >= 4",
+            "() => document.querySelectorAll('.slot-subpart').length >= 2",
             timeout=60000,
         )
-        subpart_count = await page.locator(".slot-subpart").count()
-        if subpart_count >= 2:
-            parts = [
-                await page.locator(".slot-subpart").nth(index).text_content()
-                for index in range(subpart_count)
-            ]
-            print(f"  Remix found on attempt {attempt + 1}: {parts}")
-            if await page.locator(".remix-info").count() > 0:
-                print(f"  {await page.locator('.remix-info').text_content()}")
-            got_remix = True
-            break
-    assert got_remix, "No remix after 30 attempts (remix_prob=0.8, expected ~80%)"
+    finally:
+        await page.unroute(remix_route, fulfill_remix)
+
+    subpart_count = await page.locator(".slot-subpart").count()
+    parts = [
+        await page.locator(".slot-subpart").nth(index).text_content()
+        for index in range(subpart_count)
+    ]
+    assert parts == ["American", "Democracy"], f"Unexpected remix parts: {parts}"
+    remix_info = page.locator(".remix-info")
+    assert await remix_info.count() > 0, "Expected remix similarity info"
+    print(f"  Remix rendered from mocked API response: {parts}")
+    print(f"  {await remix_info.text_content()}")
     print("  PASS: remix sub-parts rendered")
 
     print("TEST 11: Mobile spacing")
