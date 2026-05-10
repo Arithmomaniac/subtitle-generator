@@ -9,6 +9,7 @@ param(
     [string]$MetadataCsv = "",
     [int]$Samples = 12,
     [int]$RandomSeed = 20260505,
+    [switch]$ApplyPopularityCalibration,
     [switch]$ReviewGates,
     [switch]$PlanOnly
 )
@@ -25,6 +26,8 @@ $validSteps = @(
     "Features",
     "Baseline",
     "Torch",
+    "CalibratePopularity",
+    "PopulatePopularity",
     "Distill",
     "Shadow",
     "DeploymentGate",
@@ -47,6 +50,8 @@ if ($Steps -contains "All") {
         "Features",
         "Baseline",
         "Torch",
+        "CalibratePopularity",
+        "PopulatePopularity",
         "Distill",
         "Shadow",
         "DeploymentGate",
@@ -144,6 +149,37 @@ if (Has-Step "Torch") {
         "--feature-set", "all",
         "--semantic-vectors", "spacy"
     )
+}
+
+if (Has-Step "CalibratePopularity") {
+    $calibrationArgs = @(
+        "run", "subtitle-gen", "calibrate-popularity-weights",
+        "--features", $featuresPath,
+        "--teacher-predictions", $teacherPredictions,
+        "--output-dir", (Join-Path $BookModelDir "popularity-calibration"),
+        "--db", $FullDb
+    )
+    if ($ApplyPopularityCalibration) {
+        $calibrationArgs += "--apply"
+    }
+    Invoke-Step "CalibratePopularity" "uv" $calibrationArgs
+}
+
+if (Has-Step "PopulatePopularity") {
+    Invoke-Step "PopulatePopularity" "uv" @(
+        "run", "subtitle-gen", "populate-popularity",
+        "--db", $FullDb,
+        "--skip-data-model"
+    )
+    $featureArgs = @(
+        "run", "subtitle-gen", "build-book-features",
+        "--db", $FullDb,
+        "--output-dir", $BookModelDir
+    )
+    if ($MetadataCsv) {
+        $featureArgs += @("--metadata-csv", $MetadataCsv)
+    }
+    Invoke-Step "Features after popularity calibration" "uv" $featureArgs
 }
 
 if (Has-Step "Distill") {
