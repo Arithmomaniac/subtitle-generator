@@ -16,7 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
 
-from subtitle_generator.config import ALL_TUNABLE_PARAMS, invalidate_config_cache
+from subtitle_generator.config import (
+    ALL_TUNABLE_PARAMS,
+    invalidate_config_cache,
+    load_tuning_config,
+)
 
 SOURCES = ("spl", "open_library", "goodreads", "library", "nyt", "trove")
 CONFIG_KEYS = {
@@ -162,7 +166,7 @@ def calibrate_popularity_weights(
             "No examples with teacher score_pop/score_mainstream/score_niche values found"
         )
 
-    current_weights = _current_weights()
+    current_weights = _current_weights(db_path)
     current_metrics = FitMetrics(
         weights=current_weights,
         scalar_mse=_scalar_mse(examples, current_weights),
@@ -511,9 +515,17 @@ def _hashed_text_features(row: dict[str, str], hash_dim: int) -> list[float]:
     return [value / norm for value in hashed]
 
 
-def _current_weights() -> dict[str, float]:
+def _current_weights(db_path: Path | None = None) -> dict[str, float]:
+    if db_path is not None and db_path.exists():
+        conn = sqlite3.connect(db_path)
+        try:
+            cfg = load_tuning_config(conn)
+        finally:
+            conn.close()
+    else:
+        cfg = ALL_TUNABLE_PARAMS
     return {
-        source: float(ALL_TUNABLE_PARAMS[CONFIG_KEYS[source]])
+        source: float(cfg[CONFIG_KEYS[source]])
         for source in SOURCES
     }
 

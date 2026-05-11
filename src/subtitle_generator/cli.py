@@ -2388,7 +2388,10 @@ def populate_popularity(
 
     if not skip_data_model:
         click.echo("Step 1/2: Building ISBN aliases + filler-source mapping...")
-        subprocess.run([sys.executable, "data/build_data_model.py"], check=True)
+        subprocess.run(
+            [sys.executable, "data/build_data_model.py", "--db", str(db_path)],
+            check=True,
+        )
         click.echo()
 
     click.echo(f"Step {'2/2' if not skip_data_model else '1/1'}: Computing popularity scores...")

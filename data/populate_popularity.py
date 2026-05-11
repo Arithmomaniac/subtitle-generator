@@ -444,7 +444,7 @@ def score_work_popularity(
     """Compute a popularity_data row without writing to the database."""
 
     spl_data = data.work_spl.get(work)
-    ol_ec = data.work_ol.get(work, 1)
+    ol_ec = data.work_ol.get(work, 0)
 
     spl_co = spl_data["checkouts"] if spl_data else 0
     spl_yrs = spl_data["years"] if spl_data else 0
@@ -456,14 +456,10 @@ def score_work_popularity(
     ed_per_decade = float(ol_ec)
 
     signals = []
-    demand_signal_count = 0
-    total_weight = 0.0
 
     if spl_co > 0:
         spl_norm = percentiles.spl(math.log10(1 + co_per_year))
         signals.append((params.weight_spl, spl_norm))
-        total_weight += params.weight_spl
-        demand_signal_count += 1
 
     gr_data = data.work_gr.get(work)
     if gr_data:
@@ -471,8 +467,6 @@ def score_work_popularity(
         gr_ratings = gr_data["ratings_count"]
         gr_avg = gr_data.get("average_rating", 0.0)
         signals.append((params.weight_goodreads, gr_norm))
-        total_weight += params.weight_goodreads
-        demand_signal_count += 1
     else:
         gr_ratings = 0
         gr_avg = 0.0
@@ -482,8 +476,6 @@ def score_work_popularity(
         lib_norm = percentiles.library(math.log10(1 + can_data["holds_count"]))
         library_appearances = can_data["holds_count"]
         signals.append((params.weight_library, lib_norm))
-        total_weight += params.weight_library
-        demand_signal_count += 1
     else:
         library_appearances = 0
 
@@ -495,8 +487,6 @@ def score_work_popularity(
         trove_copy_count = trove_data.get("copy_count", trove_holding_count)
         trove_copy_count_is_exact = int(bool(trove_data.get("copy_count_is_exact", False)))
         signals.append((params.weight_trove, trove_norm))
-        total_weight += params.weight_trove
-        demand_signal_count += 1
     else:
         trove_library_count = 0
         trove_holding_count = 0
@@ -509,8 +499,6 @@ def score_work_popularity(
         nyt_rank = nyt_data["peak_rank"]
         nyt_norm = min(1.0, 0.8 + 0.2 * math.log10(1 + nyt_weeks) / 2.0)
         signals.append((params.weight_nyt, nyt_norm))
-        total_weight += params.weight_nyt
-        demand_signal_count += 1
     else:
         nyt_weeks = 0
         nyt_rank = None
@@ -518,27 +506,16 @@ def score_work_popularity(
     ol_norm = percentiles.open_library(math.log10(1 + ol_ec))
     if ol_ec > 0:
         signals.append((params.weight_ol, ol_norm))
-        total_weight += params.weight_ol
 
-    if total_weight > 0:
-        demand_score = sum(w * s for w, s in signals) / total_weight
-    else:
-        demand_score = 0.0
-
-    confidence = min(
-        total_weight / (
-            params.weight_spl
-            + params.weight_ol
-            + params.weight_goodreads
-            + params.weight_library
-            + params.weight_nyt
-            + params.weight_trove
-        ),
-        1.0,
+    total_weight = (
+        params.weight_spl
+        + params.weight_ol
+        + params.weight_goodreads
+        + params.weight_library
+        + params.weight_nyt
+        + params.weight_trove
     )
-    composite = confidence * demand_score + (1 - confidence) * ol_norm
-    if demand_signal_count == 0:
-        composite = min(composite, 0.5)
+    composite = sum(w * s for w, s in signals) / total_weight if total_weight > 0 else 0.0
 
     return WorkPopularityRow(
         work_key=work,

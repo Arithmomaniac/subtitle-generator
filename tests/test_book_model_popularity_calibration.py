@@ -68,6 +68,12 @@ def test_calibrate_popularity_weights_learns_predictive_source(tmp_path):
     db_path = tmp_path / "subtitles.db"
     _write_csv(features_path, feature_fields, feature_rows)
     _write_csv(teacher_path, prediction_fields, prediction_rows)
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT INTO config VALUES ('pop_weight_spl', '0.9')")
+    conn.execute("INSERT INTO config VALUES ('pop_weight_ol', '0.1')")
+    conn.commit()
+    conn.close()
 
     result = calibrate_popularity_weights(
         features_path=features_path,
@@ -84,6 +90,8 @@ def test_calibrate_popularity_weights_learns_predictive_source(tmp_path):
         scalar_loss_weight=1.0,
     )
 
+    assert result.current_weights["spl"] == 0.9
+    assert result.current_weights["open_library"] == 0.1
     assert result.learned_mse < result.current_mse
     assert result.learned_weights["spl"] > result.learned_weights["goodreads"]
     assert result.report_path.exists()

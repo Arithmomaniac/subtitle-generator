@@ -422,7 +422,7 @@ the rich teacher using only durable/export-safe features.
 | Student | Export-safe signal | Pop | Mainstream | Niche | Teacher agreement |
 |---|---|---:|---:|---:|---:|
 | `export-current` | title/subtitle text plus basic source shape | 261 | 1,895 | 4,537 | 95.8% |
-| `export-slot` | `export-current` plus slot aggregate scalars such as source-link count, distinct strict filler count, max filler popularity, and average filler popularity | 389 | 2,080 | 4,224 | 87.8% |
+| `export-slot` | `export-current` plus slot aggregate scalars such as source-link count, distinct strict filler count, max filler popularity, and average filler popularity | 392 | 2,071 | 4,230 | 87.4% |
 
 `export-slot` is the selected runtime source. It agrees less tightly with the
 teacher than `export-current`, but its slot aggregate features move the export
@@ -453,7 +453,7 @@ The selected `export-slot` rollup now produces this deployed distribution:
 | Rollup | Pop | Mainstream | Niche |
 |---|---:|---:|---:|
 | Prior checked-in export | 463 | 2,867 | 10,870 |
-| Latest validated export | 762 | 3,770 | 9,668 |
+| Latest validated export | 770 | 3,763 | 9,667 |
 
 The filler universe is unchanged; only the learned probabilities changed. This
 is why a refreshed `slot_filler_model_scores.csv` can broaden pop/mainstream

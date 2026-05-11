@@ -273,7 +273,7 @@ def test_work_level_popularity_scoring_is_testable_without_db_writes():
     assert demand_row.spl_years == 10
     assert demand_row.gr_ratings_count == 50
     assert demand_row.nyt_weeks_on_list == 4
-    assert demand_row.composite_score > 0
+    assert demand_row.composite_score > ol_only_row.composite_score
     assert ol_only_row.composite_score <= 0.5
 
 
