@@ -381,6 +381,73 @@ def test_model_scores_drive_tier_classification_and_generation():
     assert "NicheThing" in generated.text
 
 
+def test_configured_tier_classifier_uses_selected_slot_interactions():
+    from subtitle_generator.config import invalidate_config_cache
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE slot_filler_model_scores (
+            slot_filler_id INTEGER PRIMARY KEY,
+            score_pop REAL NOT NULL,
+            score_mainstream REAL NOT NULL,
+            score_niche REAL NOT NULL,
+            model_tier TEXT,
+            source_prediction_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    next_id = 1
+    for slot_type in ("list_item", "action_noun", "of_object"):
+        filler = {
+            "list_item": "High Demand",
+            "action_noun": "Rise",
+            "of_object": "Markets",
+        }[slot_type]
+        conn.execute(
+            """
+            INSERT INTO slot_fillers (
+                id, slot_type, filler, mode, freq, popularity_score,
+                popularity_level, popularity_confidence
+            )
+            VALUES (?, ?, ?, 'strict', 100, 0.95, 1, 1.0)
+            """,
+            (next_id, slot_type, filler),
+        )
+        conn.execute(
+            "INSERT INTO slot_filler_model_scores VALUES (?, 0.4, 0.5, 0.1, 'mainstream', 1)",
+            (next_id,),
+        )
+        next_id += 1
+    conn.commit()
+
+    subtitle = "High Demand, High Demand, and the Rise of Markets"
+    assert compute_tier_evidence(subtitle, conn).tier == "mainstream"
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        [
+            ("tier_classifier_popularity_interaction_pop", "2.0"),
+            ("tier_classifier_temperature", "0.5"),
+        ],
+    )
+    invalidate_config_cache()
+    assert compute_tier_evidence(subtitle, conn).tier == "pop"
+
+
 def test_literal_bad_generation_guardrail_rejects_known_artifacts():
     from subtitle_generator.generate import _is_literal_bad_filler
 

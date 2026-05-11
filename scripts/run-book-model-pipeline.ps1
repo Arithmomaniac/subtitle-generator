@@ -26,8 +26,7 @@ $validSteps = @(
     "Features",
     "Baseline",
     "Torch",
-    "CalibratePopularity",
-    "PopulatePopularity",
+    "CalibrateRuntimeTierModel",
     "Distill",
     "Shadow",
     "DeploymentGate",
@@ -50,9 +49,9 @@ if ($Steps -contains "All") {
         "Features",
         "Baseline",
         "Torch",
-        "CalibratePopularity",
         "Distill",
         "Shadow",
+        "CalibrateRuntimeTierModel",
         "DeploymentGate",
         "CategorizationGate",
         "InstallScores",
@@ -60,10 +59,6 @@ if ($Steps -contains "All") {
         "BuildDb",
         "Validate"
     )
-    if ($ApplyPopularityCalibration) {
-        $insertAt = [array]::IndexOf($Steps, "Distill")
-        $Steps = @($Steps[0..($insertAt - 1)] + "PopulatePopularity" + $Steps[$insertAt..($Steps.Count - 1)])
-    }
 }
 
 function Format-CommandLine {
@@ -154,37 +149,6 @@ if (Has-Step "Torch") {
     )
 }
 
-if (Has-Step "CalibratePopularity") {
-    $calibrationArgs = @(
-        "run", "subtitle-gen", "calibrate-popularity-weights",
-        "--features", $featuresPath,
-        "--teacher-predictions", $teacherPredictions,
-        "--output-dir", (Join-Path $BookModelDir "popularity-calibration"),
-        "--db", $FullDb
-    )
-    if ($ApplyPopularityCalibration) {
-        $calibrationArgs += "--apply"
-    }
-    Invoke-Step "CalibratePopularity" "uv" $calibrationArgs
-}
-
-if (Has-Step "PopulatePopularity") {
-    Invoke-Step "PopulatePopularity" "uv" @(
-        "run", "subtitle-gen", "populate-popularity",
-        "--db", $FullDb,
-        "--skip-data-model"
-    )
-    $featureArgs = @(
-        "run", "subtitle-gen", "build-book-features",
-        "--db", $FullDb,
-        "--output-dir", $BookModelDir
-    )
-    if ($MetadataCsv) {
-        $featureArgs += @("--metadata-csv", $MetadataCsv)
-    }
-    Invoke-Step "Features after popularity calibration" "uv" $featureArgs
-}
-
 if (Has-Step "Distill") {
     Invoke-Step "Distill export-current" "uv" @(
         "run", "subtitle-gen", "distill-book-model",
@@ -214,6 +178,24 @@ if (Has-Step "Shadow") {
         "--samples", [string]$Samples,
         "--random-seed", [string]$RandomSeed
     )
+}
+
+if (Has-Step "CalibrateRuntimeTierModel") {
+    $calibrationArgs = @(
+        "run", "subtitle-gen", "calibrate-runtime-tier-model",
+        "--features", $featuresPath,
+        "--teacher-predictions", $teacherPredictions,
+        "--rollup", $slotRollups,
+        "--output-dir", (Join-Path $BookModelDir "runtime-tier-model-calibration"),
+        "--db", $FullDb
+    )
+    if ($MetadataCsv) {
+        $calibrationArgs += @("--metadata-csv", $MetadataCsv)
+    }
+    if ($ApplyPopularityCalibration) {
+        $calibrationArgs += "--apply"
+    }
+    Invoke-Step "CalibrateRuntimeTierModel" "uv" $calibrationArgs
 }
 
 if (Has-Step "DeploymentGate") {

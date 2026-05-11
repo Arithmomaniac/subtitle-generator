@@ -54,6 +54,23 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_slot_mult_list_item": 0.8,
     "pop_slot_mult_action_noun": 0.9,
     "pop_slot_mult_of_object": 1.0,
+    "tier_classifier_model_score_weight": 1.0,
+    "tier_classifier_temperature": 1.0,
+    "tier_classifier_slot_weight_list_item": 1.0,
+    "tier_classifier_slot_weight_action_noun": 1.0,
+    "tier_classifier_slot_weight_of_object": 1.0,
+    "tier_classifier_intercept_pop": 0.0,
+    "tier_classifier_intercept_mainstream": 0.0,
+    "tier_classifier_intercept_niche": 0.0,
+    "tier_classifier_popularity_weight_pop": 0.0,
+    "tier_classifier_popularity_weight_mainstream": 0.0,
+    "tier_classifier_popularity_weight_niche": 0.0,
+    "tier_classifier_popularity_interaction_pop": 0.0,
+    "tier_classifier_popularity_interaction_mainstream": 0.0,
+    "tier_classifier_popularity_interaction_niche": 0.0,
+    "tier_classifier_frequency_weight_pop": 0.0,
+    "tier_classifier_frequency_weight_mainstream": 0.0,
+    "tier_classifier_frequency_weight_niche": 0.0,
 }
 
 
