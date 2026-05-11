@@ -2,6 +2,7 @@
 
 import csv
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -1815,6 +1816,105 @@ def calibrate_popularity_weights_cmd(
     )
     if result.applied:
         click.echo(f"Applied learned weights to {db_path}")
+
+
+@cli.command("calibrate-runtime-tier-model")
+@click.option(
+    "--features",
+    "features_path",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="book_features.csv produced by build-book-features.",
+)
+@click.option(
+    "--teacher-predictions",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Rich teacher prediction CSV produced by train-book-model-torch.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/runtime-tier-model-calibration"),
+    show_default=True,
+    help="Directory for runtime tier-model calibration reports.",
+)
+@click.option(
+    "--rollup",
+    "rollup_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional filler_book_rollups CSV whose model scores should be used for classifier calibration.",
+)
+@click.option(
+    "--metadata-csv",
+    "metadata_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional book metadata sidecar to preserve when --apply rebuilds book features.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full SQLite database whose config table receives learned coefficients when --apply is set.",
+)
+@click.option("--popularity-epochs", type=click.IntRange(min=1), default=300, show_default=True)
+@click.option("--classifier-epochs", type=click.IntRange(min=1), default=500, show_default=True)
+@click.option("--device", type=click.Choice(["cpu", "cuda"]), default="cpu", show_default=True)
+@click.option(
+    "--apply",
+    "apply_weights",
+    is_flag=True,
+    help="Write learned runtime tier-model coefficients to the DB config table.",
+)
+def calibrate_runtime_tier_model_cmd(
+    features_path: Path,
+    teacher_predictions: Path,
+    output_dir: Path,
+    rollup_path: Path | None,
+    metadata_path: Path | None,
+    db_path: Path,
+    popularity_epochs: int,
+    classifier_epochs: int,
+    device: str,
+    apply_weights: bool,
+):
+    """Single pipeline step for runtime tier-model coefficient calibration."""
+
+    from subtitle_generator.book_model_tier_classifier_calibration import (
+        calibrate_runtime_tier_model,
+    )
+
+    try:
+        result = calibrate_runtime_tier_model(
+            features_path=features_path,
+            teacher_predictions_path=teacher_predictions,
+            db_path=db_path,
+            output_dir=output_dir,
+            rollup_path=rollup_path,
+            metadata_path=metadata_path,
+            apply=apply_weights,
+            popularity_epochs=popularity_epochs,
+            classifier_epochs=classifier_epochs,
+            device=device,
+        )
+    except (RuntimeError, subprocess.CalledProcessError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Wrote runtime tier-model calibration report to {result.report_path}")
+    click.echo(
+        "Runtime tier-model calibration: "
+        f"popularity_current_mse={result.popularity.current_mse:.6f}, "
+        f"popularity_learned_mse={result.popularity.learned_mse:.6f}, "
+        f"classifier_current_mse={result.classifier.current_mse:.6f}, "
+        f"classifier_learned_mse={result.classifier.learned_mse:.6f}, "
+        f"classifier_validation_mse={result.classifier.validation_mse:.6f}"
+    )
+    if result.applied:
+        click.echo(f"Applied learned runtime tier-model coefficients to {db_path}")
 
 
 @cli.command("shadow-book-model")

@@ -111,7 +111,7 @@ def compute_tier_evidence(
         _lookup_slot_evidence(conn, slot, blend, missing_default)
         for slot in slots
     )
-    model_scores = _aggregate_model_scores(slot_evidence)
+    model_scores = _aggregate_model_scores(slot_evidence, cfg)
     if model_scores:
         tier = max(
             TIER_NAMES,
@@ -276,15 +276,71 @@ def _slot_model_scores(slot: SlotEvidence) -> dict[str, float]:
     }
 
 
-def _aggregate_model_scores(slots: tuple[SlotEvidence, ...]) -> dict[str, float]:
+def _aggregate_model_scores(
+    slots: tuple[SlotEvidence, ...],
+    cfg: dict[str, float],
+) -> dict[str, float]:
     per_slot = [_slot_model_scores(slot) for slot in slots]
     per_slot = [scores for scores in per_slot if scores]
     if len(per_slot) != len(slots):
         return {}
-    return {
-        tier: sum(scores[tier] for scores in per_slot) / len(per_slot)
+    total_weight = 0.0
+    contributions = {tier: 0.0 for tier in TIER_NAMES}
+    model_weight = cfg["tier_classifier_model_score_weight"]
+    missing_default = cfg["pop_missing_default"]
+    for slot in slots:
+        slot_scores = _slot_model_scores(slot)
+        slot_weight = cfg[f"tier_classifier_slot_weight_{slot.slot_type}"]
+        total_weight += slot_weight
+        popularity = (
+            slot.popularity_score
+            if slot.popularity_score is not None
+            else missing_default
+        )
+        for tier in TIER_NAMES:
+            contributions[tier] += slot_weight * (
+                model_weight * slot_scores[tier]
+                + cfg[f"tier_classifier_popularity_weight_{tier}"] * popularity
+                + cfg[f"tier_classifier_popularity_interaction_{tier}"]
+                * popularity
+                * slot_scores[tier]
+                + cfg[f"tier_classifier_frequency_weight_{tier}"] * slot.frequency_score
+            )
+    if total_weight <= 0:
+        return {}
+    logits = {
+        tier: cfg[f"tier_classifier_intercept_{tier}"]
+        + contributions[tier] / total_weight
         for tier in TIER_NAMES
     }
+    if not _uses_configured_tier_classifier(cfg):
+        return logits
+    return _softmax_scores(logits, cfg["tier_classifier_temperature"])
+
+
+def _uses_configured_tier_classifier(cfg: dict[str, float]) -> bool:
+    additive_keys = [
+        *(f"tier_classifier_intercept_{tier}" for tier in TIER_NAMES),
+        *(f"tier_classifier_popularity_weight_{tier}" for tier in TIER_NAMES),
+        *(f"tier_classifier_popularity_interaction_{tier}" for tier in TIER_NAMES),
+        *(f"tier_classifier_frequency_weight_{tier}" for tier in TIER_NAMES),
+    ]
+    return (
+        cfg["tier_classifier_model_score_weight"] != 1.0
+        or any(cfg[key] != 0.0 for key in additive_keys)
+    )
+
+
+def _softmax_scores(logits: dict[str, float], temperature: float) -> dict[str, float]:
+    temperature = max(temperature, 0.001)
+    scaled = {tier: logits[tier] / temperature for tier in TIER_NAMES}
+    max_logit = max(scaled.values())
+    exp_scores = {
+        tier: math.exp(scaled[tier] - max_logit)
+        for tier in TIER_NAMES
+    }
+    total = sum(exp_scores.values())
+    return {tier: exp_scores[tier] / total for tier in TIER_NAMES}
 
 
 def _tables(conn: sqlite3.Connection) -> set[str]:

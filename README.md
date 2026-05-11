@@ -112,7 +112,7 @@ For repeatable runs, use the checked-in step runner:
 
 ```powershell
 pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
-pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Features,Torch,Distill,Shadow,CategorizationGate -PlanOnly
+pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Features,Torch,CalibrateRuntimeTierModel,Distill,Shadow,CategorizationGate -PlanOnly
 ```
 
 The runtime table is `slot_filler_model_scores`:

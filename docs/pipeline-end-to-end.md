@@ -198,7 +198,7 @@ The timing depends on what the constant feeds:
 
 | If you change... | Run or rerun here | Then rerun... | Why |
 |---|---|---|---|
-| `pop_weight_*`, `pop_exponent` | Before or during `populate-popularity`; source ratios can be learned after the rich teacher with `calibrate-popularity-weights` | `populate-popularity`, `build-book-features`, student distillation, export | These change `slot_fillers.popularity_score`, which is both runtime fallback state and student-model input. |
+| `pop_weight_*`, `tier_classifier_*` | After the rich teacher exists, via the single `calibrate-runtime-tier-model` step | student distillation if features changed, then export | This step learns collapsed popularity source ratios, refreshes `popularity_score`, rebuilds book features, and learns final assembled-subtitle classifier coefficients. |
 | `remix_calibrated_remix_prob`, `remix_calibrated_min_sim` | After slots, popularity, and remix precompute exist | final sample checks and `export-data` | CLI/API defaults and sample review gates consume these values directly. |
 | `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | After generation can produce realistic samples | final sample checks and `export-data` | These are generation heuristics; changing them does not retrain weights unless you use generated samples as review evidence. |
 | `generation_tier_ratio_pop/mainstream/niche` | Before final runtime validation/export | `export-data`, `build-db` | These control the default tier mix when no explicit tone is requested. |
@@ -211,14 +211,14 @@ Useful commands:
 uv sync --extra tune
 uv run subtitle-gen calibrate-remix --samples 50
 
-# Popularity source ratios: train a constrained student, write a report only.
+# Runtime tier model: train popularity ratios and final classifier coefficients.
 uv sync --extra ml
-uv run subtitle-gen calibrate-popularity-weights `
+uv run subtitle-gen calibrate-runtime-tier-model `
   --features generated-artifacts\book-model\book_features.csv `
   --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv
 
-# Apply learned pop_weight_* rows only after reviewing the report.
-uv run subtitle-gen calibrate-popularity-weights `
+# Apply learned runtime config only after reviewing the report.
+uv run subtitle-gen calibrate-runtime-tier-model `
   --features generated-artifacts\book-model\book_features.csv `
   --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
   --apply
@@ -359,19 +359,18 @@ Latest validated rerun:
 
 The teacher is intentionally offline-rich. It is not directly exportable.
 
-### Learn popularity source ratios before distillation
+### Calibrate the runtime tier model before distillation
 
-If you want the flat runtime `popularity_score` to use learned source ratios,
-calibrate those ratios after the rich teacher exists and before distilling
-exportable students:
+After the rich teacher exists, run the single runtime tier-model calibration
+step before distilling exportable students:
 
 ```powershell
-uv run subtitle-gen calibrate-popularity-weights `
+uv run subtitle-gen calibrate-runtime-tier-model `
   --features generated-artifacts\book-model\book_features.csv `
   --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv
 ```
 
-The calibration is a constrained student. It computes:
+The step fits the collapsed popularity scalar:
 
 ```text
 popularity_scalar =
@@ -383,23 +382,17 @@ popularity_scalar =
 + w_trove*Trove
 ```
 
-That scalar can then interact with text, slot, and metadata features inside the
-student, but individual source signals cannot get separate text/slot/metadata
-interaction weights. This keeps the learned source coefficients readable and
-collapsible into `pop_weight_*`.
-
-The command writes a report by default. To make the learned ratios feed the
-actual runtime score, rerun with `--apply`, then recompute popularity and
-features before distillation:
+It then fits final assembled-subtitle classifier coefficients over the chosen
+slot model probabilities, slot popularity, popularity interactions, and
+frequency evidence. The command writes a report by default. With `--apply`, it
+updates DB config, recomputes runtime popularity, and rebuilds book features in
+the same pipeline step:
 
 ```powershell
-uv run subtitle-gen calibrate-popularity-weights `
+uv run subtitle-gen calibrate-runtime-tier-model `
   --features generated-artifacts\book-model\book_features.csv `
   --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
   --apply
-
-uv run subtitle-gen populate-popularity --skip-data-model
-uv run subtitle-gen build-book-features
 ```
 
 ## 10. Distill exportable Torch students
@@ -535,22 +528,22 @@ For repeatable operation, prefer the checked-in runner:
 pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps Features,Baseline,Torch,CalibratePopularity,Distill,Shadow,CategorizationGate
+  -Steps Features,Baseline,Torch,CalibrateRuntimeTierModel,Distill,Shadow,CategorizationGate
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps CalibratePopularity,PopulatePopularity,Distill,Shadow,CategorizationGate `
+  -Steps CalibrateRuntimeTierModel,Distill,Shadow,CategorizationGate `
   -ApplyPopularityCalibration
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
   -Steps InstallScores,ExportData,BuildDb,Validate
 ```
 
-The runner defaults to the safe inventory step. `CalibratePopularity` is
-report-only unless `-ApplyPopularityCalibration` is set. When applying learned
-source ratios, include `PopulatePopularity` so the full DB recomputes
-`popularity_score` and rebuilds book features before distillation. Expensive
-training, installation, export, mini-DB build, validation, and optional review
-sampling are explicit steps. It fails fast when a native command fails.
+The runner defaults to the safe inventory step. `CalibrateRuntimeTierModel` is
+report-only unless `-ApplyPopularityCalibration` is set; when applied, that
+single step recomputes `popularity_score`, rebuilds book features, and writes
+the learned runtime classifier coefficients. Expensive training, installation,
+export, mini-DB build, validation, and optional review sampling are explicit
+steps. It fails fast when a native command fails.
 
 ## 16. Runtime generation and classification
 
