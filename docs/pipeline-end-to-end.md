@@ -143,7 +143,7 @@ tier classifier when model scores are present.
 | NYT | Bestseller appearances. |
 | Ottawa / library data | Library demand and holdings. |
 | Trove Australia | Library breadth via `holdingsCount`. |
-| Open Library edition count | Prior/confidence signal, not a direct popularity vote. |
+| Open Library edition count | Edition-breadth signal. It can act like a fallback prior when other demand evidence is sparse, but it is also a learnable source in the constrained popularity block. |
 
 The key filler fields are:
 
@@ -198,7 +198,7 @@ The timing depends on what the constant feeds:
 
 | If you change... | Run or rerun here | Then rerun... | Why |
 |---|---|---|---|
-| `pop_weight_*`, `pop_exponent` | Before or during `populate-popularity` | `populate-popularity`, `build-book-features`, model training, export | These change `slot_fillers.popularity_score`, which is both runtime fallback state and model input. |
+| `pop_weight_*`, `pop_exponent` | Before or during `populate-popularity`; source ratios can be learned after the rich teacher with `calibrate-popularity-weights` | `populate-popularity`, `build-book-features`, student distillation, export | These change `slot_fillers.popularity_score`, which is both runtime fallback state and student-model input. |
 | `remix_calibrated_remix_prob`, `remix_calibrated_min_sim` | After slots, popularity, and remix precompute exist | final sample checks and `export-data` | CLI/API defaults and sample review gates consume these values directly. |
 | `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | After generation can produce realistic samples | final sample checks and `export-data` | These are generation heuristics; changing them does not retrain weights unless you use generated samples as review evidence. |
 | `generation_tier_ratio_pop/mainstream/niche` | Before final runtime validation/export | `export-data`, `build-db` | These control the default tier mix when no explicit tone is requested. |
@@ -210,6 +210,18 @@ Useful commands:
 # Remix defaults: grid-search min_sim and remix probability on generated samples.
 uv sync --extra tune
 uv run subtitle-gen calibrate-remix --samples 50
+
+# Popularity source ratios: train a constrained student, write a report only.
+uv sync --extra ml
+uv run subtitle-gen calibrate-popularity-weights `
+  --features generated-artifacts\book-model\book_features.csv `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv
+
+# Apply learned pop_weight_* rows only after reviewing the report.
+uv run subtitle-gen calibrate-popularity-weights `
+  --features generated-artifacts\book-model\book_features.csv `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --apply
 
 # Current autoresearch loop is intentionally narrow: article/remix heuristics.
 uv run subtitle-gen tune --phase all --samples 50 --iterations 30
@@ -347,6 +359,49 @@ Latest validated rerun:
 
 The teacher is intentionally offline-rich. It is not directly exportable.
 
+### Learn popularity source ratios before distillation
+
+If you want the flat runtime `popularity_score` to use learned source ratios,
+calibrate those ratios after the rich teacher exists and before distilling
+exportable students:
+
+```powershell
+uv run subtitle-gen calibrate-popularity-weights `
+  --features generated-artifacts\book-model\book_features.csv `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv
+```
+
+The calibration is a constrained student. It computes:
+
+```text
+popularity_scalar =
+  w_spl*SPL
++ w_ol*OpenLibrary
++ w_goodreads*Goodreads
++ w_library*Library
++ w_nyt*NYT
++ w_trove*Trove
+```
+
+That scalar can then interact with text, slot, and metadata features inside the
+student, but individual source signals cannot get separate text/slot/metadata
+interaction weights. This keeps the learned source coefficients readable and
+collapsible into `pop_weight_*`.
+
+The command writes a report by default. To make the learned ratios feed the
+actual runtime score, rerun with `--apply`, then recompute popularity and
+features before distillation:
+
+```powershell
+uv run subtitle-gen calibrate-popularity-weights `
+  --features generated-artifacts\book-model\book_features.csv `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --apply
+
+uv run subtitle-gen populate-popularity --skip-data-model
+uv run subtitle-gen build-book-features
+```
+
 ## 10. Distill exportable Torch students
 
 ```powershell
@@ -480,15 +535,22 @@ For repeatable operation, prefer the checked-in runner:
 pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps Features,Baseline,Torch,Distill,Shadow,CategorizationGate
+  -Steps Features,Baseline,Torch,CalibratePopularity,Distill,Shadow,CategorizationGate
+
+pwsh -File scripts\run-book-model-pipeline.ps1 `
+  -Steps CalibratePopularity,PopulatePopularity,Distill,Shadow,CategorizationGate `
+  -ApplyPopularityCalibration
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
   -Steps InstallScores,ExportData,BuildDb,Validate
 ```
 
-The runner defaults to the safe inventory step. Expensive training,
-installation, export, mini-DB build, validation, and optional review sampling
-are explicit steps. It fails fast when a native command fails.
+The runner defaults to the safe inventory step. `CalibratePopularity` is
+report-only unless `-ApplyPopularityCalibration` is set. When applying learned
+source ratios, include `PopulatePopularity` so the full DB recomputes
+`popularity_score` and rebuilds book features before distillation. Expensive
+training, installation, export, mini-DB build, validation, and optional review
+sampling are explicit steps. It fails fast when a native command fails.
 
 ## 16. Runtime generation and classification
 

@@ -3,7 +3,11 @@ import sqlite3
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+pytest.importorskip("torch", reason="popularity calibration tests require the ml extra")
 
 
 def _write_csv(path: Path, fieldnames: tuple[str, ...], rows: list[dict[str, str]]) -> None:
@@ -74,6 +78,10 @@ def test_calibrate_popularity_weights_learns_predictive_source(tmp_path):
         target_mode="pop-only",
         regularization=0.0,
         min_weight_share=0.0,
+        epochs=150,
+        hidden_dim=8,
+        hash_dim=64,
+        scalar_loss_weight=1.0,
     )
 
     assert result.learned_mse < result.current_mse
@@ -87,4 +95,4 @@ def test_calibrate_popularity_weights_learns_predictive_source(tmp_path):
         conn.close()
     assert "pop_weight_spl" in rows
     assert float(rows["pop_weight_spl"]) == round(result.learned_weights["spl"], 8)
-    assert "pop_weight_ol" not in rows
+    assert "pop_weight_ol" in rows

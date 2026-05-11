@@ -51,7 +51,6 @@ if ($Steps -contains "All") {
         "Baseline",
         "Torch",
         "CalibratePopularity",
-        "PopulatePopularity",
         "Distill",
         "Shadow",
         "DeploymentGate",
@@ -61,6 +60,10 @@ if ($Steps -contains "All") {
         "BuildDb",
         "Validate"
     )
+    if ($ApplyPopularityCalibration) {
+        $insertAt = [array]::IndexOf($Steps, "Distill")
+        $Steps = @($Steps[0..($insertAt - 1)] + "PopulatePopularity" + $Steps[$insertAt..($Steps.Count - 1)])
+    }
 }
 
 function Format-CommandLine {

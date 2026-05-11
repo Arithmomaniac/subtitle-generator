@@ -1744,8 +1744,20 @@ def distill_book_model_cmd(
     type=float,
     default=0.02,
     show_default=True,
-    help="Minimum share each learned demand source keeps before renormalization.",
+    help="Minimum share each learned popularity source keeps before renormalization.",
 )
+@click.option("--epochs", type=click.IntRange(min=1), default=300, show_default=True)
+@click.option("--learning-rate", type=float, default=0.03, show_default=True)
+@click.option("--hidden-dim", type=click.IntRange(min=1), default=32, show_default=True)
+@click.option("--hash-dim", type=click.IntRange(min=32), default=256, show_default=True)
+@click.option(
+    "--scalar-loss-weight",
+    type=float,
+    default=0.25,
+    show_default=True,
+    help="Auxiliary loss that keeps the collapsed scalar aligned with the teacher target.",
+)
+@click.option("--device", type=click.Choice(["cpu", "cuda"]), default="cpu", show_default=True)
 @click.option(
     "--apply",
     "apply_weights",
@@ -1760,6 +1772,12 @@ def calibrate_popularity_weights_cmd(
     target_mode: str,
     regularization: float,
     min_weight_share: float,
+    epochs: int,
+    learning_rate: float,
+    hidden_dim: int,
+    hash_dim: int,
+    scalar_loss_weight: float,
+    device: str,
     apply_weights: bool,
 ):
     """Learn constrained popularity source ratios from teacher predictions."""
@@ -1778,6 +1796,12 @@ def calibrate_popularity_weights_cmd(
             target_mode=target_mode,
             regularization=regularization,
             min_weight_share=min_weight_share,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            hidden_dim=hidden_dim,
+            hash_dim=hash_dim,
+            scalar_loss_weight=scalar_loss_weight,
+            device=device,
         )
     except RuntimeError as exc:
         raise click.ClickException(str(exc)) from exc
