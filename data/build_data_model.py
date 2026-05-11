@@ -9,6 +9,7 @@ import json
 import re
 import sqlite3
 import time
+import argparse
 from collections import defaultdict
 from pathlib import Path
 
@@ -241,12 +242,16 @@ def report_isbn_coverage(conn: sqlite3.Connection):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Build ISBN aliases and filler-source mappings")
+    parser.add_argument("--db", default=str(DB_PATH), help="Path to subtitles.db")
+    args = parser.parse_args()
+
     print("Loading OL edition lookup...")
     with open(OL_LOOKUP_PATH) as f:
         ol_lookup = json.load(f)
     print(f"  {len(ol_lookup):,} entries")
 
-    conn = sqlite3.connect(str(DB_PATH))
+    conn = sqlite3.connect(args.db)
     conn.execute("PRAGMA journal_mode=WAL")
 
     start = time.time()

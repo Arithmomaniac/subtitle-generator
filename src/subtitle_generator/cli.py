@@ -1696,6 +1696,127 @@ def distill_book_model_cmd(
     )
 
 
+@cli.command("calibrate-popularity-weights")
+@click.option(
+    "--features",
+    "features_path",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="book_features.csv produced by build-book-features.",
+)
+@click.option(
+    "--teacher-predictions",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Rich teacher prediction CSV produced by train-book-model-torch.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/book-model/popularity-calibration"),
+    show_default=True,
+    help="Directory for the calibration report.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full SQLite database whose config table receives learned weights when --apply is set.",
+)
+@click.option(
+    "--target-mode",
+    type=click.Choice(["accessibility", "pop-only"]),
+    default="accessibility",
+    show_default=True,
+    help="Teacher probability target used by the constrained fit.",
+)
+@click.option(
+    "--regularization",
+    type=float,
+    default=0.01,
+    show_default=True,
+    help="Small ridge penalty toward current ratios to stabilize correlated sources.",
+)
+@click.option(
+    "--min-weight-share",
+    type=float,
+    default=0.02,
+    show_default=True,
+    help="Minimum share each learned popularity source keeps before renormalization.",
+)
+@click.option("--epochs", type=click.IntRange(min=1), default=300, show_default=True)
+@click.option("--learning-rate", type=float, default=0.03, show_default=True)
+@click.option("--hidden-dim", type=click.IntRange(min=1), default=32, show_default=True)
+@click.option("--hash-dim", type=click.IntRange(min=32), default=256, show_default=True)
+@click.option(
+    "--scalar-loss-weight",
+    type=float,
+    default=0.25,
+    show_default=True,
+    help="Auxiliary loss that keeps the collapsed scalar aligned with the teacher target.",
+)
+@click.option("--device", type=click.Choice(["cpu", "cuda"]), default="cpu", show_default=True)
+@click.option(
+    "--apply",
+    "apply_weights",
+    is_flag=True,
+    help="Write learned pop_weight_* rows to the DB config table.",
+)
+def calibrate_popularity_weights_cmd(
+    features_path: Path,
+    teacher_predictions: Path,
+    output_dir: Path,
+    db_path: Path,
+    target_mode: str,
+    regularization: float,
+    min_weight_share: float,
+    epochs: int,
+    learning_rate: float,
+    hidden_dim: int,
+    hash_dim: int,
+    scalar_loss_weight: float,
+    device: str,
+    apply_weights: bool,
+):
+    """Learn constrained popularity source ratios from teacher predictions."""
+
+    from subtitle_generator.book_model_popularity_calibration import (
+        calibrate_popularity_weights,
+    )
+
+    try:
+        result = calibrate_popularity_weights(
+            features_path=features_path,
+            teacher_predictions_path=teacher_predictions,
+            output_dir=output_dir,
+            db_path=db_path,
+            apply=apply_weights,
+            target_mode=target_mode,
+            regularization=regularization,
+            min_weight_share=min_weight_share,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            hidden_dim=hidden_dim,
+            hash_dim=hash_dim,
+            scalar_loss_weight=scalar_loss_weight,
+            device=device,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Wrote popularity calibration report to {result.report_path}")
+    click.echo(
+        "Popularity calibration: "
+        f"examples={result.example_count:,}, "
+        f"current_mse={result.current_mse:.6f}, "
+        f"learned_mse={result.learned_mse:.6f}"
+    )
+    if result.applied:
+        click.echo(f"Applied learned weights to {db_path}")
+
+
 @cli.command("shadow-book-model")
 @click.option(
     "--db",
@@ -2218,6 +2339,13 @@ def download_popularity(
 
 
 @cli.command("populate-popularity")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
 @click.option("--spl", "w_spl", type=float, default=None, help="Override pop_weight_spl")
 @click.option("--ol", "w_ol", type=float, default=None, help="Override pop_weight_ol")
 @click.option("--gr", "w_gr", type=float, default=None, help="Override pop_weight_gr")
@@ -2227,7 +2355,18 @@ def download_popularity(
 @click.option("--exponent", type=float, default=None, help="Override pop_exponent")
 @click.option("--skip-calibrate", is_flag=True, help="Skip threshold calibration")
 @click.option("--skip-data-model", is_flag=True, help="Skip ISBN alias / filler-source rebuild")
-def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, w_trove, exponent, skip_calibrate, skip_data_model):
+def populate_popularity(
+    db_path,
+    w_spl,
+    w_ol,
+    w_gr,
+    w_library,
+    w_nyt,
+    w_trove,
+    exponent,
+    skip_calibrate,
+    skip_data_model,
+):
     """Build ISBN mappings and compute popularity scores from all available sources.
 
     \b
@@ -2249,11 +2388,14 @@ def populate_popularity(w_spl, w_ol, w_gr, w_library, w_nyt, w_trove, exponent, 
 
     if not skip_data_model:
         click.echo("Step 1/2: Building ISBN aliases + filler-source mapping...")
-        subprocess.run([sys.executable, "data/build_data_model.py"], check=True)
+        subprocess.run(
+            [sys.executable, "data/build_data_model.py", "--db", str(db_path)],
+            check=True,
+        )
         click.echo()
 
     click.echo(f"Step {'2/2' if not skip_data_model else '1/1'}: Computing popularity scores...")
-    args = [sys.executable, "data/populate_popularity.py"]
+    args = [sys.executable, "data/populate_popularity.py", "--db", str(db_path)]
     if w_spl is not None:
         args.extend(["--spl", str(w_spl)])
     if w_ol is not None:
