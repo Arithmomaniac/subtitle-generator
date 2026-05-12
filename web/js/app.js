@@ -176,6 +176,7 @@ export function createApp() {
           subtitle: this.subtitle.fullText,
           model: this.model,
           dryRun: true,
+          remixParts: this._rawSub?.remix_parts || null,
         });
         if (result.error) {
           alert("Error: " + result.error);
@@ -195,6 +196,7 @@ export function createApp() {
           subtitle: this.subtitle.fullText,
           model: this.model,
           dry_run: false,
+          remix_parts: this._rawSub?.remix_parts || undefined,
         });
         const response = await fetch(apiBase + "/api/jacket", {
           method: "POST",

@@ -40,6 +40,46 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
         )
     """)
     conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("""
+        CREATE TABLE slot_filler_model_scores (
+            slot_filler_id INTEGER PRIMARY KEY,
+            score_pop REAL NOT NULL,
+            score_mainstream REAL NOT NULL,
+            score_niche REAL NOT NULL,
+            model_tier TEXT,
+            source_prediction_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("""
+        CREATE TRIGGER insert_default_test_model_scores
+        AFTER INSERT ON slot_fillers
+        BEGIN
+            INSERT OR REPLACE INTO slot_filler_model_scores (
+                slot_filler_id,
+                score_pop,
+                score_mainstream,
+                score_niche,
+                model_tier,
+                source_prediction_count
+            )
+            VALUES (
+                NEW.id,
+                CASE WHEN COALESCE(NEW.popularity_score, 0.1) >= 0.7 THEN 0.85 ELSE 0.05 END,
+                CASE
+                    WHEN COALESCE(NEW.popularity_score, 0.1) >= 0.7 THEN 0.1
+                    WHEN COALESCE(NEW.popularity_score, 0.1) <= 0.2 THEN 0.1
+                    ELSE 0.85
+                END,
+                CASE WHEN COALESCE(NEW.popularity_score, 0.1) <= 0.2 THEN 0.85 ELSE 0.05 END,
+                CASE
+                    WHEN COALESCE(NEW.popularity_score, 0.1) >= 0.7 THEN 'pop'
+                    WHEN COALESCE(NEW.popularity_score, 0.1) <= 0.2 THEN 'niche'
+                    ELSE 'mainstream'
+                END,
+                1
+            );
+        END
+    """)
 
     # Insert test fillers with varying freq and popularity
     fillers = [
@@ -49,6 +89,11 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
         ("Home", 2, 1.56),
         ("Fraud", 1, 1.55),
         ("Helmontian", 1, 0.09),
+        ("Pursuit", 25, 1.4),
+        ("Happiness", 30, 1.5),
+        ("Rise", 30, 1.3),
+        ("Markets", 30, 1.3),
+        ("Archives", 1, 0.1),
     ]
     for i, (filler, freq, pop) in enumerate(fillers):
         ps = pop
@@ -64,18 +109,12 @@ def _make_test_db(pop_scores: dict[str, float | None] | None = None) -> sqlite3.
     return conn
 
 
-def test_backward_compat_blend_zero():
-    """With pop blends at 0, behavior matches old freq-only sampling."""
+def test_weighted_sample_defaults_to_frequency_without_model_tier():
+    """Without a requested tier, sampling is frequency-weighted."""
     from subtitle_generator.generate import _weighted_sample
 
     conn = _make_test_db()
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_base_weight_blend', '0.0')")
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '0.0')")
-    conn.commit()
-    from subtitle_generator.config import invalidate_config_cache
-    invalidate_config_cache()
 
-    # With both blends at 0, popularity_score should be ignored.
     rows_with_pop = conn.execute(
         "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item'"
     ).fetchall()
@@ -84,73 +123,54 @@ def test_backward_compat_blend_zero():
     rng1 = random.Random(42)
     rng2 = random.Random(42)
 
-    result_with = _weighted_sample(rows_with_pop, 3, rng1, tone_target=1.0, conn=conn)
-    result_without = _weighted_sample(rows_without_pop, 3, rng2, tone_target=1.0, conn=conn)
+    result_with = _weighted_sample(rows_with_pop, 3, rng1)
+    result_without = _weighted_sample(rows_without_pop, 3, rng2)
 
-    assert result_with == result_without, (
-        f"Blend=0 should give same results. Got {result_with} vs {result_without}"
-    )
-    print("  PASS: backward_compat_blend_zero")
+    assert result_with == result_without
 
 
-def test_popularity_blend_one():
-    """With classification/base blends at 1.0, high-popularity low-freq words are boosted."""
+def test_weighted_sample_uses_learned_tier_scores_when_requested():
+    """Requested tiers use learned per-filler model scores instead of popularity blends."""
     from subtitle_generator.generate import _weighted_sample
 
     conn = _make_test_db()
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '1.0')")
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_base_weight_blend', '1.0')")
-    conn.commit()
-    from subtitle_generator.config import invalidate_config_cache
-    invalidate_config_cache()
 
     rows = conn.execute(
-        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item'"
+        """
+        SELECT sf.filler, sf.freq, sf.popularity_score, ms.score_pop, ms.score_mainstream, ms.score_niche
+        FROM slot_fillers sf
+        JOIN slot_filler_model_scores ms ON ms.slot_filler_id = sf.id
+        WHERE sf.slot_type = 'list_item'
+        """
     ).fetchall()
 
-    # With tone_target=1.5 and full popularity blend, "Race" (pop=1.8) and
-    # "Home" (pop=1.56) should be strongly favored over "Gender" (pop=0.21)
     counts: dict[str, int] = {}
     for seed in range(200):
-        rng = random.Random(seed)
-        picked = _weighted_sample(rows, 1, rng, tone_target=1.5, conn=conn)
+        picked = _weighted_sample(rows, 1, random.Random(seed), model_tier="niche")
         counts[picked[0]] = counts.get(picked[0], 0) + 1
 
-    # Race and Home should appear more than Gender
-    assert counts.get("Race", 0) > counts.get("Gender", 0), (
-        f"Race (pop=1.8) should beat Gender (pop=0.21) at target 1.5. Counts: {counts}"
-    )
-    # Home (pop=1.56, freq=2) should appear despite low freq
-    assert counts.get("Home", 0) > 0, (
-        f"Home (pop=1.56) should appear with full popularity blends. Counts: {counts}"
-    )
-    print("  PASS: popularity_blend_one")
+    assert counts.get("Helmontian", 0) > counts.get("Race", 0)
+    assert counts.get("Archives", 0) > counts.get("Power", 0)
 
 
-def test_null_popularity_uses_default():
-    """Fillers with NULL popularity_score should use pop_missing_default."""
+def test_weighted_sample_handles_null_popularity_when_model_scores_exist():
     from subtitle_generator.generate import _weighted_sample
 
     conn = _make_test_db(pop_scores={"Fraud": None, "Helmontian": None})
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '1.0')")
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_base_weight_blend', '1.0')")
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_missing_default', '0.1')")
-    conn.commit()
-    from subtitle_generator.config import invalidate_config_cache
-    invalidate_config_cache()
-
     rows = conn.execute(
-        "SELECT filler, freq, popularity_score FROM slot_fillers WHERE slot_type = 'list_item'"
+        """
+        SELECT sf.filler, sf.freq, sf.popularity_score, ms.score_pop, ms.score_mainstream, ms.score_niche
+        FROM slot_fillers sf
+        JOIN slot_filler_model_scores ms ON ms.slot_filler_id = sf.id
+        WHERE sf.slot_type = 'list_item'
+        """
     ).fetchall()
 
-    # Should not crash with NULL values
-    result = _weighted_sample(rows, 3, random.Random(42), tone_target=1.0, conn=conn)
-    assert len(result) == 3, f"Expected 3 results, got {len(result)}"
-    print("  PASS: null_popularity_uses_default")
+    result = _weighted_sample(rows, 3, random.Random(42), model_tier="pop")
+    assert len(result) == 3
 
 
-def test_half_blend():
-    """With pop_classification_blend=0.5, score averages freq-score and pop-score."""
+def test_removed_popularity_blends_are_not_tunable_config():
     from subtitle_generator.config import load_tuning_config
 
     conn = _make_test_db()
@@ -160,20 +180,7 @@ def test_half_blend():
     invalidate_config_cache()
 
     cfg = load_tuning_config(conn)
-    assert cfg["pop_classification_blend"] == 0.5, (
-        f"Expected 0.5, got {cfg['pop_classification_blend']}"
-    )
-
-    # Verify blended score calculation manually
-    freq = 40  # Race
-    pop = 1.8
-    blend = 0.5
-    score_freq = math.log10(1 + freq)
-    expected = (1 - blend) * score_freq + blend * pop
-    actual_freq_part = (1 - 0.5) * math.log10(41)
-    actual_pop_part = 0.5 * 1.8
-    assert abs(expected - (actual_freq_part + actual_pop_part)) < 0.001
-    print("  PASS: half_blend")
+    assert "pop_classification_blend" not in cfg
 
 
 def test_export_import_roundtrip():
@@ -197,6 +204,8 @@ def test_export_import_roundtrip():
     conn.execute("INSERT INTO config VALUES ('z_export_order_probe', 'last')")
     conn.execute("INSERT INTO config VALUES ('a_export_order_probe', 'first')")
     conn.execute("INSERT INTO config VALUES ('tone_target_pop_list_item', '0.77')")
+    conn.execute("INSERT INTO config VALUES ('remix_calibrated_remix_prob', '0.4')")
+    conn.execute("INSERT INTO config VALUES ('remix_calibrated_min_sim', '0.2')")
     conn.commit()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -225,9 +234,13 @@ def test_export_import_roundtrip():
 
         with open(tmp_path / "config.csv", encoding="utf-8") as f:
             config_rows = list(csv.DictReader(f))
+            exported_config = {row["key"]: row["value"] for row in config_rows}
             assert all(
                 not row["key"].startswith("tone_target_") for row in config_rows
             )
+            assert exported_config["remix_calibrated_remix_prob"] == "0.4"
+            assert exported_config["remix_calibrated_min_sim"] == "0.2"
+            assert "z_export_order_probe" not in exported_config
             assert [row["key"] for row in config_rows] == sorted(
                 row["key"] for row in config_rows
             )
@@ -682,48 +695,23 @@ def test_export_data_keeps_title_derived_source_title_only(tmp_path):
     }]
 
 
-def test_jacket_accessibility_blend():
-    """compute_accessibility blends freq and popularity per config."""
+def test_jacket_accessibility_uses_learned_model_scores():
     from subtitle_generator.jacket import compute_accessibility
 
     conn = _make_test_db()
 
-    # With default blend=0, should use freq only
-    tone0, score0 = compute_accessibility(
+    tone, score = compute_accessibility(
         "Race, Power, and the Gender of Home", conn
     )
-    assert score0 > 0, f"Expected positive score, got {score0}"
-
-    # With classification blend=1, should use popularity only
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '1.0')")
-    conn.commit()
-    from subtitle_generator.config import invalidate_config_cache
-    invalidate_config_cache()
-
-    tone1, score1 = compute_accessibility(
-        "Race, Power, and the Gender of Home", conn
-    )
-    # Scores should differ because freq and pop distributions are different
-    assert score0 != score1, (
-        f"Blended and unblended scores should differ: {score0} vs {score1}"
-    )
-    print("  PASS: jacket_accessibility_blend")
+    assert "BOOK TYPE: POP" in tone
+    assert score > 0
 
 
 def test_evidence_aware_tier_classification_uses_runtime_signals():
-    """Real-title-like cases use demand, lower-tail, and accessibility evidence."""
+    """Real-title-like cases use learned slot model scores."""
     from subtitle_generator.tiering import compute_tier_evidence
 
     conn = _make_test_db()
-    # Common academic words alone should not force a specialist-looking subtitle into pop.
-    for key, value in (
-        ("accessibility_threshold_pop", "0.6"),
-        ("accessibility_threshold_mainstream", "0.3"),
-        ("tier_pop_min_lower_tail", "0.35"),
-        ("tier_pop_min_demand_confidence", "0.25"),
-        ("pop_classification_blend", "0.5"),
-    ):
-        conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, value))
     for filler in ("Common", "Demand", "Markets"):
         for slot_type in ("list_item", "action_noun", "of_object"):
             conn.execute(
@@ -736,7 +724,7 @@ def test_evidence_aware_tier_classification_uses_runtime_signals():
                 """,
                 (slot_type, filler),
             )
-    for filler in ("Rare", "Fallback"):
+    for filler in ("Rare", "Fallback", "Making", "Archives"):
         for slot_type in ("list_item", "action_noun", "of_object"):
             conn.execute(
                 """
@@ -756,12 +744,54 @@ def test_evidence_aware_tier_classification_uses_runtime_signals():
     assert backed_by_demand.tier == "pop"
     assert backed_by_demand.demand_confidence >= 0.75
 
-    low_tail = compute_tier_evidence(
-        "Common, Rare, and the Rise of Markets", conn
+    specialist = compute_tier_evidence(
+        "Rare, Fallback, and the Making of Archives", conn
     )
-    assert low_tail.tier == "mainstream"
-    assert low_tail.lower_tail_score < 0.35
-    print("  PASS: evidence_aware_tier_classification_uses_runtime_signals")
+    assert specialist.tier == "niche"
+    assert specialist.lower_tail_score < backed_by_demand.lower_tail_score
+
+
+def test_remixed_object_tier_evidence_uses_component_scores():
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    conn = _make_test_db()
+    for slot_type, filler, popularity in (
+        ("of_modifier", "Viral", 0.95),
+        ("of_head", "Attention", 0.95),
+        ("of_topic", "Rare Archives", 0.1),
+        ("of_complement", "Footnotes", 0.1),
+    ):
+        conn.execute(
+            """
+            INSERT INTO slot_fillers (
+                slot_type, filler, mode, freq, popularity_score,
+                popularity_level, popularity_confidence
+            )
+            VALUES (?, ?, 'strict', 10, ?, 1, 1.0)
+            """,
+            (slot_type, filler, popularity),
+        )
+    conn.commit()
+
+    pop_evidence = compute_tier_evidence(
+        "Race, Power, and the Pursuit of Viral Attention",
+        conn,
+        remix_parts={"modifier": "Viral", "head": "Attention"},
+    )
+    niche_evidence = compute_tier_evidence(
+        "Race, Power, and the Pursuit of Rare Archives in Footnotes",
+        conn,
+        remix_parts={
+            "topic": "Rare Archives",
+            "prep": "in",
+            "complement": "Footnotes",
+        },
+    )
+
+    assert pop_evidence.tier == "pop"
+    assert pop_evidence.slots[-1].filler == "Viral Attention"
+    assert niche_evidence.slots[-1].filler == "Rare Archives in Footnotes"
+    assert niche_evidence.slots[-1].model_score_niche > niche_evidence.slots[-1].model_score_pop
 
 
 def test_parse_subtitle_slots_rejects_empty_cleaned_fillers():
@@ -781,14 +811,6 @@ def test_real_title_tier_metric_uses_db_source_labels():
     )
 
     conn = _make_test_db()
-    for key, value in (
-        ("accessibility_threshold_pop", "0.6"),
-        ("accessibility_threshold_mainstream", "0.3"),
-        ("tier_pop_min_lower_tail", "0.35"),
-        ("tier_pop_min_demand_confidence", "0.25"),
-        ("pop_classification_blend", "0.5"),
-    ):
-        conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, value))
     for filler in ("Common", "Demand", "Markets"):
         for slot_type in ("list_item", "action_noun", "of_object"):
             conn.execute(
@@ -1560,248 +1582,6 @@ def test_real_title_tier_metric_is_neutral_without_source_labels():
     print("  PASS: real_title_tier_metric_is_neutral_without_source_labels")
 
 
-def test_suggest_tier_gate_config_reports_label_fit():
-    from subtitle_generator.tier_diagnostics import (
-        apply_tier_gate_calibration,
-        format_tier_gate_calibration_report,
-        suggest_tier_gate_config,
-    )
-
-    conn = _make_test_db()
-    conn.execute(
-        """
-        CREATE TABLE pattern_matches (
-            id INTEGER PRIMARY KEY,
-            title TEXT,
-            subtitle TEXT,
-            llm_market_tier TEXT,
-            llm_market_tier_confidence REAL,
-            llm_market_tier_rationale TEXT
-        )
-        """
-    )
-    rows = [
-        (
-            1,
-            "Pop Book",
-            "Common, Demand, and the Rise of Markets",
-            "pop",
-            1.0,
-            "Exact match; broad commercial packaging.",
-        ),
-        (
-            2,
-            "Mainstream Book",
-            "Common, Rare, and the Rise of Markets",
-            "mainstream",
-            1.0,
-            "Exact match; accessible but not pop.",
-        ),
-        (
-            3,
-            "Niche Book",
-            "Rare, Fallback, and the Making of Archives",
-            "niche",
-            1.0,
-            "Exact match; specialist topic.",
-        ),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO pattern_matches (
-            id, title, subtitle, llm_market_tier, llm_market_tier_confidence,
-            llm_market_tier_rationale
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    for filler in ("Common", "Demand", "Markets"):
-        for slot_type in ("list_item", "action_noun", "of_object"):
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO slot_fillers (
-                    slot_type, filler, mode, freq, popularity_score,
-                    popularity_level, popularity_confidence
-                )
-                VALUES (?, ?, 'strict', 10000, 0.95, 1, 1.0)
-                """,
-                (slot_type, filler),
-            )
-    for filler in ("Rare", "Fallback", "Archives"):
-        for slot_type in ("list_item", "action_noun", "of_object"):
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO slot_fillers (
-                    slot_type, filler, mode, freq, popularity_score,
-                    popularity_level, popularity_confidence
-                )
-                VALUES (?, ?, 'strict', 1, 0.1, 0, 0.0)
-                """,
-                (slot_type, filler),
-            )
-    conn.commit()
-
-    calibration = suggest_tier_gate_config(conn)
-
-    assert calibration is not None
-    assert calibration.label_count == 3
-    assert calibration.exact_accuracy == 1.0
-    assert calibration.pop_guardrail == 1.0
-    assert calibration.label_distribution == {"pop": 1, "mainstream": 1, "niche": 1}
-    assert calibration.target_generation_ratios == {
-        "pop": 1 / 3,
-        "mainstream": 1 / 3,
-        "niche": 1 / 3,
-    }
-    assert set(calibration.threshold_config_values()) == {
-        "accessibility_threshold_pop",
-        "accessibility_threshold_mainstream",
-        "tier_pop_min_lower_tail",
-        "tier_pop_min_demand_confidence",
-    }
-    assert calibration.generation_center_config_values() == {
-        "tier_center_pop": 0.75,
-        "tier_center_mainstream": 0.4005,
-        "tier_center_niche": 0.301,
-    }
-    report = format_tier_gate_calibration_report(conn)
-    assert "Source-label distribution" in report
-    assert "| pop | 1 | 0.3333 |" in report
-    assert "Fit metrics" in report
-    assert "Suggested config" in report
-
-    apply_tier_gate_calibration(conn, calibration)
-    cfg = dict(conn.execute("SELECT key, value FROM config"))
-    assert float(cfg["accessibility_threshold_pop"]) == round(
-        calibration.accessibility_threshold_pop, 4
-    )
-    assert float(cfg["generation_tier_ratio_pop"]) == round(
-        calibration.target_generation_ratios["pop"], 4
-    )
-    assert float(cfg["tier_center_pop"]) == round(calibration.tier_center_pop, 4)
-    print("  PASS: suggest_tier_gate_config_reports_label_fit")
-
-
-def test_tier_gate_suggestion_preserves_pop_recall():
-    from subtitle_generator.config import load_tuning_config
-    from subtitle_generator.tier_diagnostics import (
-        _score_gate_candidate,
-        evaluate_real_title_tiers,
-        suggest_tier_gate_config,
-    )
-
-    conn = _make_test_db()
-    for key, value in (
-        ("accessibility_threshold_pop", "0.6"),
-        ("accessibility_threshold_mainstream", "0.3"),
-        ("tier_pop_min_lower_tail", "0.35"),
-        ("tier_pop_min_demand_confidence", "0.25"),
-        ("pop_classification_blend", "0.5"),
-    ):
-        conn.execute("INSERT OR REPLACE INTO config VALUES (?, ?)", (key, value))
-    conn.execute(
-        """
-        CREATE TABLE pattern_matches (
-            id INTEGER PRIMARY KEY,
-            title TEXT,
-            subtitle TEXT,
-            llm_market_tier TEXT,
-            llm_market_tier_confidence REAL,
-            llm_market_tier_rationale TEXT
-        )
-        """
-    )
-    rows = [
-        (
-            1,
-            "High Pop Book",
-            "Common, Demand, and the Rise of Markets",
-            "pop",
-            1.0,
-            "Exact match; broad commercial packaging.",
-        ),
-        (
-            2,
-            "Low Pop Book",
-            "Quiet, Local, and the Study of Footnotes",
-            "pop",
-            1.0,
-            "Exact match; broad commercial packaging despite quiet wording.",
-        ),
-        (
-            3,
-            "Niche Book",
-            "Rare, Fallback, and the Making of Archives",
-            "niche",
-            1.0,
-            "Exact match; specialist packaging.",
-        ),
-    ]
-    conn.executemany(
-        """
-        INSERT INTO pattern_matches (
-            id, title, subtitle, llm_market_tier, llm_market_tier_confidence,
-            llm_market_tier_rationale
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        rows,
-    )
-    for filler in ("Common", "Demand", "Markets"):
-        for slot_type in ("list_item", "action_noun", "of_object"):
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO slot_fillers (
-                    slot_type, filler, mode, freq, popularity_score,
-                    popularity_level, popularity_confidence
-                )
-                VALUES (?, ?, 'strict', 10000, 0.95, 1, 1.0)
-                """,
-                (slot_type, filler),
-            )
-    for filler in ("Quiet", "Local", "Study", "Footnotes", "Rare", "Fallback", "Archives"):
-        for slot_type in ("list_item", "action_noun", "of_object"):
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO slot_fillers (
-                    slot_type, filler, mode, freq, popularity_score,
-                    popularity_level, popularity_confidence
-                )
-                VALUES (?, ?, 'strict', 1, 0.1, 0, 0.0)
-                """,
-                (slot_type, filler),
-            )
-    conn.commit()
-
-    results = evaluate_real_title_tiers(conn)
-    cfg = load_tuning_config(conn)
-    baseline = _score_gate_candidate(
-        results,
-        pop_threshold=cfg["accessibility_threshold_pop"],
-        mainstream_threshold=cfg["accessibility_threshold_mainstream"],
-        lower_tail_threshold=cfg["tier_pop_min_lower_tail"],
-        demand_threshold=cfg["tier_pop_min_demand_confidence"],
-    )
-    calibration = suggest_tier_gate_config(conn)
-
-    assert calibration is not None
-    assert baseline.pop_recall == 0.5
-    assert calibration.pop_recall >= baseline.pop_recall
-    assert calibration.pop_guardrail >= baseline.pop_guardrail
-    assert ("niche", "pop") not in calibration.confusion
-    print("  PASS: tier_gate_suggestion_preserves_pop_recall")
-
-
-def test_tier_gate_calibration_report_handles_empty_labels():
-    from subtitle_generator.tier_diagnostics import format_tier_gate_calibration_report
-
-    report = format_tier_gate_calibration_report(_make_test_db())
-
-    assert "No `pattern_matches.llm_market_tier` labels found." in report
-    print("  PASS: tier_gate_calibration_report_handles_empty_labels")
-
-
 def test_tier_label_guardrail_blend_is_noop_without_labels():
     from subtitle_generator.tune import _blend_real_title_tier_guardrail
 
@@ -1821,20 +1601,18 @@ def test_tier_label_guardrail_blend_is_noop_without_labels():
 
 
 def test_config_params_exist():
-    """All popularity params are in ALL_TUNABLE_PARAMS."""
+    """Live popularity params are in ALL_TUNABLE_PARAMS."""
     from subtitle_generator.config import ALL_TUNABLE_PARAMS
 
     expected = [
         "pop_weight_spl", "pop_weight_ol", "pop_weight_gr",
         "pop_weight_nyt", "pop_weight_library", "pop_weight_trove",
         "pop_weight_freq",
-        "pop_exponent", "pop_base_weight_blend", "pop_classification_blend",
-        "pop_missing_default", "default_generation_tone_target",
-        "tier_pop_min_demand_confidence",
-        "tier_pop_min_lower_tail",
+        "pop_exponent", "pop_missing_default",
     ]
     for param in expected:
         assert param in ALL_TUNABLE_PARAMS, f"Missing param: {param}"
+    assert "pop_classification_blend" not in ALL_TUNABLE_PARAMS
     print("  PASS: config_params_exist")
 
 
@@ -1845,19 +1623,17 @@ def test_config_params_exist():
 if __name__ == "__main__":
     tests = [
         ("config_params_exist", test_config_params_exist),
-        ("backward_compat_blend_zero", test_backward_compat_blend_zero),
-        ("popularity_blend_one", test_popularity_blend_one),
-        ("null_popularity_uses_default", test_null_popularity_uses_default),
-        ("half_blend", test_half_blend),
+        ("weighted_sample_defaults_to_frequency_without_model_tier", test_weighted_sample_defaults_to_frequency_without_model_tier),
+        ("weighted_sample_uses_learned_tier_scores_when_requested", test_weighted_sample_uses_learned_tier_scores_when_requested),
+        ("weighted_sample_handles_null_popularity_when_model_scores_exist", test_weighted_sample_handles_null_popularity_when_model_scores_exist),
+        ("removed_popularity_blends_are_not_tunable_config", test_removed_popularity_blends_are_not_tunable_config),
         ("export_import_roundtrip", test_export_import_roundtrip),
-        ("jacket_accessibility_blend", test_jacket_accessibility_blend),
+        ("jacket_accessibility_uses_learned_model_scores", test_jacket_accessibility_uses_learned_model_scores),
         ("evidence_aware_tier_classification_uses_runtime_signals", test_evidence_aware_tier_classification_uses_runtime_signals),
+        ("remixed_object_tier_evidence_uses_component_scores", test_remixed_object_tier_evidence_uses_component_scores),
         ("parse_subtitle_slots_rejects_empty_cleaned_fillers", test_parse_subtitle_slots_rejects_empty_cleaned_fillers),
         ("real_title_tier_metric_uses_db_source_labels", test_real_title_tier_metric_uses_db_source_labels),
         ("real_title_tier_metric_is_neutral_without_source_labels", test_real_title_tier_metric_is_neutral_without_source_labels),
-        ("suggest_tier_gate_config_reports_label_fit", test_suggest_tier_gate_config_reports_label_fit),
-        ("tier_gate_suggestion_preserves_pop_recall", test_tier_gate_suggestion_preserves_pop_recall),
-        ("tier_gate_calibration_report_handles_empty_labels", test_tier_gate_calibration_report_handles_empty_labels),
         ("tier_label_guardrail_blend_is_noop_without_labels", test_tier_label_guardrail_blend_is_noop_without_labels),
     ]
 

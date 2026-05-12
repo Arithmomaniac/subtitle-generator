@@ -2453,7 +2453,6 @@ def download_popularity(
 @click.option("--nyt", "w_nyt", type=float, default=None, help="Override pop_weight_nyt")
 @click.option("--trove", "w_trove", type=float, default=None, help="Override pop_weight_trove")
 @click.option("--exponent", type=float, default=None, help="Override pop_exponent")
-@click.option("--skip-calibrate", is_flag=True, help="Skip threshold calibration")
 @click.option("--skip-data-model", is_flag=True, help="Skip ISBN alias / filler-source rebuild")
 def populate_popularity(
     db_path,
@@ -2464,7 +2463,6 @@ def populate_popularity(
     w_nyt,
     w_trove,
     exponent,
-    skip_calibrate,
     skip_data_model,
 ):
     """Build ISBN mappings and compute popularity scores from all available sources.
@@ -2475,13 +2473,11 @@ def populate_popularity(
       2. Load all available popularity lookups (SPL, OL, Goodreads, Ottawa, NYT, Trove)
       3. Compute composite scores via weighted-average percentile normalization
       4. Score slot fillers (L1 top-3 mean + L2 corpus fallback)
-      5. Auto-calibrate tier thresholds (unless --skip-calibrate)
 
     \b
     Examples:
       subtitle-gen populate-popularity                     # full pipeline
       subtitle-gen populate-popularity --spl 0.7 --gr 0.3  # override weights
-      subtitle-gen populate-popularity --skip-calibrate     # skip recalibration
       subtitle-gen populate-popularity --skip-data-model    # just re-score
     """
     import subprocess
@@ -2510,8 +2506,6 @@ def populate_popularity(
         args.extend(["--trove", str(w_trove)])
     if exponent is not None:
         args.extend(["--exponent", str(exponent)])
-    if skip_calibrate:
-        args.append("--skip-calibrate")
     subprocess.run(args, check=True)
 
     click.echo("\nDone! Popularity scores updated.")
@@ -2548,51 +2542,6 @@ def tier_diagnostic_cmd(db_path: Path):
         raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
     try:
         click.echo(format_real_title_tier_report(conn))
-    finally:
-        conn.close()
-
-
-@cli.command("calibrate-tier-gates")
-@click.option("--db", "db_path", type=click.Path(path_type=Path), default=DB_PATH, help="SQLite database to inspect.")
-@click.option("--min-confidence", type=click.FloatRange(min=0.0, max=1.0), default=0.0, show_default=True, help="Minimum source-label confidence to include.")
-@click.option("--apply", "apply_suggestion", is_flag=True, help="Write the suggested tier gates to the config table.")
-def calibrate_tier_gates_cmd(
-    db_path: Path,
-    min_confidence: float,
-    apply_suggestion: bool,
-):
-    """Suggest deterministic tier gates from source-title labels."""
-
-    from subtitle_generator.tier_diagnostics import (
-        apply_tier_gate_calibration,
-        format_tier_gate_calibration_report,
-        suggest_tier_gate_config,
-    )
-
-    if apply_suggestion:
-        conn = sqlite3.connect(db_path)
-    else:
-        try:
-            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
-        except sqlite3.OperationalError as exc:
-            raise click.ClickException(
-                f"Unable to open database read-only: {db_path}"
-            ) from exc
-    try:
-        calibration = suggest_tier_gate_config(
-            conn,
-            min_confidence=min_confidence,
-        )
-        click.echo(format_tier_gate_calibration_report(
-            conn,
-            min_confidence=min_confidence,
-            calibration=calibration,
-        ))
-        if apply_suggestion:
-            if calibration is None:
-                raise click.ClickException("No source-title labels available to apply.")
-            apply_tier_gate_calibration(conn, calibration)
-            click.echo("\nApplied suggested tier gates to config.")
     finally:
         conn.close()
 

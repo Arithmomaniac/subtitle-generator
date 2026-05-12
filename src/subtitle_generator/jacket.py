@@ -61,7 +61,7 @@ def compute_accessibility(subtitle: str, conn: sqlite3.Connection | None = None)
     """Compute the jacket tone and accessibility score for a subtitle.
 
     Returns ``(tone_text, score)`` for compatibility with older callers. The
-    score is still the mean blended accessibility score, while the tone now
+    score is the learned model-score accessibility scalar, while the tone now
     comes from the evidence-aware tier classifier. Do not infer a tier from the
     returned score; use ``compute_tier_evidence`` when the tier decision matters.
     """
@@ -327,8 +327,9 @@ def _select_jacket_tone(
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    remix_parts: dict | None = None,
 ) -> tuple[str, str, TierEvidence]:
-    evidence = compute_tier_evidence(subtitle, conn)
+    evidence = compute_tier_evidence(subtitle, conn, remix_parts=remix_parts)
     if tone_override:
         tone_tier = _TONE_TO_TIER.get(tone_override, "mainstream")
         return tone_tier, tone_override, evidence
@@ -349,6 +350,7 @@ def _build_jacket_prompt_with_evidence(
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    remix_parts: dict | None = None,
     rng: random.Random | None = None,
 ) -> tuple[str, str, str, TierEvidence]:
     tone_tier, tone, evidence = _select_jacket_tone(
@@ -356,6 +358,7 @@ def _build_jacket_prompt_with_evidence(
         conn=conn,
         tone_override=tone_override,
         allowed_tiers=allowed_tiers,
+        remix_parts=remix_parts,
     )
 
     review_outlets = _select_review_outlets(tone_tier, rng)
@@ -389,6 +392,7 @@ def build_jacket_prompt(
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    remix_parts: dict | None = None,
     rng: random.Random | None = None,
 ) -> tuple[str, str, str]:
     """Construct the jacket generation prompts without calling the LLM.
@@ -403,6 +407,7 @@ def build_jacket_prompt(
         conn=conn,
         tone_override=tone_override,
         allowed_tiers=allowed_tiers,
+        remix_parts=remix_parts,
         rng=rng,
     )
 
@@ -456,10 +461,15 @@ def _prepare_jacket_prompt(
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    remix_parts: dict | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> tuple[str, str, str]:
     system_prompt, user_prompt, tone_tier, evidence = _build_jacket_prompt_with_evidence(
-        subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+        subtitle,
+        conn=conn,
+        tone_override=tone_override,
+        allowed_tiers=allowed_tiers,
+        remix_parts=remix_parts,
     )
 
     if tone_override:
@@ -535,10 +545,12 @@ async def _generate_jacket_async(
     subtitle: str, model: str = DEFAULT_MODEL, timeout: float = 120.0,
     conn: sqlite3.Connection | None = None,
     tone_override: str | None = None, allowed_tiers: set[str] | None = None,
+    remix_parts: dict | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     system_prompt, user_prompt, _ = _prepare_jacket_prompt(
         subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+        remix_parts=remix_parts,
         on_progress=on_progress,
     )
     return await _generate_jacket_from_prompt_async(
@@ -578,11 +590,13 @@ def generate_jacket(
     show_concept: bool = False,
     conn: sqlite3.Connection | None = None, tone_override: str | None = None,
     allowed_tiers: set[str] | None = None,
+    remix_parts: dict | None = None,
     on_progress: Callable[[str], None] | None = None,
 ) -> str:
     """Synchronous wrapper for jacket generation. Returns markdown string."""
     system_prompt, user_prompt, _ = _prepare_jacket_prompt(
         subtitle, conn=conn, tone_override=tone_override, allowed_tiers=allowed_tiers,
+        remix_parts=remix_parts,
         on_progress=on_progress,
     )
     return generate_jacket_from_prompt(

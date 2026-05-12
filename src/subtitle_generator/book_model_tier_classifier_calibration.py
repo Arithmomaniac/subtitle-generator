@@ -226,23 +226,22 @@ def _build_example(
     slots = parse_subtitle_slots(subtitle)
     if not slots:
         return None
-    blend = cfg["pop_classification_blend"]
     missing_default = cfg["pop_missing_default"]
-    evidence = [
-        _lookup_slot_evidence(conn, slot, blend, missing_default)
-        for slot in slots
-    ]
+    evidence = [_lookup_slot_evidence(conn, slot) for slot in slots]
+    if any(slot is None for slot in evidence):
+        return None
+    slot_evidence = [slot for slot in evidence if slot is not None]
     slot_scores = [
         _rollup_model_scores(rollup_scores, slot)
         if rollup_scores is not None
         else _slot_model_scores(slot)
-        for slot in evidence
+        for slot in slot_evidence
     ]
     if any(not scores for scores in slot_scores):
         return None
     popularity_values = [
         slot.popularity_score if slot.popularity_score is not None else missing_default
-        for slot in evidence
+        for slot in slot_evidence
     ]
     popularity = sum(popularity_values) / len(popularity_values)
     model_scores = [
@@ -256,7 +255,7 @@ def _build_example(
         ) / len(slot_scores)
         for tier in TIER_NAMES
     ]
-    frequency_score = sum(slot.frequency_score for slot in evidence) / len(evidence)
+    frequency_score = sum(slot.frequency_score for slot in slot_evidence) / len(slot_evidence)
     return TierClassifierExample(
         pattern_match_id=pattern_id,
         subtitle=subtitle,

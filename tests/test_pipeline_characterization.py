@@ -23,17 +23,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 EXPECTED_TUNABLE_PARAMS = {
-    "weighted_sample_spread": 0.12,
-    "weighted_sample_bias_floor": 0.05,
-    "default_generation_tone_target": 2.0,
     "generation_tier_ratio_pop": 0.0183,
     "generation_tier_ratio_mainstream": 0.1172,
     "generation_tier_ratio_niche": 0.8645,
-    "tier_center_pop": 0.75,
-    "tier_center_mainstream": 0.4005,
-    "tier_center_niche": 0.301,
-    "accessibility_threshold_pop": 0.3665,
-    "accessibility_threshold_mainstream": 0.3098,
     "article_of_min_freq": 1.0,
     "article_action_min_freq": 1.0,
     "article_remix_heuristic_threshold": 0.6,
@@ -46,14 +38,7 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_weight_trove": 0.10,
     "pop_weight_freq": 0.0,
     "pop_exponent": 1.2,
-    "pop_base_weight_blend": 0.5,
-    "pop_classification_blend": 0.9,
     "pop_missing_default": 0.1,
-    "tier_pop_min_demand_confidence": 0.8001,
-    "tier_pop_min_lower_tail": 0.352,
-    "pop_slot_mult_list_item": 0.8,
-    "pop_slot_mult_action_noun": 0.9,
-    "pop_slot_mult_of_object": 1.0,
     "tier_classifier_model_score_weight": 1.0,
     "tier_classifier_temperature": 1.0,
     "tier_classifier_slot_weight_list_item": 1.0,
@@ -140,6 +125,18 @@ def make_runtime_db(path: Path | None = None) -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE slot_filler_model_scores (
+            slot_filler_id INTEGER PRIMARY KEY,
+            score_pop REAL NOT NULL,
+            score_mainstream REAL NOT NULL,
+            score_niche REAL NOT NULL,
+            model_tier TEXT,
+            source_prediction_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
     _insert_runtime_config(conn)
     rows = [
         ("list_item", "race", 10, 1.0),
@@ -160,6 +157,15 @@ def make_runtime_db(path: Path | None = None) -> sqlite3.Connection:
         VALUES (?, ?, ?, ?, 1, 1.0)
         """,
         rows,
+    )
+    conn.execute(
+        """
+        INSERT INTO slot_filler_model_scores (
+            slot_filler_id, score_pop, score_mainstream, score_niche,
+            model_tier, source_prediction_count
+        )
+        SELECT id, 0.85, 0.1, 0.05, 'pop', 1 FROM slot_fillers
+        """
     )
     conn.commit()
     return conn
@@ -367,38 +373,6 @@ def test_filler_scoring_workers_cover_top3_mean_and_fallback():
     assert fallback_rows[4][1:] == (0, 0.0)
 
 
-def test_threshold_calibration_workers_cover_percentile_cutoffs():
-    pop = _load_populate_popularity_module()
-
-    rows = [(9, i / 100) for i in range(100)]
-    scores = pop.compute_classification_scores(rows, blend=1.0, pop_default=0.1)
-    calibration = pop.calibrate_threshold_values(scores)
-    params = calibration.as_config_values()
-
-    assert calibration.pop_threshold == 0.92
-    assert calibration.mainstream_threshold == 0.64
-    assert calibration.pop_count == 8
-    assert calibration.mainstream_count == 28
-    assert calibration.niche_count == 64
-    assert params["accessibility_threshold_pop"] == 0.92
-    assert params["tier_center_mainstream"] == 0.78
-
-
-def test_threshold_config_write_removes_legacy_tone_targets():
-    pop = _load_populate_popularity_module()
-
-    conn = sqlite3.connect(":memory:")
-    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT INTO config VALUES ('tone_target_pop_list_item', '0.77')")
-    conn.execute("INSERT INTO config VALUES ('tier_center_pop', '0.7')")
-    conn.commit()
-
-    pop.write_threshold_config(conn, {"tier_center_pop": 0.8})
-
-    rows = dict(conn.execute("SELECT key, value FROM config"))
-    assert rows == {"tier_center_pop": "0.8"}
-
-
 def test_schema_contract_validator_reports_stage_context(tmp_path):
     from subtitle_generator.extract import get_db
     from subtitle_generator.extract_openlibrary import ensure_isbn_column
@@ -452,40 +426,32 @@ def test_current_model_ids_and_tunable_defaults_are_characterized():
 
 def test_parameter_views_preserve_defaults_and_db_overrides():
     from subtitle_generator.parameter_state import (
-        get_popularity_blend_parameters,
+        get_article_parameters,
         get_popularity_parameters,
         get_generation_tier_ratios,
+        get_remix_parameters,
         get_runtime_generation_parameters,
-        get_slot_multiplier_parameters,
-        get_tier_classifier_parameters,
-        get_tier_threshold_parameters,
-        get_tone_targets,
     )
 
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
     conn.execute("INSERT INTO config VALUES ('pop_weight_spl', '0.9')")
-    conn.execute("INSERT INTO config VALUES ('pop_classification_blend', '0.25')")
-    conn.execute("INSERT INTO config VALUES ('pop_slot_mult_of_object', '1.4')")
+    conn.execute("INSERT INTO config VALUES ('article_of_min_freq', '2')")
+    conn.execute("INSERT INTO config VALUES ('remix_reject_double_of', '0')")
     conn.commit()
 
     popularity = get_popularity_parameters(conn)
-    blends = get_popularity_blend_parameters(conn)
     runtime = get_runtime_generation_parameters(conn)
 
     assert popularity.weight_spl == 0.9
     assert popularity.weight_ol == EXPECTED_TUNABLE_PARAMS["pop_weight_ol"]
     assert popularity.weight_trove == EXPECTED_TUNABLE_PARAMS["pop_weight_trove"]
-    assert blends.classification_blend == 0.25
-    assert get_slot_multiplier_parameters(conn).of_object == 1.4
     assert get_generation_tier_ratios(conn).pop == 0.0183
-    assert runtime.popularity_blends == blends
     assert runtime.generation_tier_ratios.mainstream == 0.1172
-    assert runtime.slot_multipliers.of_object == 1.4
-    assert get_tier_threshold_parameters(conn).accessibility_pop == 0.3665
-    assert get_tier_classifier_parameters(conn).pop_min_demand_confidence == 0.8001
-    assert get_tone_targets(conn).pop["list_item"] == 0.75
-    assert get_tone_targets(conn).mainstream["of_object"] == 0.4005
+    assert runtime.article == get_article_parameters(conn)
+    assert runtime.remix == get_remix_parameters(conn)
+    assert runtime.article.of_min_freq == 2.0
+    assert runtime.remix.reject_double_of == 0.0
 
 
 def test_seeded_generation_path_is_stable():
@@ -513,18 +479,6 @@ def test_seeded_generation_path_is_stable():
     assert first.of_article == ""
     assert isinstance(generate_module._remix_ctx, RemixRuntimeContext)
     assert generate_module._remix_ctx.precomputed is True
-
-
-def test_default_generation_uses_configured_tone_target():
-    from subtitle_generator.generate import _adjust_tone_targets
-
-    conn = make_runtime_db()
-
-    assert _adjust_tone_targets(conn, None) == {
-        "list_item": 1.6,
-        "action_noun": 1.8,
-        "of_object": 2.0,
-    }
 
 
 def test_default_generation_tier_choice_uses_configured_ratios():
@@ -591,10 +545,10 @@ def test_explicit_multi_tier_generation_targets_one_sampled_tier(monkeypatch):
         ),
     )
     conn.commit()
-    observed_targets: list[dict[str, float]] = []
+    observed_model_tiers: list[str | None] = []
 
     def fake_generate_from_candidates(conn, candidates, **kwargs):
-        observed_targets.append(kwargs["adjusted_tone_target"])
+        observed_model_tiers.append(kwargs["model_tier"])
         return GeneratedSubtitle(
             text="Generated pop",
             item1="Race",
@@ -603,7 +557,7 @@ def test_explicit_multi_tier_generation_targets_one_sampled_tier(monkeypatch):
             of_object="Happiness",
         )
 
-    def fake_compute_tier_evidence(subtitle, conn):
+    def fake_compute_tier_evidence(subtitle, conn, **kwargs):
         return SimpleNamespace(tier="pop")
 
     monkeypatch.setattr(generate_module, "_load_generation_candidates", lambda conn: object())
@@ -620,11 +574,7 @@ def test_explicit_multi_tier_generation_targets_one_sampled_tier(monkeypatch):
     )
 
     assert sub.text == "Generated pop"
-    assert observed_targets == [pytest.approx({
-        "list_item": 0.6,
-        "action_noun": 0.675,
-        "of_object": 0.75,
-    })]
+    assert observed_model_tiers == ["pop"]
 
 
 def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
@@ -656,7 +606,7 @@ def test_tier_filtered_generation_retries_until_classifier_match(monkeypatch):
             of_object="Happiness",
         )
 
-    def fake_compute_tier_evidence(subtitle, conn):
+    def fake_compute_tier_evidence(subtitle, conn, **kwargs):
         tier = "pop" if subtitle == "Generated 2" else "mainstream"
         return SimpleNamespace(tier=tier)
 
@@ -720,7 +670,7 @@ def test_default_generation_tries_remaining_tiers_when_sampled_tier_is_unavailab
             of_object="Happiness",
         )
 
-    def fake_compute_tier_evidence(subtitle, conn):
+    def fake_compute_tier_evidence(subtitle, conn, **kwargs):
         return SimpleNamespace(tier="mainstream")
 
     def fake_generate_subtitles(conn, **kwargs):
@@ -771,7 +721,7 @@ def test_default_generation_falls_back_after_all_tier_attempts_fail(monkeypatch)
             of_object="Happiness",
         )
 
-    def fake_compute_tier_evidence(subtitle, conn):
+    def fake_compute_tier_evidence(subtitle, conn, **kwargs):
         return SimpleNamespace(tier="unreachable")
 
     def fake_generate_subtitles(conn, **kwargs):
@@ -843,42 +793,49 @@ def test_batch_generation_reuses_one_candidate_pool(monkeypatch):
     assert len(loaded_candidates) == 1
 
 
-def test_cli_spot_check_uses_raw_tone_targets_not_classifier_filter(monkeypatch):
+def test_cli_spot_check_uses_tier_generation_batches(monkeypatch):
     import subtitle_generator.tune as tune_module
     from subtitle_generator.generate import GeneratedSubtitle
 
     conn = make_runtime_db()
-    requested_batches: list[tuple[int, dict[str, float]]] = []
+    requested_batches: list[tuple[int, tuple[str, ...], int]] = []
     captured_samples: list[tuple[str, str, object]] = []
 
-    def fake_generate_subtitles(conn, *, n, seed_base, tone_target, **kwargs):
-        requested_batches.append((seed_base, tone_target))
-        return [
-            GeneratedSubtitle(
-                text=f"Raw {seed_base + i}",
-                item1="Race",
-                item2="Power",
-                action_noun="Pursuit",
-                of_object="Happiness",
-            )
-            for i in range(n)
-        ]
+    def fake_generate_subtitles_by_tier(
+        conn, *, tiers, samples_per_tier, seed, **kwargs
+    ):
+        requested_batches.append((seed, tuple(tiers), samples_per_tier))
+        return {
+            tier: [
+                GeneratedSubtitle(
+                    text=f"{tier} {i}",
+                    item1="Race",
+                    item2="Power",
+                    action_noun="Pursuit",
+                    of_object="Happiness",
+                )
+                for i in range(samples_per_tier)
+            ]
+            for tier in tiers
+        }
 
     def fake_spot_check_cli(conn, samples, tier_labels, tier_shortcuts, source):
         captured_samples.extend(samples)
         return 1.0
 
     monkeypatch.setattr(
-        "subtitle_generator.generate.generate_subtitles", fake_generate_subtitles,
+        "subtitle_generator.generate.generate_subtitles_by_tier",
+        fake_generate_subtitles_by_tier,
     )
     monkeypatch.setattr(tune_module, "_spot_check_cli", fake_spot_check_cli)
 
     accuracy = tune_module.run_spot_check(conn, n_samples=2, seed_base=10)
 
     assert accuracy == 1.0
-    assert [seed for seed, _ in requested_batches] == [10, 110, 210]
-    assert [target["list_item"] for _, target in requested_batches] == [
-        0.75, 0.4005, 0.301,
+    assert requested_batches == [
+        (10, ("pop",), 2),
+        (110, ("mainstream",), 2),
+        (210, ("niche",), 2),
     ]
     assert [tier for tier, _, _ in captured_samples] == [
         "pop",
@@ -897,7 +854,7 @@ def test_tier_batch_generation_fast_exits_when_candidates_missing(monkeypatch):
     conn = make_runtime_db()
     compute_calls = 0
 
-    def fake_compute_tier_evidence(subtitle, conn):
+    def fake_compute_tier_evidence(subtitle, conn, **kwargs):
         nonlocal compute_calls
         compute_calls += 1
         return SimpleNamespace(tier="mainstream")
@@ -962,7 +919,7 @@ def test_spot_check_tier_generation_uses_shared_candidate_pool(monkeypatch):
             of_object="Happiness",
         )
 
-    def fake_compute_tier_evidence(subtitle, conn):
+    def fake_compute_tier_evidence(subtitle, conn, **kwargs):
         index = int(subtitle.removeprefix("Candidate ")) - 1
         return SimpleNamespace(tier=generated_tiers[index])
 
@@ -1250,7 +1207,7 @@ def test_rating_config_snapshot_preserves_defaults_and_overrides():
     from subtitle_generator.feedback import store_rating
 
     conn = make_runtime_db()
-    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_classification_blend', '0.25')")
+    conn.execute("INSERT OR REPLACE INTO config VALUES ('pop_missing_default', '0.25')")
     conn.commit()
 
     row_id = store_rating(
@@ -1274,8 +1231,8 @@ def test_rating_config_snapshot_preserves_defaults_and_overrides():
     snapshot = json.loads(row[0])
 
     assert snapshot.keys() == EXPECTED_TUNABLE_PARAMS.keys()
-    assert snapshot["pop_classification_blend"] == 0.25
-    assert snapshot["weighted_sample_spread"] == 0.12
+    assert snapshot["pop_missing_default"] == 0.25
+    assert snapshot["generation_tier_ratio_pop"] == 0.0183
     assert json.loads(row[1]) == ["interesting", "realistic"]
     assert row[2] == "characterization"
 
@@ -1320,23 +1277,23 @@ def test_tuning_config_change_applies_and_reverts_rows():
 
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT INTO config VALUES ('weighted_sample_spread', '0.7')")
+    conn.execute("INSERT INTO config VALUES ('article_of_min_freq', '0.7')")
     conn.commit()
 
     change = ConfigChange(
-        param="weighted_sample_spread",
+        param="article_of_min_freq",
         old_value=0.7,
         new_value=0.8,
     )
 
     apply_config_change(conn, change)
     assert conn.execute(
-        "SELECT value FROM config WHERE key = 'weighted_sample_spread'"
+        "SELECT value FROM config WHERE key = 'article_of_min_freq'"
     ).fetchone()[0] == "0.8"
 
     revert_config_change(conn, change)
     assert conn.execute(
-        "SELECT value FROM config WHERE key = 'weighted_sample_spread'"
+        "SELECT value FROM config WHERE key = 'article_of_min_freq'"
     ).fetchone()[0] == "0.7"
 
 
@@ -1346,18 +1303,18 @@ def test_tuning_revert_removes_default_override_row():
 
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("INSERT INTO config VALUES ('weighted_sample_spread', '0.9')")
+    conn.execute("INSERT INTO config VALUES ('article_of_min_freq', '0.9')")
     conn.commit()
 
     change = ConfigChange(
-        param="weighted_sample_spread",
-        old_value=ALL_TUNABLE_PARAMS["weighted_sample_spread"],
+        param="article_of_min_freq",
+        old_value=ALL_TUNABLE_PARAMS["article_of_min_freq"],
         new_value=0.9,
     )
 
     revert_config_change(conn, change)
     assert conn.execute(
-        "SELECT value FROM config WHERE key = 'weighted_sample_spread'"
+        "SELECT value FROM config WHERE key = 'article_of_min_freq'"
     ).fetchone() is None
 
 
@@ -1522,7 +1479,7 @@ def test_tuning_proposal_decision_records_before_after_scores():
 
     decision = record_decision(
         change=ConfigChange(
-            param="pop_classification_blend",
+            param="article_of_min_freq",
             old_value=0.5,
             new_value=0.6,
         ),
@@ -1532,7 +1489,7 @@ def test_tuning_proposal_decision_records_before_after_scores():
         after=(7.6, 0.3, 8.2),
     )
 
-    assert decision.change.param == "pop_classification_blend"
+    assert decision.change.param == "article_of_min_freq"
     assert decision.status == "kept"
     assert decision.quality_before == 7.5
     assert decision.separation_after == 0.3

@@ -11,7 +11,6 @@ from typing import Callable, Literal, cast
 
 from titlecase import titlecase
 
-from subtitle_generator.config import get_tone_targets
 from subtitle_generator.generate import _is_literal_bad_filler, _weighted_sample
 from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
 
@@ -137,10 +136,10 @@ def format_categorization_gate_report(
     lines = [
         "# Book-model pure categorization gate",
         "",
-        "This report compares legacy popularity/tone-target sampling against "
-        "pure learned tier categorization using fixed seeds. The candidate "
-        "path weights existing fillers by the requested tier probability; it "
-        "does not introduce new filler text.",
+        "This report compares frequency-only sampling against learned tier "
+        "categorization using fixed seeds. The candidate path weights existing "
+        "fillers by the requested tier probability; it does not introduce new "
+        "filler text.",
         "",
         "## Outputs",
         "",
@@ -215,7 +214,7 @@ def build_review_prompt(comparisons: tuple[CategorizationComparison, ...]) -> st
 
 For each id, the requested_tier is the target market tier. The candidate subtitle
 was sampled with learned per-filler probabilities for that tier. The current
-subtitle was sampled with legacy popularity/tone-target weighting.
+subtitle was sampled with frequency-only weighting.
 
 Do not punish a subtitle merely for being funny, surprising, niche, or oddly
 specific. Bizarre-but-grammatical nonfiction energy is desired. Mark literal_bad
@@ -300,13 +299,11 @@ def _sample_slot(
         ]
         return _weighted_sample(weighted_rows, count, rng, model_tier=requested_tier)
 
-    targets = get_tone_targets()
-    tone_target = targets[requested_tier][rows[0].slot_type]
     weighted_rows = [
         (row.filler, row.freq, row.current_popularity_score)
         for row in rows
     ]
-    return _weighted_sample(weighted_rows, count, rng, tone_target=tone_target)
+    return _weighted_sample(weighted_rows, count, rng)
 
 
 def _review_with_llm(

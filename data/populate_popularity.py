@@ -27,7 +27,7 @@ TROVE_PATH = Path("data/trove_holdings_lookup.json")
 # Ensure src is importable (for config access)
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from subtitle_generator.config import load_tuning_config, ALL_TUNABLE_PARAMS  # noqa: E402
+from subtitle_generator.config import load_tuning_config  # noqa: E402
 from subtitle_generator.parameter_state import PopularityParameters  # noqa: E402
 
 
@@ -91,27 +91,6 @@ class PercentileModels:
     open_library: Callable[[float], float]
     library: Callable[[float], float]
     trove: Callable[[float], float]
-
-
-@dataclass(frozen=True)
-class ThresholdCalibration:
-    pop_threshold: float
-    mainstream_threshold: float
-    pop_center: float
-    mainstream_center: float
-    niche_center: float
-    pop_count: int
-    mainstream_count: int
-    niche_count: int
-
-    def as_config_values(self) -> dict[str, float]:
-        return {
-            "accessibility_threshold_pop": round(self.pop_threshold, 4),
-            "accessibility_threshold_mainstream": round(self.mainstream_threshold, 4),
-            "tier_center_pop": round(self.pop_center, 4),
-            "tier_center_mainstream": round(self.mainstream_center, 4),
-            "tier_center_niche": round(self.niche_center, 4),
-        }
 
 
 def create_tables(conn: sqlite3.Connection):
@@ -742,129 +721,6 @@ def report(conn: sqlite3.Connection):
         print(f"  {stype}: {filler} | pop={score:.3f} freq_score={freq_score:.3f} (freq={freq})")
 
 
-def compute_classification_scores(
-    rows: list[tuple[int, float | None]],
-    blend: float,
-    pop_default: float,
-) -> list[float]:
-    """Blend frequency and popularity scores for threshold classification."""
-
-    scores = []
-    for freq, pop_score in rows:
-        score_freq = math.log10(1 + freq)
-        ps = pop_score if pop_score is not None else pop_default
-        scores.append((1 - blend) * score_freq + blend * ps)
-    return sorted(scores)
-
-
-def calibrate_threshold_values(scores: list[float]) -> ThresholdCalibration:
-    """Compute p92/p64 thresholds and tier centers from sorted scores."""
-
-    if not scores:
-        raise ValueError("Cannot calibrate thresholds without filler scores")
-
-    n = len(scores)
-
-    def pctile(p: int) -> float:
-        idx = int(n * p / 100)
-        return scores[min(idx, n - 1)]
-
-    pop_thresh = pctile(92)
-    main_thresh = pctile(64)
-
-    pop_scores = [s for s in scores if s >= pop_thresh]
-    main_scores = [s for s in scores if main_thresh <= s < pop_thresh]
-    niche_scores = [s for s in scores if s < main_thresh]
-
-    pop_center = pop_scores[len(pop_scores) // 2] if pop_scores else pop_thresh
-    main_center = main_scores[len(main_scores) // 2] if main_scores else (pop_thresh + main_thresh) / 2
-    niche_center = niche_scores[len(niche_scores) // 2] if niche_scores else main_thresh / 2
-
-    return ThresholdCalibration(
-        pop_threshold=pop_thresh,
-        mainstream_threshold=main_thresh,
-        pop_center=pop_center,
-        mainstream_center=main_center,
-        niche_center=niche_center,
-        pop_count=len(pop_scores),
-        mainstream_count=len(main_scores),
-        niche_count=len(niche_scores),
-    )
-
-
-def write_threshold_config(conn: sqlite3.Connection, params: dict[str, float]) -> None:
-    """Persist calibrated thresholds and tier centers to config."""
-
-    conn.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
-    conn.execute("DELETE FROM config WHERE key LIKE 'tone_target_%'")
-    for key, value in params.items():
-        conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)",
-            (key, str(value)),
-        )
-    conn.commit()
-
-
-def calibrate_thresholds(conn: sqlite3.Connection):
-    """Compute data-driven thresholds from popularity_score distribution.
-
-    Uses percentile-based cutoffs on the classification-blend score:
-    - Pop: top ~8% of fillers (p92+)
-    - Mainstream: next ~28% (p64-p92)
-    - Niche: bottom ~64% (below p64)
-
-    Writes recommended values to the config table.
-    """
-    cfg = load_tuning_config(conn)
-    blend = cfg.get("pop_classification_blend", 0.9)
-    pop_default = cfg.get("pop_missing_default", 0.1)
-
-    rows = conn.execute(
-        "SELECT freq, popularity_score FROM slot_fillers WHERE mode = 'strict'"
-    ).fetchall()
-
-    scores = compute_classification_scores(rows, blend, pop_default)
-    n = len(scores)
-    calibration = calibrate_threshold_values(scores)
-
-    print(f"\n=== Threshold Calibration (blend={blend}) ===")
-    print(f"  Distribution: n={n}, min={scores[0]:.3f}, median={scores[min(int(n * 50 / 100), n - 1)]:.3f}, max={scores[-1]:.3f}")
-    print("\n  Recommended thresholds:")
-    print(f"    accessibility_threshold_pop:         {calibration.pop_threshold:.3f}  (p92, {calibration.pop_count} fillers)")
-    print(f"    accessibility_threshold_mainstream:   {calibration.mainstream_threshold:.3f}  (p64, {calibration.mainstream_count} fillers)")
-    print(f"    niche: {calibration.niche_count} fillers")
-    print("\n  Recommended tier centers:")
-    print(f"    tier_center_pop:         {calibration.pop_center:.3f}")
-    print(f"    tier_center_mainstream:  {calibration.mainstream_center:.3f}")
-    print(f"    tier_center_niche:       {calibration.niche_center:.3f}")
-
-    # Show example fillers near boundaries
-    print(f"\n  Example fillers near pop threshold ({calibration.pop_threshold:.3f}):")
-    boundary_rows = conn.execute(
-        "SELECT slot_type, filler, freq, popularity_score FROM slot_fillers "
-        "WHERE mode = 'strict' AND slot_type IN ('list_item', 'action_noun', 'of_object') "
-        "ORDER BY ABS(popularity_score - ?) LIMIT 10", (calibration.pop_threshold,)
-    ).fetchall()
-    for stype, filler, freq, ps in boundary_rows:
-        score_freq = math.log10(1 + freq)
-        ps_val = ps if ps is not None else pop_default
-        blended = (1 - blend) * score_freq + blend * ps_val
-        tier = "POP" if blended >= calibration.pop_threshold else ("MAIN" if blended >= calibration.mainstream_threshold else "NICHE")
-        print(f"    {tier:5s} {blended:.3f}  {stype:15s}  {filler}")
-
-    params = calibration.as_config_values()
-    write_threshold_config(conn, params)
-
-    print(f"\n  Written {len(params)} config values to DB.")
-
-    # Before/after comparison
-    old_cfg = dict(ALL_TUNABLE_PARAMS)
-    print("\n  Before -> After:")
-    for key, new_val in params.items():
-        old_val = old_cfg.get(key, "N/A")
-        print(f"    {key}: {old_val} -> {new_val}")
-
-
 def main():
     import argparse
 
@@ -877,7 +733,6 @@ def main():
     parser.add_argument("--nyt", type=float, default=None, help="Override pop_weight_nyt")
     parser.add_argument("--trove", type=float, default=None, help="Override pop_weight_trove")
     parser.add_argument("--exponent", type=float, default=None, help="Override pop_exponent")
-    parser.add_argument("--skip-calibrate", action="store_true", help="Skip threshold calibration")
     args = parser.parse_args()
 
     print("Loading data...")
@@ -955,9 +810,6 @@ def main():
     score_fillers_level1(conn)
     score_fillers_fallback(conn)
     report(conn)
-
-    if not args.skip_calibrate:
-        calibrate_thresholds(conn)
 
     elapsed = time.time() - start
     print(f"\nDone in {elapsed:.0f}s")
