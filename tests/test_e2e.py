@@ -220,7 +220,7 @@ async def test_footer_remix_and_mobile(page: Page) -> None:
 
     print("TEST 10: Remix rendering")
     await page.locator("select").first.select_option("")
-    remix_route = "**/api/generate"
+    remix_route = "**/api/generate**"
 
     async def fulfill_remix(route) -> None:
         await route.fulfill(
