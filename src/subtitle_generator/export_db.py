@@ -4,9 +4,27 @@ import csv
 import sqlite3
 from pathlib import Path
 
+from subtitle_generator.config import ALL_TUNABLE_PARAMS
 from subtitle_generator.schema_contracts import MINI_DB_SCHEMA_CONTRACTS, validate_schema
 
 _CURRENT_PATTERN_LIST_ITEM_COUNTS = (2, 3)
+_RUNTIME_CONFIG_KEYS = frozenset(ALL_TUNABLE_PARAMS) | frozenset(
+    {
+        "article_stats_action_noun",
+        "article_stats_of_object",
+        "avg_cross_sim_t1",
+        "avg_cross_sim_t2",
+        "centroid_norm",
+        "embedding_centroid",
+        "embedding_version",
+        "remix_calibrated_min_sim",
+        "remix_calibrated_remix_prob",
+        "remix_head_pos",
+        "remix_mod_pos_2word",
+        "remix_mod_pos_3word",
+        "remix_prep_groups",
+    }
+)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -178,8 +196,12 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
         model_path.unlink()
 
     # -- config --
+    placeholders = ", ".join("?" for _ in _RUNTIME_CONFIG_KEYS)
     rows = source_conn.execute(
-        "SELECT key, value FROM config WHERE key NOT LIKE 'tone_target_%' ORDER BY key"
+        "SELECT key, value FROM config "
+        f"WHERE key IN ({placeholders}) "
+        "ORDER BY key",
+        tuple(sorted(_RUNTIME_CONFIG_KEYS)),
     ).fetchall()
     path = output_dir / "config.csv"
     with open(path, "w", newline="", encoding="utf-8") as f:

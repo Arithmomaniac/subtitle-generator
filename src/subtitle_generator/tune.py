@@ -99,35 +99,6 @@ def _proposal_change(
     ), clamped_from
 
 
-def _run_calibrate_thresholds(conn: sqlite3.Connection) -> None:
-    """Re-derive accessibility thresholds, tier centers, and tone targets from
-    the current blended-score distribution. Cheap; safe to call after any
-    repopulate or after a pop_classification_blend / pop_missing_default change.
-    """
-    import contextlib
-    import importlib
-    import io
-    sys.path.insert(0, "data")
-    import populate_popularity as pp
-    importlib.reload(pp)
-    # Suppress the verbose threshold report; tune loop only needs the new values
-    # to be live in config, not a 30-line dump every iteration.
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        pp.calibrate_thresholds(conn)
-    conn.commit()
-    invalidate_config_cache()
-    # One-line summary
-    cfg = load_tuning_config(conn)
-    click.echo(
-        f"  [calibrate] thresholds pop={cfg.get('accessibility_threshold_pop'):.3f} "
-        f"main={cfg.get('accessibility_threshold_mainstream'):.3f} "
-        f"centers pop={cfg.get('tier_center_pop'):.3f} "
-        f"main={cfg.get('tier_center_mainstream'):.3f} "
-        f"niche={cfg.get('tier_center_niche'):.3f}"
-    )
-
-
 # Cached popularity data (loaded once, reused across tuner iterations)
 _pop_data_cache: dict | None = None
 _work_data_cache: dict = {}
@@ -402,16 +373,18 @@ def _run_repopulate_full(conn: sqlite3.Connection):
 
     elapsed = _time.time() - t0
     click.echo(f"  [repopulate] full write done in {elapsed:.0f}s")
-    _run_calibrate_thresholds(conn)
+    conn.commit()
+    invalidate_config_cache()
 
 
 def _run_repopulate(conn: sqlite3.Connection):
     """Fast repopulate: score in memory, write only filler scores."""
     result = _score_in_memory(conn)
     if result is not None:
-        # Fast in-memory path; cold-start path (result is None) already
-        # delegated to _run_repopulate_full which calibrated.
-        _run_calibrate_thresholds(conn)
+        # Fast in-memory path; cold-start path (result is None) delegates
+        # to _run_repopulate_full, then both paths invalidate config caches.
+        conn.commit()
+        invalidate_config_cache()
 
 
 def _load_goals() -> str:
@@ -426,7 +399,7 @@ def _parse_bounds(goals_text: str) -> dict[str, tuple[float, float]]:
     """Extract parameter bounds from the tuning_goals.md table.
 
     Matches rows like:
-      | `weighted_sample_spread` | 0.1 | 1.0 | 0.12 | ... |
+      | `article_of_min_freq` | 1 | 10 | 1 | ... |
     Also handles wildcard rows for parameters that remain in the autotune surface.
     """
     bounds: dict[str, tuple[float, float]] = {}
@@ -791,13 +764,11 @@ def run_spot_check(
     Returns tone-accuracy (0.0-1.0) or None if all skipped.
     """
     import random as _rng
-    from subtitle_generator.config import get_tone_targets
-    from subtitle_generator.generate import generate_subtitles
+    from subtitle_generator.generate import generate_subtitles_by_tier
 
     if seed_base is None:
         seed_base = _rng.randint(0, 100000)
 
-    targets = get_tone_targets(conn)
     tiers = ["pop", "mainstream", "niche"]
     tier_labels = {"pop": "\U0001f525 POP", "mainstream": "\U0001f4da MAINSTREAM", "niche": "\U0001f393 NICHE"}
     tier_shortcuts = {"p": "pop", "m": "mainstream", "n": "niche"}
@@ -809,12 +780,12 @@ def run_spot_check(
 
     all_samples: list[tuple[str, str, object]] = []
     for tier_index, tier in enumerate(tiers):
-        subtitles = generate_subtitles(
+        subtitles = generate_subtitles_by_tier(
             conn,
-            n=n_samples,
-            seed_base=seed_base + tier_index * 100,
-            tone_target=targets[tier],
-        )
+            tiers=[tier],
+            samples_per_tier=n_samples,
+            seed=seed_base + tier_index * 100,
+        )[tier]
         for sub in subtitles:
             all_samples.append((tier, sub.text, sub))
 
@@ -1241,10 +1212,9 @@ signal is exhausted and further probes are noise.
 
 Consider what previous experiments tell you about which direction to move.
 
-NOTE: Popularity parameters such as pop_*, tier_pop_min_*, accessibility
-thresholds, and tier centers are intentionally excluded from this autoresearch
-loop. They should be fitted from source-title labels and table refits, not
-inferred indirectly from generated-output ratings.
+NOTE: Popularity and tier-classifier parameters are intentionally excluded from
+this autoresearch loop. They should be fitted from source-title labels and table
+refits, not inferred indirectly from generated-output ratings.
 """
 
         click.echo("  proposing parameter change …")

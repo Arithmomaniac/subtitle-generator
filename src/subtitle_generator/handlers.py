@@ -174,10 +174,17 @@ def handle_jacket(body: dict) -> tuple[int, dict]:
 
     model = body.get("model", "gpt-5.4-mini")
     dry_run = bool(body.get("dry_run", True))
+    remix_parts = body.get("remix_parts")
+    if remix_parts is not None and not isinstance(remix_parts, dict):
+        return 400, {"error": "remix_parts must be an object when provided"}
 
     conn = get_db()
     try:
-        system_prompt, user_prompt, tone_tier = build_jacket_prompt(subtitle, conn=conn)
+        system_prompt, user_prompt, tone_tier = build_jacket_prompt(
+            subtitle,
+            conn=conn,
+            remix_parts=remix_parts,
+        )
         prompt_text = f"{system_prompt}\n\n---\n\n{user_prompt}"
 
         result_text = None
@@ -186,6 +193,7 @@ def handle_jacket(body: dict) -> tuple[int, dict]:
                 subtitle,
                 model=model,
                 conn=conn,
+                remix_parts=remix_parts,
             )
 
         return 200, {

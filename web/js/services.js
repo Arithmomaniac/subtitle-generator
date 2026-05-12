@@ -54,12 +54,13 @@ export function createApi(baseUrl = "", fetchFn = fetch) {
     },
 
     /** Build jacket prompt and optionally run LLM. Returns {prompt, tone_tier, result} or {error}. */
-    async jacket({ subtitle, model, dryRun = true } = {}) {
+    async jacket({ subtitle, model, dryRun = true, remixParts = null } = {}) {
       const t0 = performance.now();
       const result = await post("/api/jacket", {
         subtitle,
         model: model || "gpt-5.4-mini",
         dry_run: dryRun,
+        remix_parts: remixParts || undefined,
       });
       const durationMs = Math.round(performance.now() - t0);
       trackMetric("JacketDuration", durationMs, { dryRun: String(dryRun), model: model || "gpt-5.4-mini" });

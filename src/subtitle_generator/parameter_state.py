@@ -15,13 +15,6 @@ RESPONSES_ONLY_MODELS = frozenset({"gpt-5.4-mini", "gpt-5.4", "gpt-5.4-nano"})
 
 
 @dataclass(frozen=True)
-class SamplingParameters:
-    weighted_sample_spread: float
-    weighted_sample_bias_floor: float
-    default_generation_tone_target: float
-
-
-@dataclass(frozen=True)
 class GenerationTierRatios:
     pop: float
     mainstream: float
@@ -41,20 +34,6 @@ class PopularityParameters:
 
 
 @dataclass(frozen=True)
-class PopularityBlendParameters:
-    base_weight_blend: float
-    classification_blend: float
-    missing_default: float
-
-
-@dataclass(frozen=True)
-class SlotMultiplierParameters:
-    list_item: float
-    action_noun: float
-    of_object: float
-
-
-@dataclass(frozen=True)
 class ArticleParameters:
     of_min_freq: float
     action_min_freq: float
@@ -67,33 +46,8 @@ class RemixParameters:
 
 
 @dataclass(frozen=True)
-class TierThresholdParameters:
-    center_pop: float
-    center_mainstream: float
-    center_niche: float
-    accessibility_pop: float
-    accessibility_mainstream: float
-
-
-@dataclass(frozen=True)
-class TierClassifierParameters:
-    pop_min_demand_confidence: float
-    pop_min_lower_tail: float
-
-
-@dataclass(frozen=True)
-class ToneTargets:
-    pop: dict[str, float]
-    mainstream: dict[str, float]
-    niche: dict[str, float]
-
-
-@dataclass(frozen=True)
 class RuntimeGenerationParameters:
-    sampling: SamplingParameters
     generation_tier_ratios: GenerationTierRatios
-    popularity_blends: PopularityBlendParameters
-    slot_multipliers: SlotMultiplierParameters
     article: ArticleParameters
     remix: RemixParameters
 
@@ -108,15 +62,6 @@ class ModelRegistry:
 
 def _cfg(conn: sqlite3.Connection | None = None) -> dict[str, float]:
     return load_tuning_config(conn)
-
-
-def get_sampling_parameters(conn: sqlite3.Connection | None = None) -> SamplingParameters:
-    cfg = _cfg(conn)
-    return SamplingParameters(
-        weighted_sample_spread=cfg["weighted_sample_spread"],
-        weighted_sample_bias_floor=cfg["weighted_sample_bias_floor"],
-        default_generation_tone_target=cfg["default_generation_tone_target"],
-    )
 
 
 def get_generation_tier_ratios(
@@ -144,28 +89,6 @@ def get_popularity_parameters(conn: sqlite3.Connection | None = None) -> Popular
     )
 
 
-def get_popularity_blend_parameters(
-    conn: sqlite3.Connection | None = None,
-) -> PopularityBlendParameters:
-    cfg = _cfg(conn)
-    return PopularityBlendParameters(
-        base_weight_blend=cfg["pop_base_weight_blend"],
-        classification_blend=cfg["pop_classification_blend"],
-        missing_default=cfg["pop_missing_default"],
-    )
-
-
-def get_slot_multiplier_parameters(
-    conn: sqlite3.Connection | None = None,
-) -> SlotMultiplierParameters:
-    cfg = _cfg(conn)
-    return SlotMultiplierParameters(
-        list_item=cfg["pop_slot_mult_list_item"],
-        action_noun=cfg["pop_slot_mult_action_noun"],
-        of_object=cfg["pop_slot_mult_of_object"],
-    )
-
-
 def get_article_parameters(conn: sqlite3.Connection | None = None) -> ArticleParameters:
     cfg = _cfg(conn)
     return ArticleParameters(
@@ -180,58 +103,11 @@ def get_remix_parameters(conn: sqlite3.Connection | None = None) -> RemixParamet
     return RemixParameters(reject_double_of=cfg["remix_reject_double_of"])
 
 
-def get_tier_threshold_parameters(
-    conn: sqlite3.Connection | None = None,
-) -> TierThresholdParameters:
-    cfg = _cfg(conn)
-    return TierThresholdParameters(
-        center_pop=cfg["tier_center_pop"],
-        center_mainstream=cfg["tier_center_mainstream"],
-        center_niche=cfg["tier_center_niche"],
-        accessibility_pop=cfg["accessibility_threshold_pop"],
-        accessibility_mainstream=cfg["accessibility_threshold_mainstream"],
-    )
-
-
-def get_tier_classifier_parameters(
-    conn: sqlite3.Connection | None = None,
-) -> TierClassifierParameters:
-    cfg = _cfg(conn)
-    return TierClassifierParameters(
-        pop_min_demand_confidence=cfg["tier_pop_min_demand_confidence"],
-        pop_min_lower_tail=cfg["tier_pop_min_lower_tail"],
-    )
-
-
-def get_tone_targets(conn: sqlite3.Connection | None = None) -> ToneTargets:
-    cfg = _cfg(conn)
-    return ToneTargets(
-        pop={
-            "list_item": cfg["tier_center_pop"],
-            "action_noun": cfg["tier_center_pop"],
-            "of_object": cfg["tier_center_pop"],
-        },
-        mainstream={
-            "list_item": cfg["tier_center_mainstream"],
-            "action_noun": cfg["tier_center_mainstream"],
-            "of_object": cfg["tier_center_mainstream"],
-        },
-        niche={
-            "list_item": cfg["tier_center_niche"],
-            "action_noun": cfg["tier_center_niche"],
-            "of_object": cfg["tier_center_niche"],
-        },
-    )
-
-
 def get_runtime_generation_parameters(
     conn: sqlite3.Connection | None = None,
 ) -> RuntimeGenerationParameters:
     return RuntimeGenerationParameters(
-        sampling=get_sampling_parameters(conn),
         generation_tier_ratios=get_generation_tier_ratios(conn),
-        popularity_blends=get_popularity_blend_parameters(conn),
-        slot_multipliers=get_slot_multiplier_parameters(conn),
         article=get_article_parameters(conn),
         remix=get_remix_parameters(conn),
     )

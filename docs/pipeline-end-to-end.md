@@ -58,10 +58,9 @@ When model scores are present, requested tier `T` uses:
 weight = sqrt(freq) * score_T
 ```
 
-If model scores are absent, generation falls back to legacy
-frequency/popularity/tone-target weighting. Deployment is expected to include a
-complete `slot_filler_model_scores.csv`, so the fallback is mainly for old local
-DBs and debugging.
+Deployment is expected to include complete `slot_filler_model_scores.csv`
+coverage. If a local DB has no score table, generation can still sample by
+frequency, but requested-tier behavior depends on learned scores.
 
 The guardrail is intentionally narrow. It rejects literal artifacts such as bare
 adjective-shaped final objects (`Christian`), typo/acronym artifacts (`Imf`),
@@ -133,8 +132,7 @@ uv run subtitle-gen download-popularity
 uv run subtitle-gen populate-popularity
 ```
 
-Popularity is source evidence and fallback signal. It is not the final deployed
-tier classifier when model scores are present.
+Popularity is source evidence. It is not the final deployed tier classifier.
 
 | Source | Signal |
 |---|---|
@@ -143,18 +141,18 @@ tier classifier when model scores are present.
 | NYT | Bestseller appearances. |
 | Ottawa / library data | Library demand and holdings. |
 | Trove Australia | Library breadth via `holdingsCount`. |
-| Open Library edition count | Edition-breadth signal. It can act like a fallback prior when other demand evidence is sparse, but it is also a learnable source in the constrained popularity block. |
+| Open Library edition count | Edition-breadth signal and a learnable source in the constrained popularity block. |
 
 The key filler fields are:
 
 | Column | Meaning |
 |---|---|
-| `popularity_score` | Historical/fallback source popularity score. |
+| `popularity_score` | Source popularity score used as a model/calibration feature. |
 | `popularity_level` | Coarse availability of source popularity evidence. |
 | `popularity_confidence` | Confidence in the popularity score. |
 
-Popularity matters because it gives the models and fallback generator demand
-evidence, but it is too blunt to distinguish all pop/mainstream/niche behavior.
+Popularity matters because it gives the models demand evidence, but it is too
+blunt to distinguish all pop/mainstream/niche behavior by itself.
 
 ## 4. Precompute runtime-safe remix features
 
@@ -198,11 +196,11 @@ The timing depends on what the constant feeds:
 
 | If you change... | Run or rerun here | Then rerun... | Why |
 |---|---|---|---|
-| `pop_weight_*`, `tier_classifier_*` | After the rich teacher exists, via the single `calibrate-runtime-tier-model` step | student distillation if features changed, then export | This step learns collapsed popularity source ratios, refreshes `popularity_score`, rebuilds book features, and learns final assembled-subtitle classifier coefficients. |
+| `pop_weight_*`, `tier_classifier_*` | After the rich teacher and selected student rollup exist, via the single `calibrate-runtime-tier-model` step | student distillation/shadow if applying popularity changes feature inputs, then install/export | This step learns collapsed popularity source ratios, refreshes `popularity_score`, rebuilds book features, and learns final assembled-subtitle classifier coefficients. |
 | `remix_calibrated_remix_prob`, `remix_calibrated_min_sim` | After slots, popularity, and remix precompute exist | final sample checks and `export-data` | CLI/API defaults and sample review gates consume these values directly. |
 | `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | After generation can produce realistic samples | final sample checks and `export-data` | These are generation heuristics; changing them does not retrain weights unless you use generated samples as review evidence. |
 | `generation_tier_ratio_pop/mainstream/niche` | Before final runtime validation/export | `export-data`, `build-db` | These control the default tier mix when no explicit tone is requested. |
-| `tier_center_*`, `accessibility_threshold_*`, `weighted_sample_*`, `pop_base_weight_blend`, `pop_classification_blend`, `pop_missing_default` | Before fallback diagnostics or legacy sampling checks | diagnostics, sample checks, export if changed | These mostly affect fallback tiering/legacy sampling when model scores are missing, plus diagnostic evidence. |
+| `pop_missing_default` | Before `calibrate-runtime-tier-model` if missing popularity should change classifier feature defaults | runtime tier calibration, export if changed | Used only as the sparse-popularity default inside the learned runtime classifier. |
 
 Useful commands:
 
@@ -211,24 +209,24 @@ Useful commands:
 uv sync --extra tune
 uv run subtitle-gen calibrate-remix --samples 50
 
-# Runtime tier model: train popularity ratios and final classifier coefficients.
+# Runtime tier model: train popularity ratios and final classifier coefficients
+# after Distill and Shadow have produced the selected rollup.
 uv sync --extra ml
 uv run subtitle-gen calibrate-runtime-tier-model `
   --features generated-artifacts\book-model\book_features.csv `
-  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --rollup generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv
 
 # Apply learned runtime config only after reviewing the report.
 uv run subtitle-gen calibrate-runtime-tier-model `
   --features generated-artifacts\book-model\book_features.csv `
   --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --rollup generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv `
   --apply
 
 # Current autoresearch loop is intentionally narrow: article/remix heuristics.
 uv run subtitle-gen tune --phase all --samples 50 --iterations 30
 
-# Fallback tier thresholds from source-title labels; not the primary classifier
-# when slot_filler_model_scores is complete.
-uv run subtitle-gen calibrate-tier-gates --apply
 ```
 
 The feedback loop is:
@@ -359,41 +357,13 @@ Latest validated rerun:
 
 The teacher is intentionally offline-rich. It is not directly exportable.
 
-### Calibrate the runtime tier model before distillation
+### Runtime calibration dependency
 
-After the rich teacher exists, run the single runtime tier-model calibration
-step before distilling exportable students:
-
-```powershell
-uv run subtitle-gen calibrate-runtime-tier-model `
-  --features generated-artifacts\book-model\book_features.csv `
-  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv
-```
-
-The step fits the collapsed popularity scalar:
-
-```text
-popularity_scalar =
-  w_spl*SPL
-+ w_ol*OpenLibrary
-+ w_goodreads*Goodreads
-+ w_library*Library
-+ w_nyt*NYT
-+ w_trove*Trove
-```
-
-It then fits final assembled-subtitle classifier coefficients over the chosen
-slot model probabilities, slot popularity, popularity interactions, and
-frequency evidence. The command writes a report by default. With `--apply`, it
-updates DB config, recomputes runtime popularity, and rebuilds book features in
-the same pipeline step:
-
-```powershell
-uv run subtitle-gen calibrate-runtime-tier-model `
-  --features generated-artifacts\book-model\book_features.csv `
-  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
-  --apply
-```
+Runtime tier-model calibration is described after rollup because the normal
+deployed path consumes both the rich teacher predictions and the selected
+`export-slot` filler rollup. If you only want a popularity-scalar report, the
+command can run earlier without `--rollup`; the final classifier calibration
+waits until after distillation and shadow rollup.
 
 ## 10. Distill exportable Torch students
 
@@ -452,7 +422,49 @@ The filler universe is unchanged; only the learned probabilities changed. This
 is why a refreshed `slot_filler_model_scores.csv` can broaden pop/mainstream
 generation without changing which text is allowed.
 
-## 12. Optional sample review gates
+## 12. Calibrate the runtime tier model
+
+After the rich teacher, exportable students, and selected shadow rollup exist,
+run the single runtime tier-model calibration step:
+
+```powershell
+uv run subtitle-gen calibrate-runtime-tier-model `
+  --features generated-artifacts\book-model\book_features.csv `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --rollup generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv
+```
+
+The step fits the collapsed popularity scalar:
+
+```text
+popularity_scalar =
+  w_spl*SPL
++ w_ol*OpenLibrary
++ w_goodreads*Goodreads
++ w_library*Library
++ w_nyt*NYT
++ w_trove*Trove
+```
+
+It then fits final assembled-subtitle classifier coefficients over the chosen
+slot model probabilities, slot popularity, popularity interactions, and
+frequency evidence. The command writes a report by default. With `--apply`, it
+updates DB config, recomputes runtime popularity, and rebuilds book features in
+the same pipeline step:
+
+```powershell
+uv run subtitle-gen calibrate-runtime-tier-model `
+  --features generated-artifacts\book-model\book_features.csv `
+  --teacher-predictions generated-artifacts\book-model\torch-all-spacy\book_torch_predictions.csv `
+  --rollup generated-artifacts\book-model\shadow-rollups\filler_book_rollups_export-slot.csv `
+  --apply
+```
+
+If `--apply` changes popularity-derived feature inputs and you want those
+refreshed inputs reflected in the exportable student, rerun `Distill` and
+`Shadow` before installing scores and exporting.
+
+## 13. Optional sample review gates
 
 The review gates are optional sanity-check tooling. They do not grade real
 books, train models, compute weights, or block export by themselves.
@@ -470,7 +482,7 @@ uv run subtitle-gen categorization-gate --dry-run
 universe as runtime. Dry-run writes sample/report artifacts without LLM review.
 Use `-ReviewGates` in the runner only when you actually want LLM judging.
 
-## 13. Install selected scores into the full DB
+## 14. Install selected scores into the full DB
 
 ```powershell
 uv run subtitle-gen install-book-model-scores `
@@ -492,7 +504,7 @@ atomically.
 If the CSV is missing required columns or contains invalid rows, the old score
 table is left intact.
 
-## 14. Export tracked deployment CSVs and build the mini DB
+## 15. Export tracked deployment CSVs and build the mini DB
 
 ```powershell
 uv run subtitle-gen export-data -o api\data
@@ -518,9 +530,9 @@ Ignored local/CI-built artifacts:
 
 If `slot_filler_model_scores.csv` exists, `build-db` requires one score row for
 every exported slot filler. Partial coverage is rejected so deployment cannot
-silently mix learned-tier sampling with legacy popularity sampling.
+mix learned-tier sampling with unscored filler choices.
 
-## 15. Repeat the book-model path with the runner
+## 16. Repeat the book-model path with the runner
 
 For repeatable operation, prefer the checked-in runner:
 
@@ -528,24 +540,31 @@ For repeatable operation, prefer the checked-in runner:
 pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps Features,Baseline,Torch,CalibrateRuntimeTierModel,Distill,Shadow,CategorizationGate
+  -Steps Features,Baseline,Torch,Distill,Shadow,CalibrateRuntimeTierModel,CategorizationGate
 
+# Apply using the existing selected rollup after reviewing the calibration report.
 pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps CalibrateRuntimeTierModel,Distill,Shadow,CategorizationGate `
+  -Steps CalibrateRuntimeTierModel `
   -ApplyPopularityCalibration
+
+# If applied popularity should feed export-safe features, rerun dependent outputs.
+pwsh -File scripts\run-book-model-pipeline.ps1 `
+  -Steps Distill,Shadow,CategorizationGate
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
   -Steps InstallScores,ExportData,BuildDb,Validate
 ```
 
-The runner defaults to the safe inventory step. `CalibrateRuntimeTierModel` is
-report-only unless `-ApplyPopularityCalibration` is set; when applied, that
+The runner defaults to the safe inventory step and executes requested steps in
+its built-in dependency order, so `CalibrateRuntimeTierModel` runs after
+`Distill` and `Shadow` when they are selected together. `CalibrateRuntimeTierModel`
+is report-only unless `-ApplyPopularityCalibration` is set; when applied, that
 single step recomputes `popularity_score`, rebuilds book features, and writes
 the learned runtime classifier coefficients. Expensive training, installation,
 export, mini-DB build, validation, and optional review sampling are explicit
 steps. It fails fast when a native command fails.
 
-## 16. Runtime generation and classification
+## 17. Runtime generation and classification
 
 Generation loads strict candidates for:
 
@@ -567,12 +586,13 @@ weight = sqrt(freq) * score_for_requested_tier
 | DB state | Classifier behavior |
 |---|---|
 | Complete `slot_filler_model_scores` | Average per-slot learned tier probabilities and choose the highest tier with deterministic tie-breaking. |
-| No model scores | Fall back to the legacy blended frequency/popularity score and calibrated thresholds. |
+| Remixed `of_object` | Classify from the structured remix components (`of_modifier` + `of_head`, or `of_topic` + `of_complement`) rather than looking for the newly composed object as a separate filler. |
+| Missing generated-slot evidence | Return neutral mainstream evidence for arbitrary/user-entered text; generated subtitles should carry scored slots or remix parts. |
 
 The classifier also returns compatibility evidence such as per-slot details,
 accessibility score, lower-tail score, and demand confidence for UI/debugging.
 
-## 17. Serving surfaces
+## 18. Serving surfaces
 
 ```text
 CLI -> generate.py / jacket.py
@@ -593,7 +613,7 @@ The frontend is intentionally thin. It renders API results, shows sources and
 remix parts, captures feedback, and builds jacket prompts. Runtime decisions stay
 server-side.
 
-## 18. Validate locally
+## 19. Validate locally
 
 Run these before deployment or merging changes:
 
@@ -617,7 +637,7 @@ pwsh -File scripts\run-local-e2e.ps1
 screenshots, runs `tests\test_e2e.py`, runs `tests\test_e2e_spot_check.py`, and
 writes artifacts to `test-results\local-e2e`.
 
-## 19. Deploy
+## 20. Deploy
 
 Deployment is handled by GitHub Actions:
 

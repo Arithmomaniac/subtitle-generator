@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import sqlite3
 import warnings
 
@@ -294,28 +293,23 @@ def _filler_log_freqs(
     conn: sqlite3.Connection,
     subtitles: list,
 ) -> list[float]:
-    """Return blended filler scores for every filler in the subtitle list.
-
-    Blends log10(1+freq) with popularity_score per pop_classification_blend config.
-    """
-    from subtitle_generator.config import load_tuning_config
-
-    cfg = load_tuning_config(conn)
-    blend_tone = cfg.get("pop_classification_blend", 0.9)
-    pop_default = cfg.get("pop_missing_default", 0.1)
+    """Return learned accessibility scores for every filler in the subtitle list."""
 
     scores: list[float] = []
     for sub in subtitles:
         for attr, slot_type in _SLOT_MAP.items():
             filler = getattr(sub, attr)
             row = conn.execute(
-                "SELECT freq, popularity_score FROM slot_fillers WHERE filler = ? AND slot_type = ?",
+                """
+                SELECT ms.score_pop, ms.score_mainstream, ms.score_niche
+                FROM slot_fillers sf
+                JOIN slot_filler_model_scores ms ON ms.slot_filler_id = sf.id
+                WHERE sf.filler = ? AND sf.slot_type = ?
+                """,
                 (filler, slot_type),
             ).fetchone()
-            freq = row[0] if row else 0
-            pop_score = (row[1] if row and row[1] is not None else pop_default)
-            score_freq = math.log10(1 + freq)
-            scores.append((1 - blend_tone) * score_freq + blend_tone * pop_score)
+            if row:
+                scores.append(row[0] * 1.0 + row[1] * 0.55 + row[2] * 0.1)
     return scores
 
 
@@ -323,9 +317,7 @@ def _histogram_overlap(a: list[float], b: list[float], bins: int = 10) -> float:
     """Compute histogram overlap coefficient between two distributions.
 
     The bin range is auto-derived from the union of the two samples so the
-    metric stays scale-invariant when the underlying score scale changes
-    (e.g. when ``pop_classification_blend`` is increased and scores shift
-    from log10(1+freq) range ~0–3 to popularity-percentile range 0–1).
+    metric stays scale-invariant when the underlying score scale changes.
     """
     if not a or not b:
         return 1.0
