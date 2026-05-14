@@ -208,13 +208,18 @@ filler_popularity_score =
   mean(top 3 source-book work_popularity_score values linked to the filler)
 ```
 
-Fillers without Level 1 source/work popularity data use a frequency fallback:
+Fillers without Level 1 source/work popularity data keep popularity missing
+instead of using corpus frequency as fake popularity:
 
 ```text
-filler_popularity_score = log10(1 + freq)
+filler_popularity_score = NULL
 popularity_level = 0
 popularity_confidence = 0.0
 ```
+
+Corpus phrase frequency is still a separate signal. Runtime tiering uses
+`frequency_score = log10(1 + freq)`, and offline book features carry max/average
+filler frequency-score aggregates separately from max/average filler popularity.
 
 The `pop_weight_*` rows are source weights for this scalar, not tier weights.
 They answer "how much should this data source count when computing source/filler

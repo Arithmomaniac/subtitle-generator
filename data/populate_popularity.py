@@ -655,14 +655,11 @@ def score_fillers_level1(conn: sqlite3.Connection):
 
 
 def update_fallback_filler_scores(conn: sqlite3.Connection) -> int:
-    """Write log-frequency fallback scores for fillers without Level 1 data."""
+    """Mark fillers without Level 1 data as missing source/work popularity."""
 
     return conn.execute("""
         UPDATE slot_fillers SET
-            popularity_score = CASE
-                WHEN freq > 0 THEN log(1 + freq) / log(10)
-                ELSE 0.0
-            END,
+            popularity_score = NULL,
             popularity_level = 0,
             popularity_confidence = 0.0
         WHERE mode = 'strict'
@@ -678,13 +675,13 @@ def update_fallback_filler_scores(conn: sqlite3.Connection) -> int:
 
 
 def score_fillers_fallback(conn: sqlite3.Connection):
-    """Set fallback scores for fillers without Level 1 data."""
-    print("\nSetting fallback scores (Level 0: freq-based)...")
+    """Mark fillers without Level 1 data as missing popularity."""
+    print("\nSetting fallback scores (Level 0: missing source/work popularity)...")
 
     updated = update_fallback_filler_scores(conn)
     conn.commit()
 
-    print(f"  Set fallback for {updated:,} fillers")
+    print(f"  Marked {updated:,} fillers with missing source/work popularity")
 
 
 def report(conn: sqlite3.Connection):
@@ -704,7 +701,7 @@ def report(conn: sqlite3.Connection):
         ).fetchone()[0]
         print(f"  {stype}: {total:,} total | L1={l1} ({l1*100//total}%) | fallback={l0} ({l0*100//total}%)")
 
-    # Compare L1 scores vs freq-based scores
+    # Compare L1 popularity scores with the separate frequency channel.
     print("\n=== Score Comparison (L1 fillers) ===")
     rows = conn.execute("""
         SELECT slot_type, filler, freq, popularity_score

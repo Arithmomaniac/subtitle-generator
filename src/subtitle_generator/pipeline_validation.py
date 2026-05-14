@@ -130,19 +130,29 @@ def _validate_popularity_coverage(conn: sqlite3.Connection) -> list[ValidationIs
         return issues
 
     if "popularity_score" in actual_columns:
-        missing_scores = conn.execute(
-            """
-            SELECT COUNT(*) FROM slot_fillers
-            WHERE mode = 'strict' AND popularity_score IS NULL
-            """
-        ).fetchone()[0]
+        if "popularity_level" in actual_columns:
+            missing_scores = conn.execute(
+                """
+                SELECT COUNT(*) FROM slot_fillers
+                WHERE mode = 'strict'
+                  AND popularity_score IS NULL
+                  AND COALESCE(popularity_level, 1) <> 0
+                """
+            ).fetchone()[0]
+        else:
+            missing_scores = conn.execute(
+                """
+                SELECT COUNT(*) FROM slot_fillers
+                WHERE mode = 'strict' AND popularity_score IS NULL
+                """
+            ).fetchone()[0]
         if missing_scores:
             issues.append(ValidationIssue(
                 stage="popularity_scoring",
                 check="coverage",
                 message=(
                     "popularity_scoring: "
-                    f"{missing_scores} strict slot fillers lack popularity_score"
+                    f"{missing_scores} strict non-Level-0 slot fillers lack popularity_score"
                 ),
             ))
 

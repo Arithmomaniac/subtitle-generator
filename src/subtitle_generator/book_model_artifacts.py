@@ -45,6 +45,8 @@ FEATURE_COLUMNS = (
     "distinct_strict_filler_count",
     "max_filler_popularity_score",
     "avg_filler_popularity_score",
+    "max_filler_frequency_score",
+    "avg_filler_frequency_score",
     "title_length_chars",
     "subtitle_length_chars",
     "list_item_count",
@@ -127,6 +129,8 @@ class BookFeatureRow:
     distinct_strict_filler_count: int
     max_filler_popularity_score: float | None
     avg_filler_popularity_score: float | None
+    max_filler_frequency_score: float | None
+    avg_filler_frequency_score: float | None
     title_length_chars: int
     subtitle_length_chars: int
     list_item_count: int
@@ -304,6 +308,8 @@ def load_book_feature_rows(
         COALESCE(sm.distinct_strict_filler_count, 0),
         sm.max_filler_popularity_score,
         sm.avg_filler_popularity_score,
+        sm.max_filler_frequency_score,
+        sm.avg_filler_frequency_score,
         COALESCE(pm.list_items_json, ''),
         COALESCE(pm.action_noun, ''),
         COALESCE(pm.of_object, '')
@@ -319,11 +325,11 @@ def load_book_feature_rows(
     for row in rows:
         title = row[2] or ""
         subtitle = row[3] or ""
-        list_items = _list_items(row[30])
+        list_items = _list_items(row[32])
         list_items_text = " | ".join(list_items)
         list_item_pair_text = " || ".join(list_items[:2])
-        action_noun = row[31] or ""
-        of_object = row[32] or ""
+        action_noun = row[33] or ""
+        of_object = row[34] or ""
         action_object_pair_text = _pair_text(action_noun, of_object)
         slot_frame_text = _slot_frame_text(list_items, action_noun, of_object)
         metadata = metadata_rows.get(row[1], {})
@@ -361,6 +367,8 @@ def load_book_feature_rows(
             distinct_strict_filler_count=row[27] if has_slot_fillers else 0,
             max_filler_popularity_score=row[28] if has_slot_fillers else None,
             avg_filler_popularity_score=row[29] if has_slot_fillers else None,
+            max_filler_frequency_score=row[30] if has_slot_fillers else None,
+            avg_filler_frequency_score=row[31] if has_slot_fillers else None,
             title_length_chars=len(title),
             subtitle_length_chars=len(subtitle),
             list_item_count=len(list_items),
@@ -527,7 +535,9 @@ def _slot_metrics_cte(
                 0 AS slot_source_link_count,
                 0 AS distinct_strict_filler_count,
                 NULL AS max_filler_popularity_score,
-                NULL AS avg_filler_popularity_score
+                NULL AS avg_filler_popularity_score,
+                NULL AS max_filler_frequency_score,
+                NULL AS avg_filler_frequency_score
             WHERE 0
         )
         """
@@ -538,7 +548,11 @@ def _slot_metrics_cte(
             COUNT(*) AS slot_source_link_count,
             COUNT(DISTINCT sf.id) AS distinct_strict_filler_count,
             MAX(sf.popularity_score) AS max_filler_popularity_score,
-            AVG(sf.popularity_score) AS avg_filler_popularity_score
+            AVG(sf.popularity_score) AS avg_filler_popularity_score,
+            MAX(CASE WHEN sf.freq > 0 THEN log(1 + sf.freq) / log(10) ELSE 0.0 END)
+                AS max_filler_frequency_score,
+            AVG(CASE WHEN sf.freq > 0 THEN log(1 + sf.freq) / log(10) ELSE 0.0 END)
+                AS avg_filler_frequency_score
         FROM slot_filler_sources sfs
         JOIN slot_fillers sf ON sf.id = sfs.slot_filler_id
         WHERE COALESCE(sf.mode, 'strict') = 'strict'

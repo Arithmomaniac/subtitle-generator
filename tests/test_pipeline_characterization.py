@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
-import math
 import sqlite3
 import sys
 from pathlib import Path
@@ -361,11 +360,11 @@ def test_filler_scoring_workers_cover_top3_mean_and_fallback():
         """
         ).fetchall()
     }
-    assert abs(fallback_rows[2][0] - 2.0) < 0.0001
+    assert fallback_rows[2][0] is None
     assert fallback_rows[2][1:] == (0, 0.0)
-    assert abs(fallback_rows[3][0] - 1.0) < 0.0001
+    assert fallback_rows[3][0] is None
     assert fallback_rows[3][1:] == (0, 0.0)
-    assert abs(fallback_rows[4][0] - math.log10(5)) < 0.0001
+    assert fallback_rows[4][0] is None
     assert fallback_rows[4][1:] == (0, 0.0)
 
 
@@ -1557,5 +1556,35 @@ def test_pipeline_validation_reports_readiness_failures_without_generation():
     assert any("missing required table 'subtitles'" in message for message in messages)
     assert any("missing required config key 'embedding_version'" in message for message in messages)
     assert any("missing columns: popularity_confidence, popularity_level" in message for message in messages)
-    assert any("strict slot fillers lack popularity_score" in message for message in messages)
+    assert any("strict non-Level-0 slot fillers lack popularity_score" in message for message in messages)
     assert any("no strict 'action_noun' candidates" in message for message in messages)
+
+
+def test_pipeline_validation_allows_level0_missing_popularity_score():
+    from subtitle_generator.pipeline_validation import validate_pipeline
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE subtitles (id INTEGER PRIMARY KEY);
+        CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE slot_fillers (
+            slot_type TEXT,
+            mode TEXT,
+            freq INTEGER,
+            popularity_score REAL,
+            popularity_level INTEGER,
+            popularity_confidence REAL
+        );
+        INSERT INTO config VALUES ('embedding_version', '2');
+        INSERT INTO slot_fillers VALUES
+            ('list_item', 'strict', 1, NULL, 0, 0.0),
+            ('action_noun', 'strict', 1, 0.2, 1, 1.0),
+            ('of_object', 'strict', 1, 0.2, 1, 1.0);
+        """
+    )
+
+    report = validate_pipeline(conn)
+
+    messages = [issue.message for issue in report.issues]
+    assert not any("lack popularity_score" in message for message in messages)

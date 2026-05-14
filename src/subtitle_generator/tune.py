@@ -303,7 +303,7 @@ def _score_in_memory(conn: sqlite3.Connection):
     # Compute filler scores from in-memory composites (top-3 mean)
     filler_works, filler_freq = _load_filler_works(conn)
 
-    filler_updates = []  # (popularity_score, popularity_level, filler_id)
+    filler_updates = []  # (popularity_score, popularity_level, popularity_confidence, filler_id)
     for fid, wkeys in filler_works.items():
         scores = sorted([work_composites.get(wk, 0.0) for wk in wkeys], reverse=True)
         top3 = scores[:3]
@@ -312,10 +312,9 @@ def _score_in_memory(conn: sqlite3.Connection):
 
     # Fallback for fillers without L1 data
     l1_ids = set(filler_works.keys())
-    for fid, freq in filler_freq.items():
+    for fid in filler_freq:
         if fid not in l1_ids:
-            score = math.log10(1 + freq) if freq > 0 else 0.0
-            filler_updates.append((score, 0, 0.0, fid))
+            filler_updates.append((None, 0, 0.0, fid))
 
     # Write only filler scores to DB (~13k rows)
     conn.executemany(
