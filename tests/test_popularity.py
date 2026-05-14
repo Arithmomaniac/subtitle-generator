@@ -453,6 +453,19 @@ def test_configured_tier_classifier_uses_selected_slot_interactions():
     conn.executemany(
         "INSERT OR REPLACE INTO config VALUES (?, ?)",
         [
+            ("tier_classifier_frequency_interaction_pop", "0.25"),
+            ("tier_classifier_temperature", "0.5"),
+        ],
+    )
+    invalidate_config_cache()
+    frequency_interaction_evidence = compute_tier_evidence(subtitle, conn)
+    assert frequency_interaction_evidence.tier == "pop"
+    assert 0.0 <= frequency_interaction_evidence.accessibility_score <= 1.0
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        [
+            ("tier_classifier_frequency_interaction_pop", "0"),
             ("tier_classifier_popularity_interaction_pop", "2.0"),
             ("tier_classifier_temperature", "0.5"),
         ],

@@ -316,6 +316,9 @@ def _aggregate_model_scores(
                 * popularity
                 * slot_scores[tier]
                 + cfg[f"tier_classifier_frequency_weight_{tier}"] * slot.frequency_score
+                + cfg[f"tier_classifier_frequency_interaction_{tier}"]
+                * slot.frequency_score
+                * slot_scores[tier]
             )
     if total_weight <= 0:
         return {}
@@ -335,6 +338,7 @@ def _uses_configured_tier_classifier(cfg: dict[str, float]) -> bool:
         *(f"tier_classifier_popularity_weight_{tier}" for tier in TIER_NAMES),
         *(f"tier_classifier_popularity_interaction_{tier}" for tier in TIER_NAMES),
         *(f"tier_classifier_frequency_weight_{tier}" for tier in TIER_NAMES),
+        *(f"tier_classifier_frequency_interaction_{tier}" for tier in TIER_NAMES),
     ]
     return (
         cfg["tier_classifier_model_score_weight"] != 1.0

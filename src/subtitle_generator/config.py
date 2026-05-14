@@ -40,6 +40,9 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "tier_classifier_frequency_weight_pop": 0.0,
     "tier_classifier_frequency_weight_mainstream": 0.0,
     "tier_classifier_frequency_weight_niche": 0.0,
+    "tier_classifier_frequency_interaction_pop": 0.0,
+    "tier_classifier_frequency_interaction_mainstream": 0.0,
+    "tier_classifier_frequency_interaction_niche": 0.0,
 }
 
 
