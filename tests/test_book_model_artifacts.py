@@ -159,6 +159,8 @@ def test_build_book_model_artifacts_writes_features_labels_and_report(tmp_path):
     assert features[0]["source_group"] == "OL"
     assert features[0]["has_work_key"] == "1"
     assert features[0]["slot_source_link_count"] == "2"
+    assert abs(float(features[0]["max_filler_frequency_score"]) - 1.041392685) < 0.0001
+    assert abs(float(features[0]["avg_filler_frequency_score"]) - 0.997817596) < 0.0001
     assert features[0]["list_item_count"] == "2"
     assert features[0]["list_item_pair_text"] == "Race || Power"
     assert features[0]["action_object_pair_text"] == "Rise || Markets"

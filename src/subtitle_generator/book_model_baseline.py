@@ -36,6 +36,8 @@ NUMERIC_FEATURES = (
     "distinct_strict_filler_count",
     "max_filler_popularity_score",
     "avg_filler_popularity_score",
+    "max_filler_frequency_score",
+    "avg_filler_frequency_score",
     "title_length_chars",
     "subtitle_length_chars",
     "list_item_count",
