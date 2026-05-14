@@ -6,29 +6,32 @@ avg_cross_sim_t2,0.232175853081882
 centroid_norm,2.9290740489959717
 embedding_centroid,heA2vxAI7j0qdsM9ZqgavaM5Jb19QUm8mcSwPPiuVT4fjG88sMjKP6x4jL73Aya+o8R9vIG2oT0GuCu8jZ5Mu4iw173CUSQ/trkEvffp7T2gG5g7W9k1vdgPIT46cCe9dChJPUKNhbyiDUs9jYARPrNhrL3mqTU+oyu7PBO3oT2ojtU8ilwnvcvP/D1+RUU9iGDRvYJGgr2Ktu29Mu7APSRgDjwWi8i9bML6PNmOOj0IYtU8RKIEvvz2RT1cxRI9zxJSPbQeGz2pvgi+j5TXPY2tqr0X8KC9OB0OvO7T3Dv6RvM8oQbjvGKK9jziT/m9AWXuvei+Mr1+tBM9YG0cvvw2HT0Zb0e9Z/vAu2+S3jxeWwy9+UMjvgHKJL3I0CW9vDfivDxNjb1kwPY9hGbTuw7pj73OOtY7sbsBPsHNTj5dd0O9U9xFPf9Bzz2jf3e8/w0fu1XK+71+JzQ+7J9bvohdIL37t/S8s5kVvo4mCL25Upq8sq+OvdypkryCZ/I8oQN3veI74j2EiNA8biQIvtzatTxtA0Q9wp/6PGbUwD2HIQo+anHFvyM9j70cliI8WqQTvtTaA7yuNAy9A8VEO2d9jr1CYUy+5Y7bvTXZyj2bAsk9be8Ivroz+juCjGC94BHivb2eHD1paOq7iFyVPcYDGrxB0IM92L7iPdHGiz2Jiee80daTvX1c0j30SSm+wxclOsbZuLwtq/28x0gOPfzior1CMlC9in20vUITF70Ug1C/IxvcvTFsGD6+6yY9pU6FvJXh5Lvhqsc9T/0jPmSXG76wqhI8o/hkPTialr23OyU8kNW5u4YEvj0WKwo+Jv1DPT8NJb1aWbM8i10yPnz/Az6Sz707b0kpO9cE7j0DFS++mojVvFB6Pz3FCh2+lJGBvSEem71gtkO8VSfCO7d71j3vhaQ8ow4HPkDqbjyN3K68zmYOPpWLBD5kkRk8XfS/PHuqqT1WXJ+8pWbXOv6Q2zxL4XY9LNekOuk3uL0t+So9n9B5PSrp6Ly8mva98YIMPYyrWb2W8aO9bbPzPC6WjT0tHTO8ukwbPnc6kj0KC4s9fNeNu145wzsmSbk9iku4vdHC0r0ydno9zM7LPR2Owz0r8dY8k862vPARhz2Nwc89pUnJPfta8zzP7Bi+45w7vHgp0j1zPbi9pLnsO2LKzb1aKWw84GOLveiARb73Xwq9BsehvaqLC73Qnck884+DPe4odzzqOLS9fv7iPK4H9zxo/bO8HRKsvJOMSD0RAWk9hycUvchaRDybvDy96ledvTjox71J7rA8JlzovNfRkD0xVTC9G2mjPToXG7wKPqa9Lm0QvfPY/j0d89I95BC2PaJ6xzruX1K9JWcKveBEAL1y1UO93QtHvBygPj1bGfS9ydw4PWtRfr2jVi0+dQizvMCPMb5qM069y1QtPR/HgD4wQTQ+lhAxvjrbiL2oEKm9jN16POm5MDwQ4Ei174U9vK8nh732Hs29SoKoPfl4Cj0gloC9PIoOveOVRzwjjtm872npPX4+UT1OH3C9ts0ivG8hZL2sOgy+JLU8PreH0r32ydS8kmNfPSwFuD21eqa86C6lvMEx0b1j+oE9
 embedding_version,2
-pop_weight_gr,0.28363476
-pop_weight_library,0.03188219
-pop_weight_nyt,0.03555915
-pop_weight_ol,0.32024585
-pop_weight_spl,0.65925486
-pop_weight_trove,0.11942296
+pop_weight_gr,0.33333744
+pop_weight_library,0.03019366
+pop_weight_nyt,0.03140333
+pop_weight_ol,0.24436363
+pop_weight_spl,0.68099156
+pop_weight_trove,0.12971001
 remix_head_pos,"{""NOUN"": 1798, ""PROPN"": 752}"
 remix_mod_pos_2word,"{""ADJ"": 1406, ""PROPN"": 526, ""NOUN"": 15, ""ADV"": 3, ""NUM"": 1}"
 remix_mod_pos_3word,"{""PROPN+PROPN"": 154, ""ADJ+ADJ"": 101, ""ADJ+NOUN"": 76, ""ADJ+PROPN"": 36, ""PROPN+PART"": 26, ""PROPN+ADJ"": 11, ""PROPN+NOUN"": 10, ""NOUN+PART"": 8, ""NOUN+NOUN"": 4, ""NOUN+ADJ"": 4, ""NUM+ADJ"": 2, ""NUM+PROPN"": 1, ""NUM+NOUN"": 1, ""NOUN+PROPN"": 1, ""ADV+PROPN"": 1}"
 remix_prep_groups,"{""in"": 203, ""of"": 34, ""on"": 5, ""from"": 5, ""to"": 4, ""after"": 3, ""with"": 2, ""for"": 2, ""de"": 2, ""by"": 2, ""at"": 2, ""under"": 1, ""per"": 1, ""into"": 1, ""against"": 1, ""about"": 1}"
-tier_classifier_frequency_weight_mainstream,0.19958134
-tier_classifier_frequency_weight_niche,0.01170463
-tier_classifier_frequency_weight_pop,-0.21123166
-tier_classifier_intercept_mainstream,-0.11579673
-tier_classifier_intercept_niche,0.40191534
-tier_classifier_intercept_pop,-0.28637215
-tier_classifier_model_score_weight,2.88785291
-tier_classifier_popularity_interaction_mainstream,0.17854458
-tier_classifier_popularity_interaction_niche,0.11043757
-tier_classifier_popularity_interaction_pop,0.08636078
-tier_classifier_popularity_weight_mainstream,0.14201024
-tier_classifier_popularity_weight_niche,-0.14387867
-tier_classifier_popularity_weight_pop,0.00186878
+tier_classifier_frequency_interaction_mainstream,0.39388770
+tier_classifier_frequency_interaction_niche,0.48918033
+tier_classifier_frequency_interaction_pop,0.18084250
+tier_classifier_frequency_weight_mainstream,0.20356332
+tier_classifier_frequency_weight_niche,-0.04331164
+tier_classifier_frequency_weight_pop,-0.16030385
+tier_classifier_intercept_mainstream,-0.11756627
+tier_classifier_intercept_niche,0.38144702
+tier_classifier_intercept_pop,-0.26407394
+tier_classifier_model_score_weight,2.69114757
+tier_classifier_popularity_interaction_mainstream,0.14253539
+tier_classifier_popularity_interaction_niche,0.06048020
+tier_classifier_popularity_interaction_pop,0.08391315
+tier_classifier_popularity_weight_mainstream,0.13503411
+tier_classifier_popularity_weight_niche,-0.15646972
+tier_classifier_popularity_weight_pop,0.02143552
 tier_classifier_slot_weight_action_noun,1
 tier_classifier_slot_weight_list_item,1
 tier_classifier_slot_weight_of_object,1

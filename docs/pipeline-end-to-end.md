@@ -615,7 +615,8 @@ z_T &= b_T +
     \beta_m s_T(k) +
     \beta_{p,T}\mathrm{pop}(k) +
     \beta_{q,T}\mathrm{pop}(k)s_T(k) +
-    \beta_{r,T}\mathrm{freqScore}(k)
+    \beta_{r,T}\mathrm{freqScore}(k) +
+    \beta_{u,T}\mathrm{freqScore}(k)s_T(k)
   \right)}
   {\sum_{k \in S}\lambda_k} \\
 \mathrm{runtimeScore}_T &=
@@ -639,6 +640,7 @@ slot_contribution_T =
   + tier_classifier_popularity_weight_T * slot_popularity
   + tier_classifier_popularity_interaction_T * slot_popularity * slot_score_T
   + tier_classifier_frequency_weight_T * slot_frequency_score
+  + tier_classifier_frequency_interaction_T * slot_frequency_score * slot_score_T
 
 logit_T =
   tier_classifier_intercept_T
@@ -654,6 +656,7 @@ That means:
 | `tier_classifier_popularity_weight_T` | Popularity's direct push toward tier `T`, regardless of the student's tier score. |
 | `tier_classifier_popularity_interaction_T` | Popularity's amplification or dampening of the student's evidence for tier `T`. |
 | `tier_classifier_frequency_weight_T` | Whether common source fillers push the assembled subtitle toward tier `T`. |
+| `tier_classifier_frequency_interaction_T` | Frequency's amplification or dampening of the student's evidence for tier `T`. |
 
 The current exported tier popularity weights are small compared with the model
 score multiplier, so they adjust the selected student rollup rather than replace

@@ -234,7 +234,8 @@ async def test_footer_remix_and_mobile(page: Page) -> None:
     try:
         await generate_button.click()
         await page.wait_for_function(
-            "() => document.querySelectorAll('.slot-subpart').length >= 2",
+            "() => Array.from(document.querySelectorAll('.slot-subpart'))"
+            ".map((el) => el.textContent).join('|') === 'American|Democracy'",
             timeout=60000,
         )
     finally:

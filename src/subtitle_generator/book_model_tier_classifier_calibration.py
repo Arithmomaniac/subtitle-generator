@@ -33,6 +33,7 @@ class TierClassifierExample:
     popularity: float
     interactions: list[float]
     frequency_score: float
+    frequency_interactions: list[float]
 
 
 @dataclass(frozen=True)
@@ -256,6 +257,13 @@ def _build_example(
         for tier in TIER_NAMES
     ]
     frequency_score = sum(slot.frequency_score for slot in slot_evidence) / len(slot_evidence)
+    frequency_interactions = [
+        sum(
+            slot_evidence[index].frequency_score * slot_scores[index][tier]
+            for index in range(len(slot_scores))
+        ) / len(slot_scores)
+        for tier in TIER_NAMES
+    ]
     return TierClassifierExample(
         pattern_match_id=pattern_id,
         subtitle=subtitle,
@@ -264,6 +272,7 @@ def _build_example(
         popularity=popularity,
         interactions=interactions,
         frequency_score=frequency_score,
+        frequency_interactions=frequency_interactions,
     )
 
 
@@ -294,7 +303,17 @@ def _fit_coefficients(
     popularity_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
     interaction_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
     frequency_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
-    params = [intercept, model_weight, popularity_weight, interaction_weight, frequency_weight]
+    frequency_interaction_weight = torch.zeros(
+        len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True
+    )
+    params = [
+        intercept,
+        model_weight,
+        popularity_weight,
+        interaction_weight,
+        frequency_weight,
+        frequency_interaction_weight,
+    ]
     optimizer = torch.optim.Adam(params, lr=learning_rate)
     best_state = None
     best_validation = float("inf")
@@ -308,6 +327,7 @@ def _fit_coefficients(
             popularity_weight,
             interaction_weight,
             frequency_weight,
+            frequency_interaction_weight,
         )
         loss = torch.mean((prediction - train["target"]) ** 2)
         loss = loss + regularization * (
@@ -316,6 +336,7 @@ def _fit_coefficients(
             + torch.sum(popularity_weight ** 2)
             + torch.sum(interaction_weight ** 2)
             + torch.sum(frequency_weight ** 2)
+            + torch.sum(frequency_interaction_weight ** 2)
         )
         loss.backward()
         optimizer.step()
@@ -328,6 +349,7 @@ def _fit_coefficients(
                 popularity_weight,
                 interaction_weight,
                 frequency_weight,
+                frequency_interaction_weight,
             )
             validation_loss = torch.mean((validation_prediction - validation["target"]) ** 2)
             validation_value = float(validation_loss.item())
@@ -344,6 +366,7 @@ def _fit_coefficients(
         popularity_weight,
         interaction_weight,
         frequency_weight,
+        frequency_interaction_weight,
     )
 
 
@@ -369,6 +392,11 @@ def _tensor_bundle(torch, examples: list[TierClassifierExample], device) -> dict
             dtype=torch.float32,
             device=device,
         ),
+        "frequency_interactions": torch.tensor(
+            [example.frequency_interactions for example in examples],
+            dtype=torch.float32,
+            device=device,
+        ),
         "target": torch.tensor(
             [example.target for example in examples],
             dtype=torch.float32,
@@ -385,6 +413,7 @@ def _predict_tensor(
     popularity_weight,
     interaction_weight,
     frequency_weight,
+    frequency_interaction_weight,
 ):
     logits = (
         intercept
@@ -392,6 +421,7 @@ def _predict_tensor(
         + bundle["popularity"] * popularity_weight
         + bundle["interactions"] * interaction_weight
         + bundle["frequency"] * frequency_weight
+        + bundle["frequency_interactions"] * frequency_interaction_weight
     )
     return torch.softmax(logits, dim=1)
 
@@ -402,6 +432,7 @@ def _coefficients_from_tensors(
     popularity_weight,
     interaction_weight,
     frequency_weight,
+    frequency_interaction_weight,
 ) -> dict[str, float]:
     coefficients = {
         "tier_classifier_model_score_weight": float(model_weight.detach().cpu().item()),
@@ -419,6 +450,9 @@ def _coefficients_from_tensors(
         )
         coefficients[f"tier_classifier_frequency_weight_{tier}"] = float(
             frequency_weight[index].detach().cpu().item()
+        )
+        coefficients[f"tier_classifier_frequency_interaction_{tier}"] = float(
+            frequency_interaction_weight[index].detach().cpu().item()
         )
     return coefficients
 
@@ -441,6 +475,8 @@ def _learned_probabilities(
             * example.interactions[index]
             + coefficients[f"tier_classifier_frequency_weight_{tier}"]
             * example.frequency_score
+            + coefficients[f"tier_classifier_frequency_interaction_{tier}"]
+            * example.frequency_interactions[index]
         )
     return _softmax(logits)
 
