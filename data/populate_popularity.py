@@ -528,7 +528,7 @@ def persist_work_popularity_rows(
 
 
 def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
-                       w_spl: float = 0.7, w_ol: float = 0.3, exponent: float = 1.0,
+                       w_spl: float = 0.7, w_ol: float = 0.3,
                        gr: dict | None = None, w_gr: float = 0.2,
                        ottawa_isbn: dict | None = None, w_library: float = 0.05,
                        nyt: dict | None = None, w_nyt: float = 0.1,
@@ -542,7 +542,7 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
     """
     print(f"\nPopulating work-level popularity_data "
           f"(w_spl={w_spl}, w_ol={w_ol}, w_gr={w_gr}, w_lib={w_library}, "
-          f"w_nyt={w_nyt}, w_trove={w_trove}, exp={exponent})...")
+          f"w_nyt={w_nyt}, w_trove={w_trove})...")
 
     data = get_or_build_work_level_data(
         conn, spl, ol, gr, ottawa_isbn, nyt, trove_isbn, work_data_cache,
@@ -556,8 +556,6 @@ def populate_work_level(conn: sqlite3.Connection, spl: dict, ol: dict,
         weight_nyt=w_nyt,
         weight_library=w_library,
         weight_trove=w_trove,
-        weight_frequency=0.0,
-        exponent=exponent,
     )
     percentiles = build_percentile_models(data)
 
@@ -732,7 +730,6 @@ def main():
     parser.add_argument("--library", type=float, default=None, help="Override pop_weight_library")
     parser.add_argument("--nyt", type=float, default=None, help="Override pop_weight_nyt")
     parser.add_argument("--trove", type=float, default=None, help="Override pop_weight_trove")
-    parser.add_argument("--exponent", type=float, default=None, help="Override pop_exponent")
     args = parser.parse_args()
 
     print("Loading data...")
@@ -794,15 +791,14 @@ def main():
     w_library = args.library if args.library is not None else cfg["pop_weight_library"]
     w_nyt = args.nyt if args.nyt is not None else cfg.get("pop_weight_nyt", 0.1)
     w_trove = args.trove if args.trove is not None else cfg.get("pop_weight_trove", 0.10)
-    exponent = args.exponent if args.exponent is not None else cfg["pop_exponent"]
     print(
         f"  Weights: SPL={w_spl}, OL={w_ol}, GR={w_gr}, LIB={w_library}, "
-        f"NYT={w_nyt}, TROVE={w_trove}, exponent={exponent}"
+        f"NYT={w_nyt}, TROVE={w_trove}"
     )
 
     start = time.time()
     create_tables(conn)
-    populate_work_level(conn, spl, ol, w_spl=w_spl, w_ol=w_ol, exponent=exponent,
+    populate_work_level(conn, spl, ol, w_spl=w_spl, w_ol=w_ol,
                         gr=gr, w_gr=w_gr,
                         ottawa_isbn=ottawa_isbn, w_library=w_library,
                         nyt=nyt, w_nyt=w_nyt,

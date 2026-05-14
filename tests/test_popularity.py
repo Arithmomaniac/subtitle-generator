@@ -1607,8 +1607,7 @@ def test_config_params_exist():
     expected = [
         "pop_weight_spl", "pop_weight_ol", "pop_weight_gr",
         "pop_weight_nyt", "pop_weight_library", "pop_weight_trove",
-        "pop_weight_freq",
-        "pop_exponent", "pop_missing_default",
+        "pop_missing_default",
     ]
     for param in expected:
         assert param in ALL_TUNABLE_PARAMS, f"Missing param: {param}"

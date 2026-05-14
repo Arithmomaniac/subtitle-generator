@@ -60,7 +60,7 @@ AUTOTUNE_PARAM_KEYS = frozenset({
 # These change the composite scoring formula, not just generation-time behavior.
 _REPOPULATE_PARAMS = frozenset({
     "pop_weight_spl", "pop_weight_ol", "pop_weight_gr",
-    "pop_weight_nyt", "pop_weight_library", "pop_weight_trove", "pop_exponent",
+    "pop_weight_nyt", "pop_weight_library", "pop_weight_trove",
 })
 
 def _autotune_param_keys() -> set[str]:
@@ -347,8 +347,6 @@ def _run_repopulate_full(conn: sqlite3.Connection):
     w_library = cfg.get("pop_weight_library", 0.05)
     w_nyt = cfg.get("pop_weight_nyt", 0.1)
     w_trove = cfg.get("pop_weight_trove", 0.10)
-    exponent = cfg.get("pop_exponent", 1.2)
-
     sys.path.insert(0, "data")
     import populate_popularity as pp
     importlib.reload(pp)
@@ -361,7 +359,7 @@ def _run_repopulate_full(conn: sqlite3.Connection):
     pp.create_tables(conn)
     pp.populate_work_level(
         conn, data["spl"], data["ol"],
-        w_spl=w_spl, w_ol=w_ol, exponent=exponent,
+        w_spl=w_spl, w_ol=w_ol,
         gr=data["gr"], w_gr=w_gr,
         ottawa_isbn=data["ottawa_isbn"], w_library=w_library,
         nyt=data["nyt"], w_nyt=w_nyt,

@@ -29,7 +29,6 @@ $validSteps = @(
     "CalibrateRuntimeTierModel",
     "Distill",
     "Shadow",
-    "DeploymentGate",
     "CategorizationGate",
     "InstallScores",
     "ExportData",
@@ -52,7 +51,6 @@ if ($Steps -contains "All") {
         "Distill",
         "Shadow",
         "CalibrateRuntimeTierModel",
-        "DeploymentGate",
         "CategorizationGate",
         "InstallScores",
         "ExportData",
@@ -196,21 +194,6 @@ if (Has-Step "CalibrateRuntimeTierModel") {
         $calibrationArgs += "--apply"
     }
     Invoke-Step "CalibrateRuntimeTierModel" "uv" $calibrationArgs
-}
-
-if (Has-Step "DeploymentGate") {
-    $gateArgs = @(
-        "run", "subtitle-gen", "deployment-gate",
-        "--rollup", "export-current", $currentRollups,
-        "--rollup", "export-slot", $slotRollups,
-        "--output-dir", (Join-Path $BookModelDir "deployment-gate"),
-        "--samples", [string]($Samples * 2),
-        "--random-seed", [string]$RandomSeed
-    )
-    if (-not $ReviewGates) {
-        $gateArgs += "--dry-run"
-    }
-    Invoke-Step "DeploymentGate" "uv" $gateArgs
 }
 
 if (Has-Step "CategorizationGate") {

@@ -36,8 +36,6 @@ EXPECTED_TUNABLE_PARAMS = {
     "pop_weight_nyt": 0.1,
     "pop_weight_library": 0.05,
     "pop_weight_trove": 0.10,
-    "pop_weight_freq": 0.0,
-    "pop_exponent": 1.2,
     "pop_missing_default": 0.1,
     "tier_classifier_model_score_weight": 1.0,
     "tier_classifier_temperature": 1.0,
@@ -284,8 +282,6 @@ def test_work_level_popularity_scoring_is_testable_without_db_writes():
         weight_nyt=0.1,
         weight_library=0.05,
         weight_trove=0.10,
-        weight_frequency=0.0,
-        exponent=1.2,
     )
 
     demand_row = pop.score_work_popularity("work-a", data, percentiles, params)

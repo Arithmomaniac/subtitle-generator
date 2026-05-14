@@ -20,8 +20,6 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "pop_weight_nyt": 0.1,      # Weight of NYT bestseller signal
     "pop_weight_library": 0.05, # Weight of other library lists signal
     "pop_weight_trove": 0.10,   # Weight of Trove Australia holdings signal
-    "pop_weight_freq": 0.0,
-    "pop_exponent": 1.2,
     "pop_missing_default": 0.1,
     # Final assembled-subtitle tier classifier coefficients. With these defaults,
     # the classifier preserves the previous mean-of-slot-probabilities behavior.

@@ -1990,67 +1990,6 @@ def shadow_book_model_cmd(
     click.echo(f"Wrote shadow report to {result.report_path}")
 
 
-@cli.command("deployment-gate")
-@click.option(
-    "--rollup",
-    "rollups",
-    multiple=True,
-    nargs=2,
-    metavar="LABEL PATH",
-    type=(str, click.Path(path_type=Path)),
-    default=(
-        (
-            "export-current",
-            Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-current.csv"),
-        ),
-        (
-            "export-slot",
-            Path("generated-artifacts/book-model/shadow-rollups/filler_book_rollups_export-slot.csv"),
-        ),
-    ),
-    show_default=True,
-    help="Student rollup CSV pair to evaluate. Can be provided multiple times.",
-)
-@click.option(
-    "--output-dir",
-    type=click.Path(path_type=Path),
-    default=Path("generated-artifacts/book-model/deployment-gate"),
-    show_default=True,
-    help="Directory for deployment gate artifacts.",
-)
-@click.option("--samples", type=click.IntRange(min=1), default=24, show_default=True)
-@click.option("--random-seed", default=20260505, show_default=True)
-@click.option("--model", default=None, help="LLM reviewer model. Defaults to rater model.")
-@click.option("--dry-run", is_flag=True, help="Write samples without LLM review.")
-def deployment_gate_cmd(
-    rollups: tuple[tuple[str, Path], ...],
-    output_dir: Path,
-    samples: int,
-    random_seed: int,
-    model: str | None,
-    dry_run: bool,
-):
-    """LLM-review candidate model/blend strategies for deployment."""
-
-    from subtitle_generator.book_model_deployment_gate import run_deployment_gate_review
-    from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
-
-    try:
-        result = run_deployment_gate_review(
-            rollup_paths={label: path for label, path in rollups},
-            output_dir=output_dir,
-            sample_count=samples,
-            random_seed=random_seed,
-            model=model or DEFAULT_RATER_MODEL,
-            dry_run=dry_run,
-        )
-    except RuntimeError as exc:
-        raise click.ClickException(str(exc)) from exc
-    click.echo(f"Wrote {result.comparison_count:,} samples to {result.samples_path}")
-    click.echo(f"Wrote {result.reviewed_count:,} reviews to {result.reviews_path}")
-    click.echo(f"Wrote deployment gate report to {result.report_path}")
-
-
 @cli.command("categorization-gate")
 @click.option(
     "--rollup",
@@ -2452,7 +2391,6 @@ def download_popularity(
 @click.option("--library", "w_library", type=float, default=None, help="Override pop_weight_library")
 @click.option("--nyt", "w_nyt", type=float, default=None, help="Override pop_weight_nyt")
 @click.option("--trove", "w_trove", type=float, default=None, help="Override pop_weight_trove")
-@click.option("--exponent", type=float, default=None, help="Override pop_exponent")
 @click.option("--skip-data-model", is_flag=True, help="Skip ISBN alias / filler-source rebuild")
 def populate_popularity(
     db_path,
@@ -2462,7 +2400,6 @@ def populate_popularity(
     w_library,
     w_nyt,
     w_trove,
-    exponent,
     skip_data_model,
 ):
     """Build ISBN mappings and compute popularity scores from all available sources.
@@ -2504,8 +2441,6 @@ def populate_popularity(
         args.extend(["--nyt", str(w_nyt)])
     if w_trove is not None:
         args.extend(["--trove", str(w_trove)])
-    if exponent is not None:
-        args.extend(["--exponent", str(exponent)])
     subprocess.run(args, check=True)
 
     click.echo("\nDone! Popularity scores updated.")

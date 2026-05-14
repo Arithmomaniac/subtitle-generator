@@ -63,7 +63,7 @@ weight = sqrt(freq) * max(score_T, 0.001)
 In math notation, for filler `f` and requested tier `T`:
 
 $$
-w(f, T) = \sqrt{\operatorname{freq}(f)} \cdot \max(s_T(f), 0.001)
+w(f, T) = \sqrt{\mathrm{freq}(f)} \cdot \max(s_T(f), 0.001)
 $$
 
 If a local row has no usable model score, generation falls back to
@@ -177,16 +177,19 @@ nyt_score = min(1.0, 0.8 + 0.2 * log10(1 + weeks_on_list) / 2.0)
 The deployed popularity scalar is a weighted average over available source
 signals divided by the total configured source weight. Missing source signals
 contribute zero by being absent from the numerator. Open Library is one of the
-source signals; it is not a separate runtime backoff term.
+source signals; it is not a separate runtime backoff term. The source weights
+shown as `alpha_i` below are runtime config values: a first clean run uses
+defaults, and the normal tuned values are assigned later by
+`calibrate-runtime-tier-model`.
 
 $$
 \begin{aligned}
-\operatorname{pop}(w) &=
+\mathrm{pop}(w) &=
   \frac{\sum_{i \in P(w)} \alpha_i x_i(w)}
        {\sum_{j \in A} \alpha_j} \\
-\operatorname{pop}(f) &=
-  \operatorname{mean}\left(
-    \operatorname{top3}\{\operatorname{pop}(w): w \rightarrow f\}
+\mathrm{pop}(f) &=
+  \mathrm{mean}\left(
+    \mathrm{top3}\{\mathrm{pop}(w): w \rightarrow f\}
   \right)
 \end{aligned}
 $$
@@ -213,18 +216,10 @@ popularity_level = 0
 popularity_confidence = 0.0
 ```
 
-The `pop_weight_*` rows in `config` are source weights for this scalar, not tier
-weights. They answer "how much should this data source count when computing
-source/filler popularity?" The current exported source weights are:
-
-| Config key | Source signal | Current value | Meaning |
-|---|---|---:|---|
-| `pop_weight_spl` | Seattle Public Library checkouts per year | 0.50157190 | Direct circulation demand. |
-| `pop_weight_ol` | Open Library edition count | 0.61780976 | Breadth/availability signal. |
-| `pop_weight_gr` | Goodreads rating count | 0.12437461 | Reader engagement demand. |
-| `pop_weight_library` | Other library/list appearances | 0.02924338 | Additional library demand or holdings evidence. |
-| `pop_weight_nyt` | NYT bestseller weeks | 0.02978305 | High-intent bestseller evidence. |
-| `pop_weight_trove` | Trove library count | 0.14721717 | Australian library breadth. |
+The `pop_weight_*` rows are source weights for this scalar, not tier weights.
+They answer "how much should this data source count when computing source/filler
+popularity?" Their learned values are listed in the runtime tier-model
+calibration section, where they are assigned.
 
 Popularity matters because it gives the models demand evidence, but it is too
 blunt to distinguish all pop/mainstream/niche behavior by itself. A popular
@@ -262,54 +257,45 @@ Examples:
 Generation can then compose candidate parts and reject low-similarity remixes
 without spaCy or full vector state.
 
-## 5. Runtime config reference
+## 5. Runtime config handoff points
 
 Runtime constants live in the full DB `config` table, then get exported to
 `api\data\config.csv` and packaged into the mini DB. In a normal rerun, these
 rows may already exist; you do not rerun every tuner just because you are
 retraining the book model.
 
-Config has two kinds of rows:
+The easiest way to reason about config is to ask two questions: **what reads
+this row?** and **who writes it, at what point in the pipeline?**
 
-| Kind | Examples | How runtime reads it |
-|---|---|---|
-| Tunable numeric parameters | `generation_tier_ratio_*`, `pop_weight_*`, `tier_classifier_*`, `article_*` | Loaded through `load_tuning_config()`, with defaults from `config.py` if a DB row is absent. Default-only rows may not appear in checked-in `api\data\config.csv`. |
-| Generated runtime state | `article_stats_*`, `centroid_norm`, `avg_cross_sim_*`, `remix_calibrated_*` | Read directly from the exported DB by generation/remix code. Missing remix calibration rows fall back to baked-in CLI/API defaults (`0.8` remix probability and `0.1` minimum similarity). |
-
-The timing depends on what the constant feeds:
-
-| If you change... | Run or rerun here | Then rerun... | Why |
+| Config family | What reads it | Who writes it, and when | If it changes, rerun/export |
 |---|---|---|---|
-| `pop_weight_*`, `tier_classifier_*` | After the rich teacher and selected student rollup exist, via the single `calibrate-runtime-tier-model` step | student distillation/shadow if applying popularity changes feature inputs, then install/export | This step learns collapsed popularity source ratios, refreshes `popularity_score`, rebuilds book features, and learns final assembled-subtitle classifier coefficients. |
-| `remix_calibrated_remix_prob`, `remix_calibrated_min_sim` | After slots, popularity, and remix precompute exist | final sample checks and `export-data` | CLI/API defaults and sample review gates consume these values directly. |
-| `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | After generation can produce realistic samples | final sample checks and `export-data` | These are generation heuristics; changing them does not retrain weights unless you use generated samples as review evidence. |
-| `generation_tier_ratio_pop/mainstream/niche` | Before final runtime validation/export | `export-data`, `build-db` | These control the default tier mix when no explicit tone is requested. |
-| `pop_missing_default` | Before `calibrate-runtime-tier-model` if missing popularity should change classifier feature defaults | runtime tier calibration, export if changed | Used only as the sparse-popularity default inside the learned runtime classifier. |
+| `article_stats_action_noun`, `article_stats_of_object` | Article selection while generating action nouns and final objects. | `build-slots`, when it derives article counts from observed source titles. | Rebuild slots, then export/build DB. |
+| `centroid_norm`, `avg_cross_sim_t1`, `avg_cross_sim_t2` | Runtime remix similarity approximation. | `precompute-vectors`, after slot fillers exist and before runtime remix checks. | Rerun remix precompute, then export/build DB. |
+| `remix_calibrated_min_sim`, `remix_calibrated_remix_prob` | CLI/API remix defaults; absent rows fall back to `0.1` min similarity and `0.8` remix probability. | `calibrate-remix`, or the remix phase of `tune`, after generation can produce realistic samples. | Final sample checks, then export/build DB. |
+| `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | Article backoff/majority heuristics during generation. | Autoresearch tone loop, `tune --phase tone`, after generation is working and sample quality can be rated. | Final sample checks, then export/build DB. |
+| `generation_tier_ratio_pop/mainstream/niche` | Default tier selection when no explicit tone is requested. | Defaults from `config.py`, or an explicit config edit before final runtime validation. | Export/build DB after review. |
+| `pop_weight_*` | Popularity recomputation for source/filler popularity scores. | Runtime tier-model calibration in section 12, after teacher predictions and selected student rollups exist. | Apply calibration, recompute popularity, rebuild book features, then rerun dependent model steps if needed. |
+| `tier_classifier_*`, `pop_missing_default` | `compute_tier_evidence()` when classifying assembled subtitles at runtime. | Runtime tier-model calibration in section 12, after the selected rollup exists; otherwise defaults from `config.py`. | Export/build DB after classifier calibration. |
 
-### Config key reference
+Defaults are defined in `config.py`; DB rows override them. Because `export-data`
+only exports rows that exist in the DB, default-only values may not appear in the
+checked-in `api\data\config.csv`.
 
-| Key or key family | Used by | Formula or behavior |
+### What autoresearch owns
+
+`subtitle-gen tune` is the autoresearch-inspired loop. It does not train the book
+model and it does not own popularity or tier-classifier weights. It runs
+generation experiments, rates outputs, and edits only generation heuristics:
+
+| Phase | Config it can change | How it works |
 |---|---|---|
-| `generation_tier_ratio_pop`, `generation_tier_ratio_mainstream`, `generation_tier_ratio_niche` | Default generation when no explicit model tier is requested | Negative values are clamped to zero, then normalized: `P(tier) = max(0, ratio_tier) / sum(max(0, ratio_*))`. If the sum is zero, runtime falls back to mainstream. Defaults are `0.0183`, `0.1172`, and `0.8645`. |
-| `pop_weight_spl`, `pop_weight_ol`, `pop_weight_gr`, `pop_weight_library`, `pop_weight_nyt`, `pop_weight_trove` | Popularity enrichment and popularity-weight calibration | Source weights for the collapsed popularity scalar. The weights are learned by `calibrate-runtime-tier-model`/popularity calibration and then used when recomputing `slot_fillers.popularity_score`. |
-| `pop_weight_freq` | Legacy/tuning surface | Present in the tunable config contract, but current popularity recomputation does not include it in the source-weighted scalar. Default is `0.0`. |
-| `pop_exponent` | Legacy/tuning surface and parameter export | Accepted by the popularity population CLI and carried in the parameter state contract, but the current percentile-based scoring path does not raise scores by this exponent. Default is `1.2`. |
-| `pop_missing_default` | Runtime tier classifier | Substitute popularity value when a scored slot lacks `popularity_score`. Default is `0.1`. |
-| `tier_classifier_model_score_weight` | Runtime tier classifier | Multiplier on the averaged student/rollup model score for every tier. Current exported value is `1.66202044`, so the runtime classifier leans more strongly on the student score than the default mean-of-slots behavior. |
-| `tier_classifier_slot_weight_list_item`, `tier_classifier_slot_weight_action_noun`, `tier_classifier_slot_weight_of_object` | Runtime tier classifier | Per-slot averaging weights. Current values are all `1`, so list items, action noun, and final object contribute equally. |
-| `tier_classifier_intercept_pop/mainstream/niche` | Runtime tier classifier | Per-tier bias added before softmax. Current values are `-0.17850681`, `-0.12991610`, and `0.23270014`. |
-| `tier_classifier_popularity_weight_pop/mainstream/niche` | Runtime tier classifier | Per-tier additive popularity coefficient. It answers "does raw slot popularity push this assembled subtitle toward this tier?" Current values are `-0.03210073`, `0.03258492`, and `0.00859780`. |
-| `tier_classifier_popularity_interaction_pop/mainstream/niche` | Runtime tier classifier | Per-tier coefficient on `popularity * student_score_for_tier`. It answers "does popularity amplify the student's evidence for this tier?" Current values are `0.18485981`, `0.00266052`, and `0.26849598`. |
-| `tier_classifier_frequency_weight_pop/mainstream/niche` | Runtime tier classifier | Per-tier coefficient on average slot frequency score. Current values are `-0.10489431`, `0.14781234`, and `-0.00470662`. |
-| `tier_classifier_temperature` | Runtime tier classifier | Softmax temperature for calibrated logits. Current value is `1.0`. |
-| `article_of_min_freq` | Article choice for final objects | Minimum corpus count before a majority article can be trusted for an `of_object`. Default is `1.0`. |
-| `article_action_min_freq` | Article choice for action nouns | Minimum corpus count before a majority article can be trusted for an action noun. Default is `1.0`. |
-| `article_remix_heuristic_threshold` | Article choice for remixed final objects | Minimum majority fraction for an exact/remix-head article decision. Default is `0.6`. |
-| `remix_reject_double_of` | Remix guardrail | Tunable boolean-like guardrail for rejecting awkward double-`of` constructions. Default is `1.0`. |
-| `article_stats_action_noun`, `article_stats_of_object` | Article choice | JSON maps from lowercased fillers or head words to observed article counts. Runtime chooses the majority article only when counts clear the relevant frequency/threshold gate. |
-| `centroid_norm`, `avg_cross_sim_t1`, `avg_cross_sim_t2` | Remix coherence check | Scalar approximation constants for remix cosine similarity: `similarity = total_dot / (sqrt(sum(norm_sq) + cross_correction) * centroid_norm)`, where `cross_correction` uses the type-specific `avg_cross_sim_*`. |
-| `remix_calibrated_min_sim` | Remix acceptance | Minimum approximate similarity for accepting a remixed `of_object`. Written by `calibrate-remix`; CLI/API default to `0.1` if the row is absent. |
-| `remix_calibrated_remix_prob` | Remix sampling | Default probability of attempting a remix in CLI/API surfaces. Written by `calibrate-remix`; CLI/API default to `0.8` if the row is absent. |
+| Remix | `remix_calibrated_min_sim`, `remix_calibrated_remix_prob` | Grid-search generated samples, rate them, and store the best remix defaults. |
+| Tone/article | `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | LLM proposes one bounded parameter move, generated samples are scored, and the move is kept only if it improves the score. |
+
+Human feedback enters between runs through `tuning_goals.md`, spot checks, and
+reviewed ratings. Popularity and `tier_classifier_*` coefficients stay out of
+this loop because they are fitted from source-title labels, teacher predictions,
+and rollup tables rather than from generated-output ratings.
 
 Useful commands:
 
@@ -569,10 +555,10 @@ uv run subtitle-gen calibrate-runtime-tier-model `
 The step fits the collapsed popularity scalar:
 
 $$
-\operatorname{popularity\_scalar}(x) =
+\mathrm{popularity\_scalar}(x) =
   \sum_i
-    \frac{\max(0, \operatorname{pop\_weight}_i)}
-         {\sum_j \max(0, \operatorname{pop\_weight}_j)}
+    \frac{\max(0, \mathrm{pop\_weight}_i)}
+         {\sum_j \max(0, \mathrm{pop\_weight}_j)}
     x_i
 $$
 
@@ -622,12 +608,12 @@ $$
 z_T &= b_T +
   \frac{\sum_{k \in S}\lambda_k\left(
     \beta_m s_T(k) +
-    \beta_{p,T}\operatorname{pop}(k) +
-    \beta_{q,T}\operatorname{pop}(k)s_T(k) +
-    \beta_{r,T}\operatorname{freqScore}(k)
+    \beta_{p,T}\mathrm{pop}(k) +
+    \beta_{q,T}\mathrm{pop}(k)s_T(k) +
+    \beta_{r,T}\mathrm{freqScore}(k)
   \right)}
   {\sum_{k \in S}\lambda_k} \\
-\operatorname{runtimeScore}_T &=
+\mathrm{runtimeScore}_T &=
   \frac{\exp(z_T / \tau)}
        {\sum_U \exp(z_U / \tau)}
 \end{aligned}
@@ -683,7 +669,6 @@ uv run subtitle-gen categorization-gate --dry-run
 | Command | Purpose | Status |
 |---|---|---|
 | `categorization-gate` | Generate fixed pure-categorization samples for human/ad hoc LLM review. | Preferred review check for learned-tier runtime behavior. |
-| `deployment-gate` | Legacy scalar/blend strategy comparison from the rejected intermediate design. | Kept for historical comparison and regression checks. |
 
 `categorization-gate` samples from the same strict, literal-filtered filler
 universe as runtime. Dry-run writes sample/report artifacts without LLM review.
@@ -789,7 +774,7 @@ weight = sqrt(freq) * max(score_for_requested_tier, 0.001)
 ```
 
 Equivalently:
-$w(f, T) = \sqrt{\operatorname{freq}(f)} \cdot \max(s_T(f), 0.001)$.
+$w(f, T) = \sqrt{\mathrm{freq}(f)} \cdot \max(s_T(f), 0.001)$.
 Rows without a usable model score fall back to `sqrt(freq)`.
 
 `compute_tier_evidence()` classifies generated subtitles:
