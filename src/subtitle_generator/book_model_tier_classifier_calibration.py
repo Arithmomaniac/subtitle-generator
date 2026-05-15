@@ -32,6 +32,8 @@ class TierClassifierExample:
     model_scores: list[float]
     popularity: float
     interactions: list[float]
+    popularity_observed: float
+    popularity_observed_interactions: list[float]
     frequency_score: float
     frequency_interactions: list[float]
 
@@ -227,7 +229,6 @@ def _build_example(
     slots = parse_subtitle_slots(subtitle)
     if not slots:
         return None
-    missing_default = cfg["pop_missing_default"]
     evidence = [_lookup_slot_evidence(conn, slot) for slot in slots]
     if any(slot is None for slot in evidence):
         return None
@@ -241,10 +242,15 @@ def _build_example(
     if any(not scores for scores in slot_scores):
         return None
     popularity_values = [
-        slot.popularity_score if slot.popularity_score is not None else missing_default
+        slot.popularity_score if slot.popularity_score is not None else 0.0
+        for slot in slot_evidence
+    ]
+    popularity_observed_values = [
+        1.0 if slot.popularity_score is not None else 0.0
         for slot in slot_evidence
     ]
     popularity = sum(popularity_values) / len(popularity_values)
+    popularity_observed = sum(popularity_observed_values) / len(popularity_observed_values)
     model_scores = [
         sum(scores[tier] for scores in slot_scores) / len(slot_scores)
         for tier in TIER_NAMES
@@ -252,6 +258,13 @@ def _build_example(
     interactions = [
         sum(
             popularity_values[index] * slot_scores[index][tier]
+            for index in range(len(slot_scores))
+        ) / len(slot_scores)
+        for tier in TIER_NAMES
+    ]
+    popularity_observed_interactions = [
+        sum(
+            popularity_observed_values[index] * slot_scores[index][tier]
             for index in range(len(slot_scores))
         ) / len(slot_scores)
         for tier in TIER_NAMES
@@ -271,6 +284,8 @@ def _build_example(
         model_scores=model_scores,
         popularity=popularity,
         interactions=interactions,
+        popularity_observed=popularity_observed,
+        popularity_observed_interactions=popularity_observed_interactions,
         frequency_score=frequency_score,
         frequency_interactions=frequency_interactions,
     )
@@ -302,6 +317,10 @@ def _fit_coefficients(
     model_weight = torch.tensor(1.0, dtype=torch.float32, device=device, requires_grad=True)
     popularity_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
     interaction_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
+    popularity_observed_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
+    popularity_observed_interaction_weight = torch.zeros(
+        len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True
+    )
     frequency_weight = torch.zeros(len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True)
     frequency_interaction_weight = torch.zeros(
         len(TIER_NAMES), dtype=torch.float32, device=device, requires_grad=True
@@ -311,6 +330,8 @@ def _fit_coefficients(
         model_weight,
         popularity_weight,
         interaction_weight,
+        popularity_observed_weight,
+        popularity_observed_interaction_weight,
         frequency_weight,
         frequency_interaction_weight,
     ]
@@ -326,6 +347,8 @@ def _fit_coefficients(
             model_weight,
             popularity_weight,
             interaction_weight,
+            popularity_observed_weight,
+            popularity_observed_interaction_weight,
             frequency_weight,
             frequency_interaction_weight,
         )
@@ -335,6 +358,8 @@ def _fit_coefficients(
             + (model_weight - 1.0) ** 2
             + torch.sum(popularity_weight ** 2)
             + torch.sum(interaction_weight ** 2)
+            + torch.sum(popularity_observed_weight ** 2)
+            + torch.sum(popularity_observed_interaction_weight ** 2)
             + torch.sum(frequency_weight ** 2)
             + torch.sum(frequency_interaction_weight ** 2)
         )
@@ -348,6 +373,8 @@ def _fit_coefficients(
                 model_weight,
                 popularity_weight,
                 interaction_weight,
+                popularity_observed_weight,
+                popularity_observed_interaction_weight,
                 frequency_weight,
                 frequency_interaction_weight,
             )
@@ -365,6 +392,8 @@ def _fit_coefficients(
         model_weight,
         popularity_weight,
         interaction_weight,
+        popularity_observed_weight,
+        popularity_observed_interaction_weight,
         frequency_weight,
         frequency_interaction_weight,
     )
@@ -384,6 +413,16 @@ def _tensor_bundle(torch, examples: list[TierClassifierExample], device) -> dict
         ),
         "interactions": torch.tensor(
             [example.interactions for example in examples],
+            dtype=torch.float32,
+            device=device,
+        ),
+        "popularity_observed": torch.tensor(
+            [[example.popularity_observed] for example in examples],
+            dtype=torch.float32,
+            device=device,
+        ),
+        "popularity_observed_interactions": torch.tensor(
+            [example.popularity_observed_interactions for example in examples],
             dtype=torch.float32,
             device=device,
         ),
@@ -412,6 +451,8 @@ def _predict_tensor(
     model_weight,
     popularity_weight,
     interaction_weight,
+    popularity_observed_weight,
+    popularity_observed_interaction_weight,
     frequency_weight,
     frequency_interaction_weight,
 ):
@@ -420,6 +461,8 @@ def _predict_tensor(
         + model_weight * bundle["model_scores"]
         + bundle["popularity"] * popularity_weight
         + bundle["interactions"] * interaction_weight
+        + bundle["popularity_observed"] * popularity_observed_weight
+        + bundle["popularity_observed_interactions"] * popularity_observed_interaction_weight
         + bundle["frequency"] * frequency_weight
         + bundle["frequency_interactions"] * frequency_interaction_weight
     )
@@ -431,6 +474,8 @@ def _coefficients_from_tensors(
     model_weight,
     popularity_weight,
     interaction_weight,
+    popularity_observed_weight,
+    popularity_observed_interaction_weight,
     frequency_weight,
     frequency_interaction_weight,
 ) -> dict[str, float]:
@@ -447,6 +492,12 @@ def _coefficients_from_tensors(
         )
         coefficients[f"tier_classifier_popularity_interaction_{tier}"] = float(
             interaction_weight[index].detach().cpu().item()
+        )
+        coefficients[f"tier_classifier_popularity_observed_weight_{tier}"] = float(
+            popularity_observed_weight[index].detach().cpu().item()
+        )
+        coefficients[f"tier_classifier_popularity_observed_interaction_{tier}"] = float(
+            popularity_observed_interaction_weight[index].detach().cpu().item()
         )
         coefficients[f"tier_classifier_frequency_weight_{tier}"] = float(
             frequency_weight[index].detach().cpu().item()
@@ -473,6 +524,10 @@ def _learned_probabilities(
             + coefficients[f"tier_classifier_popularity_weight_{tier}"] * example.popularity
             + coefficients[f"tier_classifier_popularity_interaction_{tier}"]
             * example.interactions[index]
+            + coefficients[f"tier_classifier_popularity_observed_weight_{tier}"]
+            * example.popularity_observed
+            + coefficients[f"tier_classifier_popularity_observed_interaction_{tier}"]
+            * example.popularity_observed_interactions[index]
             + coefficients[f"tier_classifier_frequency_weight_{tier}"]
             * example.frequency_score
             + coefficients[f"tier_classifier_frequency_interaction_{tier}"]

@@ -280,7 +280,8 @@ this row?** and **who writes it, at what point in the pipeline?**
 | `article_of_min_freq`, `article_action_min_freq`, `article_remix_heuristic_threshold` | Article backoff/majority heuristics during generation. | Autoresearch tone loop, `tune --phase tone`, after generation is working and sample quality can be rated. | Final sample checks, then export/build DB. |
 | `generation_tier_ratio_pop/mainstream/niche` | Default tier selection when no explicit tone is requested. | Defaults from `config.py`, or an explicit config edit before final runtime validation. | Export/build DB after review. |
 | `pop_weight_*` | Popularity recomputation for source/filler popularity scores. | Runtime tier-model calibration in section 12, after teacher predictions and selected student rollups exist. | Apply calibration, recompute popularity, rebuild book features, then rerun dependent model steps if needed. |
-| `tier_classifier_*`, `pop_missing_default` | `compute_tier_evidence()` when classifying assembled subtitles at runtime. | Runtime tier-model calibration in section 12, after the selected rollup exists; otherwise defaults from `config.py`. | Export/build DB after classifier calibration. |
+| `tier_classifier_*` | `compute_tier_evidence()` when classifying assembled subtitles at runtime. | Runtime tier-model calibration in section 12, after the selected rollup exists; otherwise defaults from `config.py`. | Export/build DB after classifier calibration. |
+| `pop_missing_default` | Legacy compatibility key; missing popularity is now represented by derived observed/missingness features instead of substituting this value. | Historical config rows or defaults from `config.py`; current runtime tier calibration does not write it. | No direct rerun; leave in place for older DB compatibility. |
 
 Defaults are defined in `config.py`; DB rows override them. Because `export-data`
 only exports rows that exist in the DB, default-only values may not appear in the
@@ -615,6 +616,8 @@ z_T &= b_T +
     \beta_m s_T(k) +
     \beta_{p,T}\mathrm{pop}(k) +
     \beta_{q,T}\mathrm{pop}(k)s_T(k) +
+    \beta_{o,T}\mathrm{popObserved}(k) +
+    \beta_{v,T}\mathrm{popObserved}(k)s_T(k) +
     \beta_{r,T}\mathrm{freqScore}(k) +
     \beta_{u,T}\mathrm{freqScore}(k)s_T(k)
   \right)}
@@ -627,18 +630,22 @@ $$
 
 Here `S` is the generated subtitle's scored slots, `lambda_k` is the configured
 slot weight for the slot type, `s_T(k)` is the selected student rollup score for
-tier `T`, and the `beta`/`b`/`tau` terms are the `tier_classifier_*` config
-values. Runtime applies the slot weight to the whole per-slot contribution, then
-divides by the total slot weight. Calibration builds equivalent unweighted
-example features because the current exported slot weights are all `1`.
+tier `T`, `pop(k)` is `0` when source/work popularity is missing, and
+`popObserved(k)` is `1` only when the slot has real source/work popularity.
+The `beta`/`b`/`tau` terms are the `tier_classifier_*` config values. Runtime
+applies the slot weight to the whole per-slot contribution, then divides by the
+total slot weight. Calibration builds equivalent unweighted example features
+because the current exported slot weights are all `1`.
 
 The implementation-shaped runtime version is:
 
 ```text
 slot_contribution_T =
   tier_classifier_model_score_weight * slot_score_T
-  + tier_classifier_popularity_weight_T * slot_popularity
-  + tier_classifier_popularity_interaction_T * slot_popularity * slot_score_T
+  + tier_classifier_popularity_weight_T * slot_observed_popularity
+  + tier_classifier_popularity_interaction_T * slot_observed_popularity * slot_score_T
+  + tier_classifier_popularity_observed_weight_T * slot_popularity_observed
+  + tier_classifier_popularity_observed_interaction_T * slot_popularity_observed * slot_score_T
   + tier_classifier_frequency_weight_T * slot_frequency_score
   + tier_classifier_frequency_interaction_T * slot_frequency_score * slot_score_T
 
@@ -653,8 +660,10 @@ That means:
 
 | Config family | What it means |
 |---|---|
-| `tier_classifier_popularity_weight_T` | Popularity's direct push toward tier `T`, regardless of the student's tier score. |
-| `tier_classifier_popularity_interaction_T` | Popularity's amplification or dampening of the student's evidence for tier `T`. |
+| `tier_classifier_popularity_weight_T` | Observed popularity's direct push toward tier `T`, regardless of the student's tier score. Missing popularity contributes `0` here. |
+| `tier_classifier_popularity_interaction_T` | Observed popularity's amplification or dampening of the student's evidence for tier `T`. Missing popularity contributes `0` here. |
+| `tier_classifier_popularity_observed_weight_T` | Whether the presence of real popularity evidence itself pushes the assembled subtitle toward tier `T`. |
+| `tier_classifier_popularity_observed_interaction_T` | Whether the presence of real popularity evidence amplifies or dampens the student's evidence for tier `T`. |
 | `tier_classifier_frequency_weight_T` | Whether common source fillers push the assembled subtitle toward tier `T`. |
 | `tier_classifier_frequency_interaction_T` | Frequency's amplification or dampening of the student's evidence for tier `T`. |
 
