@@ -298,22 +298,23 @@ def _aggregate_model_scores(
     total_weight = 0.0
     contributions = {tier: 0.0 for tier in TIER_NAMES}
     model_weight = cfg["tier_classifier_model_score_weight"]
-    missing_default = cfg["pop_missing_default"]
     for slot in slots:
         slot_scores = _slot_model_scores(slot)
         slot_weight = cfg[f"tier_classifier_slot_weight_{slot.slot_type}"]
         total_weight += slot_weight
-        popularity = (
-            slot.popularity_score
-            if slot.popularity_score is not None
-            else missing_default
-        )
+        popularity = slot.popularity_score if slot.popularity_score is not None else 0.0
+        popularity_observed = 1.0 if slot.popularity_score is not None else 0.0
         for tier in TIER_NAMES:
             contributions[tier] += slot_weight * (
                 model_weight * slot_scores[tier]
                 + cfg[f"tier_classifier_popularity_weight_{tier}"] * popularity
                 + cfg[f"tier_classifier_popularity_interaction_{tier}"]
                 * popularity
+                * slot_scores[tier]
+                + cfg[f"tier_classifier_popularity_observed_weight_{tier}"]
+                * popularity_observed
+                + cfg[f"tier_classifier_popularity_observed_interaction_{tier}"]
+                * popularity_observed
                 * slot_scores[tier]
                 + cfg[f"tier_classifier_frequency_weight_{tier}"] * slot.frequency_score
                 + cfg[f"tier_classifier_frequency_interaction_{tier}"]
@@ -337,6 +338,8 @@ def _uses_configured_tier_classifier(cfg: dict[str, float]) -> bool:
         *(f"tier_classifier_intercept_{tier}" for tier in TIER_NAMES),
         *(f"tier_classifier_popularity_weight_{tier}" for tier in TIER_NAMES),
         *(f"tier_classifier_popularity_interaction_{tier}" for tier in TIER_NAMES),
+        *(f"tier_classifier_popularity_observed_weight_{tier}" for tier in TIER_NAMES),
+        *(f"tier_classifier_popularity_observed_interaction_{tier}" for tier in TIER_NAMES),
         *(f"tier_classifier_frequency_weight_{tier}" for tier in TIER_NAMES),
         *(f"tier_classifier_frequency_interaction_{tier}" for tier in TIER_NAMES),
     ]

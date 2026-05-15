@@ -20,6 +20,8 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "pop_weight_nyt": 0.1,      # Weight of NYT bestseller signal
     "pop_weight_library": 0.05, # Weight of other library lists signal
     "pop_weight_trove": 0.10,   # Weight of Trove Australia holdings signal
+    # Legacy compatibility key. Runtime tiering now derives explicit
+    # observed-popularity features instead of substituting this value.
     "pop_missing_default": 0.1,
     # Final assembled-subtitle tier classifier coefficients. With these defaults,
     # the classifier preserves the previous mean-of-slot-probabilities behavior.
@@ -37,6 +39,12 @@ ALL_TUNABLE_PARAMS: dict[str, float] = {
     "tier_classifier_popularity_interaction_pop": 0.0,
     "tier_classifier_popularity_interaction_mainstream": 0.0,
     "tier_classifier_popularity_interaction_niche": 0.0,
+    "tier_classifier_popularity_observed_weight_pop": 0.0,
+    "tier_classifier_popularity_observed_weight_mainstream": 0.0,
+    "tier_classifier_popularity_observed_weight_niche": 0.0,
+    "tier_classifier_popularity_observed_interaction_pop": 0.0,
+    "tier_classifier_popularity_observed_interaction_mainstream": 0.0,
+    "tier_classifier_popularity_observed_interaction_niche": 0.0,
     "tier_classifier_frequency_weight_pop": 0.0,
     "tier_classifier_frequency_weight_mainstream": 0.0,
     "tier_classifier_frequency_weight_niche": 0.0,

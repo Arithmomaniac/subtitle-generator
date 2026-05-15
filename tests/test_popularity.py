@@ -453,6 +453,19 @@ def test_configured_tier_classifier_uses_selected_slot_interactions():
     conn.executemany(
         "INSERT OR REPLACE INTO config VALUES (?, ?)",
         [
+            ("tier_classifier_popularity_observed_weight_pop", "0.25"),
+            ("tier_classifier_temperature", "0.5"),
+        ],
+    )
+    invalidate_config_cache()
+    observed_evidence = compute_tier_evidence(subtitle, conn)
+    assert observed_evidence.tier == "pop"
+    assert 0.0 <= observed_evidence.accessibility_score <= 1.0
+
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        [
+            ("tier_classifier_popularity_observed_weight_pop", "0"),
             ("tier_classifier_frequency_interaction_pop", "0.25"),
             ("tier_classifier_temperature", "0.5"),
         ],
@@ -472,6 +485,73 @@ def test_configured_tier_classifier_uses_selected_slot_interactions():
     )
     invalidate_config_cache()
     assert compute_tier_evidence(subtitle, conn).tier == "pop"
+
+
+def test_missing_popularity_does_not_use_pop_missing_default_in_runtime_classifier():
+    from subtitle_generator.config import invalidate_config_cache
+    from subtitle_generator.tiering import compute_tier_evidence
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("""
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 0,
+            popularity_confidence REAL DEFAULT 0.0,
+            UNIQUE(slot_type, filler)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE slot_filler_model_scores (
+            slot_filler_id INTEGER PRIMARY KEY,
+            score_pop REAL NOT NULL,
+            score_mainstream REAL NOT NULL,
+            score_niche REAL NOT NULL,
+            model_tier TEXT,
+            source_prediction_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    for filler_id, slot_type, filler in (
+        (1, "list_item", "Unknown Demand"),
+        (2, "action_noun", "Rise"),
+        (3, "of_object", "Markets"),
+    ):
+        conn.execute(
+            """
+            INSERT INTO slot_fillers (
+                id, slot_type, filler, mode, freq, popularity_score,
+                popularity_level, popularity_confidence
+            )
+            VALUES (?, ?, ?, 'strict', 100, NULL, 0, 0.0)
+            """,
+            (filler_id, slot_type, filler),
+        )
+        conn.execute(
+            "INSERT INTO slot_filler_model_scores VALUES (?, 0.4, 0.5, 0.1, 'mainstream', 1)",
+            (filler_id,),
+        )
+    conn.executemany(
+        "INSERT OR REPLACE INTO config VALUES (?, ?)",
+        [
+            ("pop_missing_default", "1.0"),
+            ("tier_classifier_popularity_weight_pop", "3.0"),
+            ("tier_classifier_temperature", "0.5"),
+        ],
+    )
+    conn.commit()
+
+    invalidate_config_cache()
+    evidence = compute_tier_evidence(
+        "Unknown Demand, Unknown Demand, and the Rise of Markets",
+        conn,
+    )
+    assert evidence.tier == "mainstream"
+    assert 0.0 <= evidence.accessibility_score <= 1.0
 
 
 def test_literal_bad_generation_guardrail_rejects_known_artifacts():
