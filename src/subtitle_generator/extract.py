@@ -15,6 +15,7 @@ from subtitle_generator.source_validation import (
 
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
 DB_PATH = DATA_DIR / "db" / "subtitles.db"
+_ISBN_RE = re.compile(r"(?:(?:97[89][-\s]?)?(?:\d[-\s]?){9}[\dXx])")
 
 
 def get_db(db_path: Path | None = None) -> sqlite3.Connection:
@@ -110,6 +111,46 @@ def _get_language(record) -> str | None:
     return None
 
 
+def _clean_isbn_candidate(raw: str) -> str | None:
+    for match in _ISBN_RE.finditer(raw):
+        isbn = re.sub(r"[^0-9Xx]", "", match.group(0)).upper()
+        if len(isbn) == 10 and _valid_isbn10(isbn):
+            return isbn
+        if len(isbn) == 13 and _valid_isbn13(isbn):
+            return isbn
+    return None
+
+
+def _valid_isbn10(isbn: str) -> bool:
+    if len(isbn) != 10 or not isbn[:9].isdigit():
+        return False
+    check = 10 if isbn[-1] == "X" else int(isbn[-1]) if isbn[-1].isdigit() else -1
+    total = sum((10 - index) * int(digit) for index, digit in enumerate(isbn[:9]))
+    return (total + check) % 11 == 0
+
+
+def _valid_isbn13(isbn: str) -> bool:
+    if len(isbn) != 13 or not isbn.isdigit() or not isbn.startswith(("978", "979")):
+        return False
+    total = sum(
+        int(digit) * (1 if index % 2 == 0 else 3)
+        for index, digit in enumerate(isbn[:12])
+    )
+    check = (10 - (total % 10)) % 10
+    return check == int(isbn[-1])
+
+
+def _get_isbn(record) -> str | None:
+    for field in record.get_fields("020"):
+        raw = field.get("a") if hasattr(field, "get") else None
+        if not raw:
+            continue
+        isbn = _clean_isbn_candidate(raw)
+        if isbn:
+            return isbn
+    return None
+
+
 def extract_from_file(
     mrc_path: Path, conn: sqlite3.Connection, english_only: bool = True
 ) -> tuple[int, int]:
@@ -162,15 +203,18 @@ def extract_from_file(
 
             lccn_field = record.get("010")
             lccn = lccn_field.get("a", "").strip() if lccn_field else None
+            isbn = _get_isbn(record)
 
-            batch.append((title, subtitle, lang, lccn, source, candidate_text, candidate_source))
+            batch.append(
+                (title, subtitle, lang, lccn, source, isbn, candidate_text, candidate_source)
+            )
             subtitles_found += 1
 
             if len(batch) >= 5000:
                 conn.executemany(
                     "INSERT INTO subtitles "
-                    "(title, subtitle, lang, lccn, source_file, candidate_text, candidate_source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "(title, subtitle, lang, lccn, source_file, isbn, candidate_text, candidate_source) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     batch,
                 )
                 conn.commit()
@@ -182,8 +226,8 @@ def extract_from_file(
     if batch:
         conn.executemany(
             "INSERT INTO subtitles "
-            "(title, subtitle, lang, lccn, source_file, candidate_text, candidate_source) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(title, subtitle, lang, lccn, source_file, isbn, candidate_text, candidate_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             batch,
         )
         conn.commit()
