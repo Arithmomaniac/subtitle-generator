@@ -84,6 +84,25 @@ def test_loc_extract_stores_isbn_from_marc_020_with_qualifier(tmp_path: Path):
     assert row == (title, "", "0801864208", title, "title")
 
 
+def test_loc_extract_stores_isbn13_from_marc_020_with_qualifier(tmp_path: Path):
+    db_path = tmp_path / "subtitles.db"
+    mrc_path = tmp_path / "loc.mrc"
+    title = "Race, Power, and the Rise of Empire"
+    _write_marc(
+        mrc_path,
+        [_add_isbn(_record_245a(title), "9780674430006 (cloth)")],
+    )
+    conn = get_db(db_path)
+
+    scanned, found = extract_from_file(mrc_path, conn)
+
+    assert (scanned, found) == (1, 1)
+    row = conn.execute(
+        "SELECT title, subtitle, isbn, candidate_text, candidate_source FROM subtitles"
+    ).fetchone()
+    assert row == (title, "", "9780674430006", title, "title")
+
+
 def test_loc_extract_skips_non_pattern_title_without_subtitle(tmp_path: Path):
     db_path = tmp_path / "subtitles.db"
     mrc_path = tmp_path / "loc.mrc"
