@@ -137,6 +137,10 @@ TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
             "prior_count",
             "evidence_count",
             "source_count",
+            "anchored_source_count",
+            "inferred_source_count",
+            "anchored_soft_count",
+            "inferred_soft_count",
             "teacher_confidence_mean",
             "frequency",
             "popularity_score",
@@ -256,6 +260,10 @@ def validate_tier_slot_distribution(
            OR prior_count < 0
            OR evidence_count < 0
            OR source_count < 0
+           OR anchored_source_count < 0
+           OR inferred_source_count < 0
+           OR anchored_soft_count < 0
+           OR inferred_soft_count < 0
            OR semantic_smoothing_mass < 0
            OR calibration_temperature <= 0
            OR artifact_version IS NULL
@@ -271,6 +279,27 @@ def validate_tier_slot_distribution(
                 "tier_slot_distribution: distribution rows must have nonnegative "
                 "counts/probabilities, positive calibration_temperature, and a "
                 "nonempty artifact_version"
+            ),
+        ))
+
+    bad_count_identity = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table}
+        WHERE source_count != anchored_source_count + inferred_source_count
+           OR ABS(soft_count - (anchored_soft_count + inferred_soft_count)) > ?
+        """,
+        (tolerance,),
+    ).fetchone()[0]
+    if bad_count_identity:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: source_count must equal anchored plus "
+                "inferred source counts, and soft_count must equal anchored plus "
+                "inferred soft counts"
             ),
         ))
 

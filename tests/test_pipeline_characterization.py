@@ -441,6 +441,10 @@ def test_tier_slot_distribution_contract_validates_required_invariants():
             prior_count REAL NOT NULL,
             evidence_count REAL NOT NULL,
             source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
             teacher_confidence_mean REAL,
             frequency INTEGER NOT NULL,
             popularity_score REAL,
@@ -465,15 +469,15 @@ def test_tier_slot_distribution_contract_validates_required_invariants():
             rows.extend([
                 (
                     slot_type, tier, filler_a, 0.75, -0.287682072,
-                    3.0, 0.2, 3.2, 3, 0.9, 10, 0.5, 0.1, 1.0, "v1",
+                    3.0, 0.2, 3.2, 3, 2, 1, 2.5, 0.5, 0.9, 10, 0.5, 0.1, 1.0, "v1",
                 ),
                 (
                     slot_type, tier, filler_b, 0.25, -1.386294361,
-                    1.0, 0.2, 1.2, 1, 0.8, 4, None, 0.1, 1.0, "v1",
+                    1.0, 0.2, 1.2, 1, 0, 1, 0.0, 1.0, 0.8, 4, None, 0.1, 1.0, "v1",
                 ),
             ])
     conn.executemany(
-        f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
@@ -504,6 +508,10 @@ def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
             prior_count REAL NOT NULL,
             evidence_count REAL NOT NULL,
             source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
             teacher_confidence_mean REAL,
             frequency INTEGER NOT NULL,
             popularity_score REAL,
@@ -514,8 +522,8 @@ def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
         INSERT INTO slot_fillers (id, slot_type, filler, freq)
         VALUES (1, 'list_item', 'Race', 10), (2, 'list_item', 'Power', 8);
         INSERT INTO tier_slot_filler_distribution_v1 VALUES
-            ('list_item', 'pop', 'Race', 0.60, -0.51, 3.0, 0.0, 3.0, 3, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
-            ('list_item', 'pop', 'Unknown', 0.30, -1.20, 1.0, 0.0, 1.0, 1, 0.8, 4, NULL, 0.0, 1.0, 'v1');
+            ('list_item', 'pop', 'Race', 0.60, -0.51, 3.0, 0.0, 3.0, 3, 2, 1, 2.5, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'pop', 'Unknown', 0.30, -1.20, 1.0, 0.0, 1.0, 1, 0, 1, 0.0, 1.0, 0.8, 4, NULL, 0.0, 1.0, 'v1');
         """
     )
 
@@ -524,6 +532,54 @@ def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
     assert any(issue.column == "filler" for issue in issues)
     assert any(issue.column == "probability" for issue in issues)
     assert any("every (tier, slot_type) pair" in issue.message for issue in issues)
+
+
+def test_tier_slot_distribution_contract_reports_count_identity_mismatch():
+    from subtitle_generator.schema_contracts import validate_tier_slot_distribution
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE tier_slot_filler_distribution_v1 (
+            slot_type TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            probability REAL NOT NULL,
+            log_probability REAL NOT NULL,
+            soft_count REAL NOT NULL,
+            prior_count REAL NOT NULL,
+            evidence_count REAL NOT NULL,
+            source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
+            teacher_confidence_mean REAL,
+            frequency INTEGER NOT NULL,
+            popularity_score REAL,
+            semantic_smoothing_mass REAL NOT NULL,
+            calibration_temperature REAL NOT NULL,
+            artifact_version TEXT NOT NULL
+        );
+        INSERT INTO slot_fillers (id, slot_type, filler, freq)
+        VALUES (1, 'list_item', 'Race', 10);
+        INSERT INTO tier_slot_filler_distribution_v1 VALUES
+            ('list_item', 'pop', 'Race', 1.0, 0.0, 3.0, 0.0, 3.0, 3, 1, 1, 1.0, 1.0, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'mainstream', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'niche', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1');
+        """
+    )
+
+    issues = validate_tier_slot_distribution(conn)
+
+    assert any("source_count must equal anchored" in issue.message for issue in issues)
 
 
 def test_current_model_ids_and_tunable_defaults_are_characterized():
