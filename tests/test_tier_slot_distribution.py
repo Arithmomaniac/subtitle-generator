@@ -98,6 +98,9 @@ def test_build_tier_slot_distribution_anchors_labeled_confidence(tmp_path: Path)
     assert "Residual priors for labeled sources" in report
     assert "Current rollup comparison" in report
     assert "JS divergence" in report
+    assert "Label confidence diagnostics" in report
+    assert "Confidence anchoring comparison" in report
+    assert "hard-label variant" in report
     assert "Unlabeled sources use the current score-table fallback" in report
 
 

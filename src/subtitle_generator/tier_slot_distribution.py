@@ -135,9 +135,25 @@ def build_tier_slot_distribution(
         residual_priors=residual_priors,
         inferred_source_weight=inferred_source_weight,
     )
+    hard_label_cells = _build_evidence_cells(
+        conn,
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=_hard_label_source_labels(source_labels),
+        source_fallbacks=source_fallbacks,
+        global_fallback=global_fallback,
+        residual_priors=residual_priors,
+        inferred_source_weight=inferred_source_weight,
+    )
     rows = _distribution_rows(
         fillers=fillers,
         cells=cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
+    hard_label_rows = _distribution_rows(
+        fillers=fillers,
+        cells=hard_label_cells,
         alpha=alpha,
         artifact_version=artifact_version,
     )
@@ -150,6 +166,7 @@ def build_tier_slot_distribution(
     report_path.write_text(
         _format_report(
             rows=rows,
+            hard_label_rows=hard_label_rows,
             fillers=fillers,
             source_labels=source_labels,
             residual_priors=residual_priors,
@@ -263,6 +280,19 @@ def _load_source_labels(conn: sqlite3.Connection) -> dict[int, _SourceLabel]:
             confidence=_clamp_confidence(confidence),
         )
     return labels
+
+
+def _hard_label_source_labels(
+    source_labels: dict[int, _SourceLabel],
+) -> dict[int, _SourceLabel]:
+    return {
+        subtitle_id: (
+            _SourceLabel(label.tier, 1.0)
+            if label.tier in TIERS and label.confidence is not None
+            else label
+        )
+        for subtitle_id, label in source_labels.items()
+    }
 
 
 def _load_source_fallback_vectors(conn: sqlite3.Connection) -> dict[int, dict[str, float]]:
@@ -537,6 +567,7 @@ def _validate_rows(conn: sqlite3.Connection, rows: list[dict[str, object]]) -> N
 def _format_report(
     *,
     rows: list[dict[str, object]],
+    hard_label_rows: list[dict[str, object]],
     fillers: dict[str, _Filler],
     source_labels: dict[int, _SourceLabel],
     residual_priors: dict[str, dict[str, float]],
@@ -552,6 +583,8 @@ def _format_report(
     mass_summary = _mass_summary(rows)
     top_rows = _top_rows(rows)
     current_comparison = _current_rollup_comparison(rows, fillers)
+    confidence_summary = _confidence_summary(source_labels)
+    hard_label_comparison = _distribution_comparison(rows, hard_label_rows)
     lines = [
         "# Tier-slot distribution report",
         "",
@@ -573,6 +606,24 @@ def _format_report(
     ]
     for label, count in sorted(label_counts.items()):
         lines.append(f"| {label} | {count:,} |")
+    lines.extend([
+        "",
+        "## Label confidence diagnostics",
+        "",
+        "`llm_market_tier_confidence` is used as anchored probability mass for "
+        "the labeled tier. This is separate from source reliability weighting, "
+        "which is not applied yet.",
+        "",
+        "| Label | Count | Mean | Min | P10 | Median | P90 | Max | <0.70 | 0.70-0.85 | 0.85-0.95 | >=0.95 |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for row in confidence_summary:
+        lines.append(
+            f"| {row['tier']} | {row['count']:,} | {row['mean']:.3f} | "
+            f"{row['min']:.3f} | {row['p10']:.3f} | {row['median']:.3f} | "
+            f"{row['p90']:.3f} | {row['max']:.3f} | {row['lt_070']:,} | "
+            f"{row['b_070_085']:,} | {row['b_085_095']:,} | {row['gte_095']:,} |"
+        )
     lines.extend([
         "",
         "LLM-labeled sources anchor the labeled tier at "
@@ -618,6 +669,25 @@ def _format_report(
         lines.append(
             f"| {tier} | {row['anchored']:.3f} | {row['inferred']:.3f} | "
             f"{row['prior']:.3f} |"
+        )
+    lines.extend([
+        "",
+        "## Confidence anchoring comparison",
+        "",
+        "This compares the actual confidence-anchored distribution against a "
+        "hard-label variant where every LLM-labeled source contributes 1.0 mass "
+        "to its labeled tier and no residual mass to the other tiers. This is a "
+        "diagnostic only; the emitted artifact keeps the actual confidence-"
+        "anchored probabilities.",
+        "",
+        "| Slot type | Tier | JS divergence | Top-20 overlap | Largest confidence-driven increases | Largest hard-label increases |",
+        "|---|---:|---:|---:|---|---|",
+    ])
+    for row in hard_label_comparison:
+        lines.append(
+            f"| {row['slot_type']} | {row['tier']} | "
+            f"{row['js_divergence']:.6f} | {row['top20_overlap']}/20 | "
+            f"{row['left_increases']} | {row['right_increases']} |"
         )
     lines.extend([
         "",
@@ -709,6 +779,111 @@ def _mass_summary(rows: list[dict[str, object]]) -> dict[str, dict[str, float]]:
     return summary
 
 
+def _confidence_summary(source_labels: dict[int, _SourceLabel]) -> list[dict[str, object]]:
+    grouped: dict[str, list[float]] = defaultdict(list)
+    for label in source_labels.values():
+        if label.tier in TIERS and label.confidence is not None:
+            grouped[label.tier].append(label.confidence)
+    summary: list[dict[str, object]] = []
+    for tier in TIERS:
+        values = sorted(grouped.get(tier, []))
+        if not values:
+            continue
+        summary.append({
+            "tier": tier,
+            "count": len(values),
+            "mean": sum(values) / len(values),
+            "min": values[0],
+            "p10": _quantile(values, 0.10),
+            "median": _quantile(values, 0.50),
+            "p90": _quantile(values, 0.90),
+            "max": values[-1],
+            "lt_070": sum(value < 0.70 for value in values),
+            "b_070_085": sum(0.70 <= value < 0.85 for value in values),
+            "b_085_095": sum(0.85 <= value < 0.95 for value in values),
+            "gte_095": sum(value >= 0.95 for value in values),
+        })
+    return summary
+
+
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        raise RuntimeError("Cannot compute quantile of empty values")
+    if len(values) == 1:
+        return values[0]
+    position = (len(values) - 1) * q
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return values[int(position)]
+    weight = position - lower
+    return values[lower] * (1 - weight) + values[upper] * weight
+
+
+def _distribution_comparison(
+    left_rows: list[dict[str, object]],
+    right_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    right_lookup = {
+        (row["slot_type"], row["tier"], row["filler"]): row
+        for row in right_rows
+    }
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in left_rows:
+        grouped[(str(row["slot_type"]), str(row["tier"]))].append(row)
+    comparison: list[dict[str, object]] = []
+    for (slot_type, tier), group_rows in sorted(grouped.items()):
+        left_probabilities = [float(row["probability"]) for row in group_rows]
+        right_probabilities = [
+            float(right_lookup[(row["slot_type"], row["tier"], row["filler"])]["probability"])
+            for row in group_rows
+        ]
+        deltas = []
+        for row, left_probability, right_probability in zip(
+            group_rows,
+            left_probabilities,
+            right_probabilities,
+        ):
+            deltas.append({
+                "filler": str(row["filler"]),
+                "display_filler": str(row["display_filler"]),
+                "left_probability": left_probability,
+                "right_probability": right_probability,
+                "delta": left_probability - right_probability,
+            })
+        left_top = {
+            item["filler"]
+            for item in sorted(
+                deltas,
+                key=lambda item: (-item["left_probability"], item["filler"].lower()),
+            )[:20]
+        }
+        right_top = {
+            item["filler"]
+            for item in sorted(
+                deltas,
+                key=lambda item: (-item["right_probability"], item["filler"].lower()),
+            )[:20]
+        }
+        comparison.append({
+            "slot_type": slot_type,
+            "tier": tier,
+            "js_divergence": _js_divergence(left_probabilities, right_probabilities),
+            "top20_overlap": len(left_top & right_top),
+            "left_increases": _format_confidence_delta_examples(
+                sorted(deltas, key=lambda item: (-item["delta"], item["filler"].lower()))[:5],
+                left_label="confidence",
+                right_label="hard",
+            ),
+            "right_increases": _format_confidence_delta_examples(
+                sorted(deltas, key=lambda item: (item["delta"], item["filler"].lower()))[:5],
+                left_label="confidence",
+                right_label="hard",
+            ),
+        })
+    return comparison
+
+
 def _current_rollup_comparison(
     rows: list[dict[str, object]],
     fillers: dict[str, _Filler],
@@ -797,6 +972,21 @@ def _format_delta_examples(examples: list[dict[str, object]]) -> str:
         f"({float(item['current_probability']):.5f} -> "
         f"{float(item['new_probability']):.5f}, "
         f"{float(item['delta']):+.5f})"
+        for item in examples
+    )
+
+
+def _format_confidence_delta_examples(
+    examples: list[dict[str, object]],
+    *,
+    left_label: str,
+    right_label: str,
+) -> str:
+    return "; ".join(
+        f"{item['display_filler']} [{item['filler']}] "
+        f"({right_label}={float(item['right_probability']):.5f}, "
+        f"{left_label}={float(item['left_probability']):.5f}, "
+        f"delta={float(item['delta']):+.5f})"
         for item in examples
     )
 
