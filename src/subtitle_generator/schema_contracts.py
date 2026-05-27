@@ -6,6 +6,11 @@ import sqlite3
 from dataclasses import dataclass
 
 
+TIER_SLOT_FILLER_DISTRIBUTION_TABLE = "tier_slot_filler_distribution_v1"
+TIER_SLOT_FILLER_DISTRIBUTION_TIERS = ("pop", "mainstream", "niche")
+TIER_SLOT_FILLER_DISTRIBUTION_TOLERANCE = 1e-6
+
+
 @dataclass(frozen=True)
 class TableContract:
     """Required columns for a table owned or consumed by a pipeline stage."""
@@ -118,6 +123,30 @@ MINI_DB_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
     ),
 )
 
+TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
+    TableContract(
+        stage="tier_slot_distribution",
+        table=TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+        columns=frozenset({
+            "slot_type",
+            "tier",
+            "filler",
+            "probability",
+            "log_probability",
+            "soft_count",
+            "prior_count",
+            "evidence_count",
+            "source_count",
+            "teacher_confidence_mean",
+            "frequency",
+            "popularity_score",
+            "semantic_smoothing_mass",
+            "calibration_temperature",
+            "artifact_version",
+        }),
+    ),
+)
+
 REQUIRED_TABLES_BY_STAGE: dict[str, tuple[str, ...]] = {
     stage: tuple(contract.table for contract in SCHEMA_CONTRACTS if contract.stage == stage)
     for stage in sorted({contract.stage for contract in SCHEMA_CONTRACTS})
@@ -175,6 +204,153 @@ def validate_schema(
                     f"required column {column!r}"
                 ),
             ))
+    return issues
+
+
+def validate_tier_slot_distribution(
+    conn: sqlite3.Connection,
+    *,
+    table: str = TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+    tolerance: float = TIER_SLOT_FILLER_DISTRIBUTION_TOLERANCE,
+) -> list[SchemaIssue]:
+    """Validate the future tier-conditioned filler distribution artifact.
+
+    The table is optional for the current runtime path, so this is intentionally
+    separate from ``validate_schema``. Use it once the distribution builder starts
+    emitting ``tier_slot_filler_distribution_v1``.
+    """
+
+    contract = TableContract(
+        stage="tier_slot_distribution",
+        table=table,
+        columns=TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS[0].columns,
+    )
+    slot_filler_contract = TableContract(
+        stage="tier_slot_distribution_inputs",
+        table="slot_fillers",
+        columns=frozenset({"slot_type", "filler", "mode"}),
+    )
+    issues = validate_schema(conn, (contract, slot_filler_contract))
+    if issues:
+        return issues
+
+    valid_tiers = set(TIER_SLOT_FILLER_DISTRIBUTION_TIERS)
+    for (tier,) in conn.execute(f"SELECT DISTINCT tier FROM {table}"):
+        if tier not in valid_tiers:
+            issues.append(SchemaIssue(
+                stage="tier_slot_distribution",
+                table=table,
+                column="tier",
+                message=(
+                    "tier_slot_distribution: table "
+                    f"{table!r} has unknown tier {tier!r}"
+                ),
+            ))
+
+    invalid_numeric = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table}
+        WHERE probability < 0
+           OR soft_count < 0
+           OR prior_count < 0
+           OR evidence_count < 0
+           OR source_count < 0
+           OR semantic_smoothing_mass < 0
+           OR calibration_temperature <= 0
+           OR artifact_version IS NULL
+           OR artifact_version = ''
+        """
+    ).fetchone()[0]
+    if invalid_numeric:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: distribution rows must have nonnegative "
+                "counts/probabilities, positive calibration_temperature, and a "
+                "nonempty artifact_version"
+            ),
+        ))
+
+    missing_fillers = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table} dist
+        LEFT JOIN slot_fillers sf
+          ON sf.slot_type = dist.slot_type
+         AND sf.filler = dist.filler
+         AND sf.mode = 'strict'
+        WHERE sf.id IS NULL
+        """
+    ).fetchone()[0]
+    if missing_fillers:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="filler",
+            message=(
+                "tier_slot_distribution: distribution rows must reference "
+                "existing strict slot_fillers rows"
+            ),
+        ))
+
+    missing_groups = conn.execute(
+        f"""
+        WITH required AS (
+            SELECT DISTINCT sf.slot_type, tier
+            FROM slot_fillers sf
+            CROSS JOIN (
+                SELECT 'pop' AS tier
+                UNION ALL SELECT 'mainstream'
+                UNION ALL SELECT 'niche'
+            )
+            WHERE sf.mode = 'strict'
+        ),
+        present AS (
+            SELECT DISTINCT slot_type, tier
+            FROM {table}
+        )
+        SELECT COUNT(*)
+        FROM required
+        LEFT JOIN present
+          ON present.slot_type = required.slot_type
+         AND present.tier = required.tier
+        WHERE present.slot_type IS NULL
+        """
+    ).fetchone()[0]
+    if missing_groups:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: distribution must include every "
+                "(tier, slot_type) pair present in strict slot_fillers"
+            ),
+        ))
+
+    bad_mass_rows = conn.execute(
+        f"""
+        SELECT slot_type, tier, SUM(probability) AS mass
+        FROM {table}
+        GROUP BY slot_type, tier
+        HAVING ABS(mass - 1.0) > ?
+        """,
+        (tolerance,),
+    ).fetchall()
+    for slot_type, tier, mass in bad_mass_rows:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="probability",
+            message=(
+                "tier_slot_distribution: probabilities for "
+                f"({tier!r}, {slot_type!r}) sum to {mass:.12g}, not 1.0"
+            ),
+        ))
+
     return issues
 
 
