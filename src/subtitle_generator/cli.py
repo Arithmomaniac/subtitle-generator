@@ -1369,6 +1369,76 @@ def build_book_features_cmd(
     click.echo(f"Wrote coverage report to {result.report_path}")
 
 
+@cli.command("build-tier-slot-distribution")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for tier-slot distribution artifacts.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount added to each tier/slot/filler row.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--artifact-version",
+    default="tier_slot_filler_distribution_v1",
+    show_default=True,
+    help="Version string written to distribution rows.",
+)
+def build_tier_slot_distribution_cmd(
+    db_path: Path,
+    output_dir: Path,
+    alpha: float,
+    inferred_source_weight: float,
+    artifact_version: str,
+):
+    """Build the first tier-conditioned filler distribution artifact."""
+
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_tier_slot_distribution(
+            conn,
+            output_dir,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+            artifact_version=artifact_version,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.row_count:,} tier-slot distribution rows to "
+        f"{result.distribution_path}"
+    )
+    click.echo(f"Wrote distribution report to {result.report_path}")
+
+
 @cli.command("build-book-metadata")
 @click.option(
     "--db",
