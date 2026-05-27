@@ -131,6 +131,7 @@ TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
             "slot_type",
             "tier",
             "filler",
+            "display_filler",
             "probability",
             "log_probability",
             "soft_count",
@@ -266,6 +267,8 @@ def validate_tier_slot_distribution(
            OR inferred_soft_count < 0
            OR semantic_smoothing_mass < 0
            OR calibration_temperature <= 0
+           OR display_filler IS NULL
+           OR display_filler = ''
            OR artifact_version IS NULL
            OR artifact_version = ''
         """
@@ -278,7 +281,7 @@ def validate_tier_slot_distribution(
             message=(
                 "tier_slot_distribution: distribution rows must have nonnegative "
                 "counts/probabilities, positive calibration_temperature, and a "
-                "nonempty artifact_version"
+                "nonempty display_filler and artifact_version"
             ),
         ))
 
@@ -309,7 +312,7 @@ def validate_tier_slot_distribution(
         FROM {table} dist
         LEFT JOIN slot_fillers sf
           ON sf.slot_type = dist.slot_type
-         AND sf.filler = dist.filler
+         AND sf.filler = dist.display_filler
          AND sf.mode = 'strict'
         WHERE sf.id IS NULL
         """

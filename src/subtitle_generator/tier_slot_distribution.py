@@ -20,6 +20,7 @@ DISTRIBUTION_COLUMNS = (
     "slot_type",
     "tier",
     "filler",
+    "display_filler",
     "probability",
     "log_probability",
     "soft_count",
@@ -48,9 +49,10 @@ class TierSlotDistributionResult:
 
 @dataclass(frozen=True)
 class _Filler:
-    id: int
+    id: str
     slot_type: str
     filler: str
+    display_filler: str
     frequency: int
     popularity_score: float | None
     scores: dict[str, float]
@@ -118,7 +120,7 @@ def build_tier_slot_distribution(
         raise RuntimeError("artifact_version must be nonempty")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    fillers = _load_fillers(conn)
+    fillers, filler_id_to_key = _load_fillers(conn)
     source_labels = _load_source_labels(conn)
     source_fallbacks = _load_source_fallback_vectors(conn)
     global_fallback = _global_fallback_vector(fillers.values())
@@ -126,6 +128,7 @@ def build_tier_slot_distribution(
     cells = _build_evidence_cells(
         conn,
         fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
         source_labels=source_labels,
         source_fallbacks=source_fallbacks,
         global_fallback=global_fallback,
@@ -147,6 +150,7 @@ def build_tier_slot_distribution(
     report_path.write_text(
         _format_report(
             rows=rows,
+            fillers=fillers,
             source_labels=source_labels,
             residual_priors=residual_priors,
             alpha=alpha,
@@ -162,7 +166,7 @@ def build_tier_slot_distribution(
     )
 
 
-def _load_fillers(conn: sqlite3.Connection) -> dict[int, _Filler]:
+def _load_fillers(conn: sqlite3.Connection) -> tuple[dict[str, _Filler], dict[int, str]]:
     rows = conn.execute(
         """
         SELECT
@@ -180,21 +184,68 @@ def _load_fillers(conn: sqlite3.Connection) -> dict[int, _Filler]:
         ORDER BY sf.id
         """
     ).fetchall()
-    return {
-        int(row[0]): _Filler(
-            id=int(row[0]),
-            slot_type=row[1],
-            filler=row[2],
-            frequency=int(row[3] or 0),
-            popularity_score=float(row[4]) if row[4] is not None else None,
+    grouped: dict[str, dict[str, object]] = {}
+    filler_id_to_key: dict[int, str] = {}
+    for row in rows:
+        filler_id = int(row[0])
+        slot_type = row[1]
+        original_filler = row[2]
+        frequency = int(row[3] or 0)
+        weight = max(1, frequency)
+        key = _filler_key(slot_type, original_filler)
+        filler_id_to_key[filler_id] = key
+        entry = grouped.setdefault(
+            key,
+            {
+                "slot_type": slot_type,
+                "filler": _normalize_filler(original_filler),
+                "display_candidates": [],
+                "frequency": 0,
+                "popularity_weighted_sum": 0.0,
+                "popularity_weight": 0,
+                "score_weighted_sum": {tier: 0.0 for tier in TIERS},
+                "score_weight": 0,
+            },
+        )
+        entry["display_candidates"].append((frequency, original_filler))
+        entry["frequency"] += frequency
+        if row[4] is not None:
+            entry["popularity_weighted_sum"] += float(row[4]) * weight
+            entry["popularity_weight"] += weight
+        scores = _normalize({
+            "pop": float(row[5] or 0.0),
+            "mainstream": float(row[6] or 0.0),
+            "niche": float(row[7] or 0.0),
+        })
+        for tier in TIERS:
+            entry["score_weighted_sum"][tier] += scores[tier] * weight
+        entry["score_weight"] += weight
+
+    fillers: dict[str, _Filler] = {}
+    for key, entry in grouped.items():
+        display_filler = sorted(
+            list(entry["display_candidates"]),
+            key=lambda item: (-int(item[0]), str(item[1]).lower(), str(item[1])),
+        )[0][1]
+        popularity_weight = int(entry["popularity_weight"])
+        score_weight = int(entry["score_weight"])
+        fillers[key] = _Filler(
+            id=key,
+            slot_type=str(entry["slot_type"]),
+            filler=str(entry["filler"]),
+            display_filler=str(display_filler),
+            frequency=int(entry["frequency"]),
+            popularity_score=(
+                float(entry["popularity_weighted_sum"]) / popularity_weight
+                if popularity_weight
+                else None
+            ),
             scores=_normalize({
-                "pop": float(row[5] or 0.0),
-                "mainstream": float(row[6] or 0.0),
-                "niche": float(row[7] or 0.0),
+                tier: float(entry["score_weighted_sum"][tier]) / score_weight
+                for tier in TIERS
             }),
         )
-        for row in rows
-    }
+    return fillers, filler_id_to_key
 
 
 def _load_source_labels(conn: sqlite3.Connection) -> dict[int, _SourceLabel]:
@@ -271,14 +322,15 @@ def _label_residual_priors(labels: list[_SourceLabel] | tuple[_SourceLabel, ...]
 def _build_evidence_cells(
     conn: sqlite3.Connection,
     *,
-    fillers: dict[int, _Filler],
+    fillers: dict[str, _Filler],
+    filler_id_to_key: dict[int, str],
     source_labels: dict[int, _SourceLabel],
     source_fallbacks: dict[int, dict[str, float]],
     global_fallback: dict[str, float],
     residual_priors: dict[str, dict[str, float]],
     inferred_source_weight: float,
-) -> dict[tuple[int, str], _EvidenceCell]:
-    cells: dict[tuple[int, str], _EvidenceCell] = defaultdict(_EvidenceCell)
+) -> dict[tuple[str, str], _EvidenceCell]:
+    cells: dict[tuple[str, str], _EvidenceCell] = defaultdict(_EvidenceCell)
     links = conn.execute(
         """
         SELECT sfs.slot_filler_id, sfs.subtitle_id
@@ -291,13 +343,14 @@ def _build_evidence_cells(
     for filler_id_raw, subtitle_id_raw in links:
         filler_id = int(filler_id_raw)
         subtitle_id = int(subtitle_id_raw)
-        if filler_id not in fillers:
+        filler_key = filler_id_to_key.get(filler_id)
+        if filler_key not in fillers:
             continue
         label = source_labels.get(subtitle_id)
         if label and label.tier in TIERS and label.confidence is not None:
             _add_labeled_source(
                 cells,
-                filler_id=filler_id,
+                filler_id=filler_key,
                 subtitle_id=subtitle_id,
                 label=label,
                 residual_prior=residual_priors[label.tier],
@@ -307,7 +360,7 @@ def _build_evidence_cells(
             vector = source_fallbacks.get(subtitle_id, global_fallback)
             _add_inferred_source(
                 cells,
-                filler_id=filler_id,
+                filler_id=filler_key,
                 subtitle_id=subtitle_id,
                 vector=vector,
                 weight=inferred_source_weight,
@@ -316,9 +369,9 @@ def _build_evidence_cells(
 
 
 def _add_labeled_source(
-    cells: dict[tuple[int, str], _EvidenceCell],
+    cells: dict[tuple[str, str], _EvidenceCell],
     *,
-    filler_id: int,
+    filler_id: str,
     subtitle_id: int,
     label: _SourceLabel,
     residual_prior: dict[str, float],
@@ -343,9 +396,9 @@ def _add_labeled_source(
 
 
 def _add_inferred_source(
-    cells: dict[tuple[int, str], _EvidenceCell],
+    cells: dict[tuple[str, str], _EvidenceCell],
     *,
-    filler_id: int,
+    filler_id: str,
     subtitle_id: int,
     vector: dict[str, float],
     weight: float,
@@ -363,8 +416,8 @@ def _add_inferred_source(
 
 def _distribution_rows(
     *,
-    fillers: dict[int, _Filler],
-    cells: dict[tuple[int, str], _EvidenceCell],
+    fillers: dict[str, _Filler],
+    cells: dict[tuple[str, str], _EvidenceCell],
     alpha: float,
     artifact_version: str,
 ) -> list[dict[str, object]]:
@@ -378,6 +431,7 @@ def _distribution_rows(
                 "slot_type": filler.slot_type,
                 "tier": tier,
                 "filler": filler.filler,
+                "display_filler": filler.display_filler,
                 "probability": 0.0,
                 "log_probability": 0.0,
                 "soft_count": cell.soft_count,
@@ -444,6 +498,7 @@ def _validate_rows(conn: sqlite3.Connection, rows: list[dict[str, object]]) -> N
                 slot_type TEXT NOT NULL,
                 tier TEXT NOT NULL,
                 filler TEXT NOT NULL,
+                display_filler TEXT NOT NULL,
                 probability REAL NOT NULL,
                 log_probability REAL NOT NULL,
                 soft_count REAL NOT NULL,
@@ -465,7 +520,7 @@ def _validate_rows(conn: sqlite3.Connection, rows: list[dict[str, object]]) -> N
         validation.executemany(
             f"""
             INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE}
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 tuple(row[column] for column in DISTRIBUTION_COLUMNS)
@@ -482,6 +537,7 @@ def _validate_rows(conn: sqlite3.Connection, rows: list[dict[str, object]]) -> N
 def _format_report(
     *,
     rows: list[dict[str, object]],
+    fillers: dict[str, _Filler],
     source_labels: dict[int, _SourceLabel],
     residual_priors: dict[str, dict[str, float]],
     alpha: float,
@@ -495,6 +551,7 @@ def _format_report(
     group_summary = _group_summary(rows)
     mass_summary = _mass_summary(rows)
     top_rows = _top_rows(rows)
+    current_comparison = _current_rollup_comparison(rows, fillers)
     lines = [
         "# Tier-slot distribution report",
         "",
@@ -564,6 +621,26 @@ def _format_report(
         )
     lines.extend([
         "",
+        "## Current rollup comparison",
+        "",
+        "This compares the new normalized distribution with the current runtime "
+        "requested-tier weighting baseline:",
+        "",
+        "$$",
+        "w(f, T) = \\sqrt{\\mathrm{freq}(f)} \\cdot \\max(\\mathrm{score}_T(f), 0.001)",
+        "$$",
+        "",
+        "| Slot type | Tier | JS divergence | Top-20 overlap | Biggest probability increases | Biggest probability decreases |",
+        "|---|---:|---:|---:|---|---|",
+    ])
+    for row in current_comparison:
+        lines.append(
+            f"| {row['slot_type']} | {row['tier']} | "
+            f"{row['js_divergence']:.6f} | {row['top20_overlap']}/20 | "
+            f"{row['increases']} | {row['decreases']} |"
+        )
+    lines.extend([
+        "",
         "## Top probabilities by tier and slot",
         "",
         "| Slot type | Tier | Top fillers |",
@@ -571,7 +648,8 @@ def _format_report(
     ])
     for (slot_type, tier), ranked in top_rows.items():
         formatted = "; ".join(
-            f"{row['filler']} (p={float(row['probability']):.5f}, "
+            f"{row['display_filler']} [{row['filler']}] "
+            f"(p={float(row['probability']):.5f}, "
             f"soft={float(row['soft_count']):.3f}, "
             f"anch={float(row['anchored_soft_count']):.3f}, "
             f"inf={float(row['inferred_soft_count']):.3f})"
@@ -631,6 +709,98 @@ def _mass_summary(rows: list[dict[str, object]]) -> dict[str, dict[str, float]]:
     return summary
 
 
+def _current_rollup_comparison(
+    rows: list[dict[str, object]],
+    fillers: dict[str, _Filler],
+) -> list[dict[str, object]]:
+    filler_lookup = {
+        (filler.slot_type, filler.filler): filler
+        for filler in fillers.values()
+    }
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        grouped[(str(row["slot_type"]), str(row["tier"]))].append(row)
+    comparison: list[dict[str, object]] = []
+    for (slot_type, tier), group_rows in sorted(grouped.items()):
+        current_weights = []
+        for row in group_rows:
+            filler = filler_lookup[(slot_type, str(row["filler"]))]
+            current_weights.append(
+                math.sqrt(max(0, filler.frequency))
+                * max(filler.scores[tier], 0.001)
+            )
+        current_total = sum(current_weights)
+        if current_total <= 0:
+            current_probabilities = [1.0 / len(group_rows) for _ in group_rows]
+        else:
+            current_probabilities = [
+                weight / current_total for weight in current_weights
+            ]
+        deltas = []
+        for row, current_probability in zip(group_rows, current_probabilities):
+            new_probability = float(row["probability"])
+            deltas.append({
+                "filler": str(row["filler"]),
+                "display_filler": str(row["display_filler"]),
+                "new_probability": new_probability,
+                "current_probability": current_probability,
+                "delta": new_probability - current_probability,
+            })
+        new_top = {
+            item["filler"]
+            for item in sorted(
+                deltas,
+                key=lambda item: (-item["new_probability"], item["filler"].lower()),
+            )[:20]
+        }
+        current_top = {
+            item["filler"]
+            for item in sorted(
+                deltas,
+                key=lambda item: (-item["current_probability"], item["filler"].lower()),
+            )[:20]
+        }
+        comparison.append({
+            "slot_type": slot_type,
+            "tier": tier,
+            "js_divergence": _js_divergence(
+                [float(row["probability"]) for row in group_rows],
+                current_probabilities,
+            ),
+            "top20_overlap": len(new_top & current_top),
+            "increases": _format_delta_examples(
+                sorted(deltas, key=lambda item: (-item["delta"], item["filler"].lower()))[:5]
+            ),
+            "decreases": _format_delta_examples(
+                sorted(deltas, key=lambda item: (item["delta"], item["filler"].lower()))[:5]
+            ),
+        })
+    return comparison
+
+
+def _js_divergence(left: list[float], right: list[float]) -> float:
+    midpoint = [(l_val + r_val) / 2.0 for l_val, r_val in zip(left, right)]
+    return (_kl_divergence(left, midpoint) + _kl_divergence(right, midpoint)) / 2.0
+
+
+def _kl_divergence(left: list[float], right: list[float]) -> float:
+    total = 0.0
+    for l_val, r_val in zip(left, right):
+        if l_val > 0 and r_val > 0:
+            total += l_val * math.log(l_val / r_val)
+    return total
+
+
+def _format_delta_examples(examples: list[dict[str, object]]) -> str:
+    return "; ".join(
+        f"{item['display_filler']} [{item['filler']}] "
+        f"({float(item['current_probability']):.5f} -> "
+        f"{float(item['new_probability']):.5f}, "
+        f"{float(item['delta']):+.5f})"
+        for item in examples
+    )
+
+
 def _top_rows(rows: list[dict[str, object]]) -> dict[tuple[str, str], list[dict[str, object]]]:
     grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     for row in rows:
@@ -650,6 +820,14 @@ def _normalize(values: dict[str, float]) -> dict[str, float]:
     if total <= 0:
         return {tier: 1.0 / len(TIERS) for tier in TIERS}
     return {tier: cleaned[tier] / total for tier in TIERS}
+
+
+def _normalize_filler(filler: str) -> str:
+    return " ".join(filler.split()).casefold()
+
+
+def _filler_key(slot_type: str, filler: str) -> str:
+    return f"{slot_type}\0{_normalize_filler(filler)}"
 
 
 def _clamp_confidence(value: object) -> float | None:

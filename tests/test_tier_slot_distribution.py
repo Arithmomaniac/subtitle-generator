@@ -41,16 +41,19 @@ def _create_distribution_db() -> sqlite3.Connection:
         INSERT INTO slot_fillers VALUES
             (1, 'list_item', 'Race', 'strict', 10, 0.5),
             (2, 'list_item', 'Power', 'strict', 8, NULL),
-            (3, 'action_noun', 'Rise', 'strict', 6, 0.3);
+            (3, 'action_noun', 'Rise', 'strict', 6, 0.3),
+            (4, 'list_item', 'race', 'strict', 2, 0.4);
         INSERT INTO slot_filler_sources VALUES
             (1, 101),
             (2, 102),
             (3, 101),
-            (3, 103);
+            (3, 103),
+            (4, 102);
         INSERT INTO slot_filler_model_scores VALUES
             (1, 0.6, 0.3, 0.1, 'pop', 1),
             (2, 0.1, 0.2, 0.7, 'niche', 1),
-            (3, 0.3, 0.3, 0.4, 'niche', 2);
+            (3, 0.3, 0.3, 0.4, 'niche', 2),
+            (4, 0.2, 0.3, 0.5, 'niche', 1);
         """
     )
     return conn
@@ -74,23 +77,27 @@ def test_build_tier_slot_distribution_anchors_labeled_confidence(tmp_path: Path)
     rows = _read_distribution(result.distribution_path)
     report = result.report_path.read_text(encoding="utf-8")
 
-    race_pop = rows[("list_item", "pop", "Race")]
-    race_mainstream = rows[("list_item", "mainstream", "Race")]
-    race_niche = rows[("list_item", "niche", "Race")]
-    power_niche = rows[("list_item", "niche", "Power")]
+    race_pop = rows[("list_item", "pop", "race")]
+    race_mainstream = rows[("list_item", "mainstream", "race")]
+    race_niche = rows[("list_item", "niche", "race")]
+    power_niche = rows[("list_item", "niche", "power")]
 
     assert result.row_count == 9
+    assert race_pop["display_filler"] == "Race"
+    assert race_pop["frequency"] == "12"
     assert float(race_pop["anchored_soft_count"]) == 0.8
-    assert float(race_pop["inferred_soft_count"]) == 0.0
+    assert abs(float(race_pop["inferred_soft_count"]) - 0.15) < 0.0001
     assert race_pop["anchored_source_count"] == "1"
-    assert race_pop["inferred_source_count"] == "0"
+    assert race_pop["inferred_source_count"] == "1"
     # A niche label exists in the labeled subset, so pop residual mass uses the
     # label-marginal prior and falls to niche rather than recirculating to pop.
-    assert abs(float(race_mainstream["inferred_soft_count"]) - 0.0) < 0.0001
-    assert abs(float(race_niche["inferred_soft_count"]) - 0.2) < 0.0001
+    assert abs(float(race_mainstream["inferred_soft_count"]) - 0.25) < 0.0001
+    assert abs(float(race_niche["inferred_soft_count"]) - 0.8) < 0.0001
     # The unlabeled source linked to Power uses the current score-table fallback.
-    assert abs(float(power_niche["inferred_soft_count"]) - 0.7) < 0.0001
+    assert abs(float(power_niche["inferred_soft_count"]) - 0.6) < 0.0001
     assert "Residual priors for labeled sources" in report
+    assert "Current rollup comparison" in report
+    assert "JS divergence" in report
     assert "Unlabeled sources use the current score-table fallback" in report
 
 

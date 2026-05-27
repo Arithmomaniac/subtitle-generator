@@ -435,6 +435,7 @@ def test_tier_slot_distribution_contract_validates_required_invariants():
             slot_type TEXT NOT NULL,
             tier TEXT NOT NULL,
             filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
             probability REAL NOT NULL,
             log_probability REAL NOT NULL,
             soft_count REAL NOT NULL,
@@ -468,16 +469,18 @@ def test_tier_slot_distribution_contract_validates_required_invariants():
         for tier in ["pop", "mainstream", "niche"]:
             rows.extend([
                 (
-                    slot_type, tier, filler_a, 0.75, -0.287682072,
-                    3.0, 0.2, 3.2, 3, 2, 1, 2.5, 0.5, 0.9, 10, 0.5, 0.1, 1.0, "v1",
+                    slot_type, tier, filler_a.casefold(), filler_a, 0.75,
+                    -0.287682072, 3.0, 0.2, 3.2, 3, 2, 1, 2.5,
+                    0.5, 0.9, 10, 0.5, 0.1, 1.0, "v1",
                 ),
                 (
-                    slot_type, tier, filler_b, 0.25, -1.386294361,
-                    1.0, 0.2, 1.2, 1, 0, 1, 0.0, 1.0, 0.8, 4, None, 0.1, 1.0, "v1",
+                    slot_type, tier, filler_b.casefold(), filler_b, 0.25,
+                    -1.386294361, 1.0, 0.2, 1.2, 1, 0, 1, 0.0,
+                    1.0, 0.8, 4, None, 0.1, 1.0, "v1",
                 ),
             ])
     conn.executemany(
-        f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         rows,
     )
 
@@ -502,6 +505,7 @@ def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
             slot_type TEXT NOT NULL,
             tier TEXT NOT NULL,
             filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
             probability REAL NOT NULL,
             log_probability REAL NOT NULL,
             soft_count REAL NOT NULL,
@@ -522,8 +526,8 @@ def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
         INSERT INTO slot_fillers (id, slot_type, filler, freq)
         VALUES (1, 'list_item', 'Race', 10), (2, 'list_item', 'Power', 8);
         INSERT INTO tier_slot_filler_distribution_v1 VALUES
-            ('list_item', 'pop', 'Race', 0.60, -0.51, 3.0, 0.0, 3.0, 3, 2, 1, 2.5, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
-            ('list_item', 'pop', 'Unknown', 0.30, -1.20, 1.0, 0.0, 1.0, 1, 0, 1, 0.0, 1.0, 0.8, 4, NULL, 0.0, 1.0, 'v1');
+            ('list_item', 'pop', 'race', 'Race', 0.60, -0.51, 3.0, 0.0, 3.0, 3, 2, 1, 2.5, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'pop', 'unknown', 'Unknown', 0.30, -1.20, 1.0, 0.0, 1.0, 1, 0, 1, 0.0, 1.0, 0.8, 4, NULL, 0.0, 1.0, 'v1');
         """
     )
 
@@ -551,6 +555,7 @@ def test_tier_slot_distribution_contract_reports_count_identity_mismatch():
             slot_type TEXT NOT NULL,
             tier TEXT NOT NULL,
             filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
             probability REAL NOT NULL,
             log_probability REAL NOT NULL,
             soft_count REAL NOT NULL,
@@ -571,9 +576,9 @@ def test_tier_slot_distribution_contract_reports_count_identity_mismatch():
         INSERT INTO slot_fillers (id, slot_type, filler, freq)
         VALUES (1, 'list_item', 'Race', 10);
         INSERT INTO tier_slot_filler_distribution_v1 VALUES
-            ('list_item', 'pop', 'Race', 1.0, 0.0, 3.0, 0.0, 3.0, 3, 1, 1, 1.0, 1.0, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
-            ('list_item', 'mainstream', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
-            ('list_item', 'niche', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1');
+            ('list_item', 'pop', 'race', 'Race', 1.0, 0.0, 3.0, 0.0, 3.0, 3, 1, 1, 1.0, 1.0, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'mainstream', 'race', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'niche', 'race', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1');
         """
     )
 
