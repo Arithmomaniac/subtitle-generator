@@ -126,3 +126,76 @@ def test_build_tier_slot_distribution_normalizes_each_tier_slot(tmp_path: Path):
         ("action_noun", "niche"),
     }
     assert all(abs(total - 1.0) < 0.000001 for total in groups.values())
+
+
+def test_run_semantic_smoothing_ablation_writes_metrics_and_report(tmp_path: Path):
+    import struct
+
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        run_semantic_smoothing_ablation,
+    )
+
+    conn = _create_distribution_db()
+    vector_a = struct.pack("3f", 1.0, 0.0, 0.0)
+    vector_b = struct.pack("3f", 0.9, 0.1, 0.0)
+    conn.execute("ALTER TABLE slot_fillers ADD COLUMN vector_sum BLOB")
+    conn.execute("ALTER TABLE slot_fillers ADD COLUMN token_count INTEGER")
+    conn.execute("UPDATE slot_fillers SET vector_sum = ?, token_count = 1 WHERE filler = 'Race'", (vector_a,))
+    conn.execute("UPDATE slot_fillers SET vector_sum = ?, token_count = 1 WHERE filler = 'race'", (vector_b,))
+    conn.commit()
+
+    result = run_semantic_smoothing_ablation(
+        conn,
+        tmp_path,
+        vector_source="db",
+        configs=(
+            SmoothingExperimentConfig("none", "none", 0, 0.0, "none", 0.0),
+            SmoothingExperimentConfig("uniform", "uniform_prior", 0, 0.5, "none", 0.10),
+            SmoothingExperimentConfig("knn", "generic_embedding_kNN", 1, 0.5, "none", 0.10),
+        ),
+    )
+    metrics = result.metrics_path.read_text(encoding="utf-8")
+    report = result.report_path.read_text(encoding="utf-8")
+
+    assert result.experiment_count == 3
+    assert "generic_embedding_kNN" in metrics
+    assert "Semantic smoothing ablation report" in report
+    assert "Vector coverage" in report
+    assert "Review examples" in report
+
+
+def test_run_semantic_smoothing_autoresearcher_writes_proposals(tmp_path: Path):
+    import struct
+
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        run_semantic_smoothing_autoresearcher,
+    )
+
+    conn = _create_distribution_db()
+    vector_a = struct.pack("3f", 1.0, 0.0, 0.0)
+    vector_b = struct.pack("3f", 0.9, 0.1, 0.0)
+    conn.execute("ALTER TABLE slot_fillers ADD COLUMN vector_sum BLOB")
+    conn.execute("ALTER TABLE slot_fillers ADD COLUMN token_count INTEGER")
+    conn.execute("UPDATE slot_fillers SET vector_sum = ?, token_count = 1 WHERE filler = 'Race'", (vector_a,))
+    conn.execute("UPDATE slot_fillers SET vector_sum = ?, token_count = 1 WHERE filler = 'race'", (vector_b,))
+    conn.commit()
+
+    result = run_semantic_smoothing_autoresearcher(
+        conn,
+        tmp_path,
+        vector_source="db",
+        configs=(
+            SmoothingExperimentConfig("none", "none", 0, 0.0, "none", 0.0),
+            SmoothingExperimentConfig("knn", "generic_embedding_kNN", 1, 0.5, "none", 0.10),
+        ),
+    )
+
+    report = result.report_path.read_text(encoding="utf-8")
+    proposals = result.proposals_path.read_text(encoding="utf-8")
+
+    assert "Semantic smoothing AutoResearcher packet" in report
+    assert "does **not** call an external LLM" in report
+    assert "weighted-similarity-knn" in proposals
+    assert result.ablation_result.experiment_count == 2

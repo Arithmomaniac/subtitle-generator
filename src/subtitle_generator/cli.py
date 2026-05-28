@@ -1439,6 +1439,145 @@ def build_tier_slot_distribution_cmd(
     click.echo(f"Wrote distribution report to {result.report_path}")
 
 
+@cli.command("run-semantic-smoothing-ablation")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for semantic smoothing ablation artifacts.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--vector-source",
+    type=click.Choice(["offline_spacy", "db"]),
+    default="offline_spacy",
+    show_default=True,
+    help="Vector source for semantic smoothing neighbors.",
+)
+def run_semantic_smoothing_ablation_cmd(
+    db_path: Path,
+    output_dir: Path,
+    alpha: float,
+    inferred_source_weight: float,
+    vector_source: str,
+):
+    """Run bounded semantic smoothing ablations for review."""
+
+    from subtitle_generator.tier_slot_distribution import run_semantic_smoothing_ablation
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_semantic_smoothing_ablation(
+            conn,
+            output_dir,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+            vector_source=vector_source,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Ran {result.experiment_count:,} smoothing experiments; "
+        f"metrics: {result.metrics_path}"
+    )
+    click.echo(f"Wrote smoothing report to {result.report_path}")
+
+
+@cli.command("run-semantic-smoothing-autoresearcher")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for semantic smoothing AutoResearcher artifacts.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--vector-source",
+    type=click.Choice(["offline_spacy", "db"]),
+    default="offline_spacy",
+    show_default=True,
+    help="Vector source for semantic smoothing neighbors.",
+)
+def run_semantic_smoothing_autoresearcher_cmd(
+    db_path: Path,
+    output_dir: Path,
+    alpha: float,
+    inferred_source_weight: float,
+    vector_source: str,
+):
+    """Run local AutoResearcher harvesting for semantic smoothing."""
+
+    from subtitle_generator.tier_slot_distribution import run_semantic_smoothing_autoresearcher
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_semantic_smoothing_autoresearcher(
+            conn,
+            output_dir,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+            vector_source=vector_source,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Wrote AutoResearcher report to {result.report_path}")
+    click.echo(f"Wrote next-round proposals to {result.proposals_path}")
+
+
 @cli.command("build-book-metadata")
 @click.option(
     "--db",

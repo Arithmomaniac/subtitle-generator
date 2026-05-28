@@ -48,6 +48,31 @@ class TierSlotDistributionResult:
 
 
 @dataclass(frozen=True)
+class SemanticSmoothingAblationResult:
+    report_path: Path
+    metrics_path: Path
+    experiment_count: int
+
+
+@dataclass(frozen=True)
+class SemanticSmoothingAutoResearcherResult:
+    report_path: Path
+    proposals_path: Path
+    ablation_result: SemanticSmoothingAblationResult
+
+
+@dataclass(frozen=True)
+class SmoothingExperimentConfig:
+    name: str
+    variant: str
+    neighbor_count: int = 10
+    shrinkage: float = 0.5
+    evidence_gate: str = "none"
+    max_borrowed_mass: float = 0.10
+    vector_transform: str = "raw"
+
+
+@dataclass(frozen=True)
 class _Filler:
     id: str
     slot_type: str
@@ -180,6 +205,147 @@ def build_tier_slot_distribution(
         distribution_path=distribution_path,
         report_path=report_path,
         row_count=len(rows),
+    )
+
+
+def run_semantic_smoothing_ablation(
+    conn: sqlite3.Connection,
+    output_dir: Path,
+    *,
+    alpha: float = 0.5,
+    inferred_source_weight: float = 1.0,
+    artifact_version: str = "tier_slot_filler_distribution_v1",
+    vector_source: str = "offline_spacy",
+    configs: tuple[SmoothingExperimentConfig, ...] | None = None,
+) -> SemanticSmoothingAblationResult:
+    """Run bounded semantic smoothing experiments without changing serving."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fillers, filler_id_to_key = _load_fillers(conn)
+    source_labels = _load_source_labels(conn)
+    source_fallbacks = _load_source_fallback_vectors(conn)
+    residual_priors = _label_residual_priors(source_labels.values())
+    cells = _build_evidence_cells(
+        conn,
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=source_labels,
+        source_fallbacks=source_fallbacks,
+        global_fallback=_global_fallback_vector(fillers.values()),
+        residual_priors=residual_priors,
+        inferred_source_weight=inferred_source_weight,
+    )
+    base_rows = _distribution_rows(
+        fillers=fillers,
+        cells=cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
+    configs = configs or default_smoothing_experiments()
+    vectors, vector_source_counts = _load_smoothing_vectors(
+        conn,
+        fillers,
+        output_dir / "tier_slot_embedding_cache.csv",
+        vector_source=vector_source,
+    )
+    vector_cache: dict[str, dict[str, list[float]]] = {}
+    metrics: list[dict[str, object]] = []
+    experiment_outputs: list[tuple[SmoothingExperimentConfig, list[dict[str, object]]]] = []
+    for config in configs:
+        transformed_vectors = vector_cache.setdefault(
+            config.vector_transform,
+            _transform_vectors(vectors, config.vector_transform),
+        )
+        smoothed_rows = _apply_smoothing(base_rows, fillers, transformed_vectors, config)
+        metrics.extend(_smoothing_metrics(config, base_rows, smoothed_rows))
+        experiment_outputs.append((config, smoothed_rows))
+
+    metrics_path = output_dir / "semantic_smoothing_metrics.csv"
+    _write_smoothing_metrics(metrics_path, metrics)
+    report_path = output_dir / "semantic_smoothing_ablation_report.md"
+    report_path.write_text(
+        _format_smoothing_report(
+            base_rows=base_rows,
+            experiment_outputs=experiment_outputs,
+            metrics=metrics,
+            vector_coverage=_vector_coverage(fillers, vectors),
+            vector_source_counts=vector_source_counts,
+        ),
+        encoding="utf-8",
+    )
+    return SemanticSmoothingAblationResult(
+        report_path=report_path,
+        metrics_path=metrics_path,
+        experiment_count=len(configs),
+    )
+
+
+def run_semantic_smoothing_autoresearcher(
+    conn: sqlite3.Connection,
+    output_dir: Path,
+    *,
+    alpha: float = 0.5,
+    inferred_source_weight: float = 1.0,
+    artifact_version: str = "tier_slot_filler_distribution_v1",
+    vector_source: str = "offline_spacy",
+    configs: tuple[SmoothingExperimentConfig, ...] | None = None,
+) -> SemanticSmoothingAutoResearcherResult:
+    """Run the deterministic local Step 5 AutoResearcher harvesting loop.
+
+    This intentionally does not call an external LLM or mutate serving defaults.
+    It executes/refreshes the bounded ablation, inspects the resulting metrics,
+    and writes a structured next-round proposal packet for human or LLM review.
+    """
+
+    ablation_result = run_semantic_smoothing_ablation(
+        conn,
+        output_dir,
+        alpha=alpha,
+        inferred_source_weight=inferred_source_weight,
+        artifact_version=artifact_version,
+        vector_source=vector_source,
+        configs=configs,
+    )
+    metrics = _read_smoothing_metrics(ablation_result.metrics_path)
+    findings = _autoresearcher_findings(metrics)
+    proposals = _next_smoothing_proposals(metrics, findings)
+
+    proposals_path = output_dir / "semantic_smoothing_autoresearcher_proposals.csv"
+    _write_autoresearcher_proposals(proposals_path, proposals)
+    report_path = output_dir / "semantic_smoothing_autoresearcher_report.md"
+    report_path.write_text(
+        _format_autoresearcher_report(
+            ablation_result=ablation_result,
+            metrics=metrics,
+            findings=findings,
+            proposals=proposals,
+        ),
+        encoding="utf-8",
+    )
+    return SemanticSmoothingAutoResearcherResult(
+        report_path=report_path,
+        proposals_path=proposals_path,
+        ablation_result=ablation_result,
+    )
+
+
+def default_smoothing_experiments() -> tuple[SmoothingExperimentConfig, ...]:
+    return (
+        SmoothingExperimentConfig("none", "none", 0, 0.0, "none", 0.0),
+        # Small manual spread for ordinary numeric knobs.
+        SmoothingExperimentConfig("uniform_m0_1_cap0_05", "uniform_prior", 0, 0.1, "none", 0.05),
+        SmoothingExperimentConfig("uniform_m0_5_cap0_10", "uniform_prior", 0, 0.5, "none", 0.10),
+        SmoothingExperimentConfig("uniform_m1_0_cap0_20", "uniform_prior", 0, 1.0, "none", 0.20),
+        SmoothingExperimentConfig("knn5_m0_5_cap0_10", "generic_embedding_kNN", 5, 0.5, "none", 0.10),
+        SmoothingExperimentConfig("knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10),
+        SmoothingExperimentConfig("knn25_m0_5_cap0_20", "generic_embedding_kNN", 25, 0.5, "none", 0.20),
+        SmoothingExperimentConfig("knn10_m0_5_source2_cap0_10", "tier_evidence_filtered_kNN", 10, 0.5, "source_count>=2", 0.10),
+        SmoothingExperimentConfig("knn10_m0_5_anchor_cap0_10", "tier_evidence_filtered_kNN", 10, 0.5, "anchored_mass", 0.10),
+        # Hypothesis batch: generic space may be too topical; transform the vector space.
+        SmoothingExperimentConfig("centered_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "global_center"),
+        SmoothingExperimentConfig("slot_centered_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "slot_center"),
+        SmoothingExperimentConfig("pc1_removed_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "remove_pc1"),
+        SmoothingExperimentConfig("pc3_removed_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "remove_pc3"),
     )
 
 
@@ -989,6 +1155,714 @@ def _format_confidence_delta_examples(
         f"delta={float(item['delta']):+.5f})"
         for item in examples
     )
+
+
+def _load_smoothing_vectors(
+    conn: sqlite3.Connection,
+    fillers: dict[str, _Filler],
+    cache_path: Path,
+    *,
+    vector_source: str,
+) -> tuple[dict[str, list[float]], dict[str, int]]:
+    if vector_source == "db":
+        vectors = _load_persisted_vectors(conn)
+        return vectors, {"persisted_db": len(vectors), "offline_spacy": 0}
+    if vector_source != "offline_spacy":
+        raise RuntimeError("vector_source must be 'offline_spacy' or 'db'")
+    persisted = _load_embedding_cache(cache_path)
+    missing = [
+        filler
+        for key, filler in fillers.items()
+        if key not in persisted
+    ]
+    if missing:
+        _append_spacy_embeddings(cache_path, missing)
+        persisted = _load_embedding_cache(cache_path)
+    persisted_keys = set(_load_persisted_vectors(conn))
+    return persisted, {
+        "persisted_db": len(persisted_keys & set(persisted)),
+        "offline_spacy": len(set(persisted) - persisted_keys),
+    }
+
+
+def _load_persisted_vectors(conn: sqlite3.Connection) -> dict[str, list[float]]:
+    import numpy as np
+
+    rows = conn.execute(
+        """
+        SELECT id, slot_type, filler, vector_sum, token_count
+        FROM slot_fillers
+        WHERE mode = 'strict'
+          AND vector_sum IS NOT NULL
+          AND token_count IS NOT NULL
+          AND token_count > 0
+        """
+    ).fetchall()
+    grouped: dict[str, tuple[object, int]] = {}
+    for _filler_id, slot_type, filler, vector_sum, token_count in rows:
+        key = _filler_key(slot_type, filler)
+        vector = np.frombuffer(vector_sum, dtype=np.float32).astype(np.float64)
+        prior_vector, prior_count = grouped.get(key, (np.zeros_like(vector), 0))
+        grouped[key] = (prior_vector + vector, prior_count + int(token_count))
+    vectors: dict[str, list[float]] = {}
+    for key, (vector_sum, token_count) in grouped.items():
+        vector = vector_sum / token_count
+        norm = float(np.linalg.norm(vector))
+        if norm > 0:
+            vectors[key] = (vector / norm).tolist()
+    return vectors
+
+
+def _transform_vectors(
+    vectors: dict[str, list[float]],
+    vector_transform: str,
+) -> dict[str, list[float]]:
+    if vector_transform == "raw":
+        return vectors
+    import numpy as np
+
+    keys = sorted(vectors)
+    if not keys:
+        return {}
+    matrix = np.array([vectors[key] for key in keys], dtype=np.float64)
+    if vector_transform == "global_center":
+        transformed = matrix - matrix.mean(axis=0, keepdims=True)
+    elif vector_transform == "slot_center":
+        transformed = matrix.copy()
+        slots = sorted({key.split("\0", 1)[0] for key in keys})
+        for slot_type in slots:
+            indexes = [
+                index for index, key in enumerate(keys)
+                if key.startswith(slot_type + "\0")
+            ]
+            if indexes:
+                transformed[indexes] -= transformed[indexes].mean(axis=0, keepdims=True)
+    elif vector_transform.startswith("remove_pc"):
+        count = int(vector_transform.removeprefix("remove_pc"))
+        centered = matrix - matrix.mean(axis=0, keepdims=True)
+        _u, _s, vt = np.linalg.svd(centered, full_matrices=False)
+        components = vt[:count]
+        transformed = centered - centered @ components.T @ components
+    else:
+        raise RuntimeError(f"Unknown vector_transform: {vector_transform}")
+    output: dict[str, list[float]] = {}
+    norms = np.linalg.norm(transformed, axis=1)
+    for key, vector, norm in zip(keys, transformed, norms):
+        if norm > 0:
+            output[key] = (vector / norm).tolist()
+    return output
+
+
+def _load_embedding_cache(path: Path) -> dict[str, list[float]]:
+    if not path.exists():
+        return {}
+    vectors: dict[str, list[float]] = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            vector = [float(value) for value in row["vector"].split(" ") if value]
+            norm = math.sqrt(sum(value * value for value in vector))
+            if norm > 0:
+                vectors[row["key"]] = [value / norm for value in vector]
+    return vectors
+
+
+def _append_spacy_embeddings(path: Path, fillers: list[_Filler]) -> None:
+    import spacy
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _load_embedding_cache(path)
+    nlp = spacy.load("en_core_web_md", disable=["lemmatizer"])
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("key", "slot_type", "filler", "display_filler", "vector"),
+        )
+        if write_header:
+            writer.writeheader()
+        docs = nlp.pipe([filler.filler for filler in fillers], batch_size=256)
+        for filler, doc in zip(fillers, docs):
+            if filler.id in existing or not doc.has_vector or doc.vector_norm <= 0:
+                continue
+            vector = [float(value) for value in doc.vector]
+            norm = math.sqrt(sum(value * value for value in vector))
+            if norm <= 0:
+                continue
+            writer.writerow({
+                "key": filler.id,
+                "slot_type": filler.slot_type,
+                "filler": filler.filler,
+                "display_filler": filler.display_filler,
+                "vector": " ".join(f"{value / norm:.9g}" for value in vector),
+            })
+
+
+def _apply_smoothing(
+    rows: list[dict[str, object]],
+    fillers: dict[str, _Filler],
+    vectors: dict[str, list[float]],
+    config: SmoothingExperimentConfig,
+) -> list[dict[str, object]]:
+    if config.variant == "none":
+        return [dict(row) for row in rows]
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        grouped[(str(row["slot_type"]), str(row["tier"]))].append(row)
+    smoothed: list[dict[str, object]] = []
+    for (slot_type, tier), group_rows in sorted(grouped.items()):
+        if config.variant == "uniform_prior":
+            semantic_prior = {
+                str(row["filler"]): 1.0 / len(group_rows)
+                for row in group_rows
+            }
+        elif config.variant in {"generic_embedding_kNN", "tier_evidence_filtered_kNN"}:
+            semantic_prior = _semantic_prior_for_group(
+                group_rows,
+                vectors,
+                neighbor_count=config.neighbor_count,
+                evidence_gate=config.evidence_gate if config.variant == "tier_evidence_filtered_kNN" else "none",
+            )
+        else:
+            raise RuntimeError(f"Unknown smoothing variant: {config.variant}")
+        group_smoothed = []
+        for row in group_rows:
+            filler = str(row["filler"])
+            base_probability = float(row["probability"])
+            evidence_strength = max(0.0, float(row["soft_count"]))
+            if config.shrinkage <= 0:
+                borrow_fraction = 0.0
+            else:
+                borrow_fraction = config.shrinkage / (evidence_strength + config.shrinkage)
+            borrow_fraction = min(config.max_borrowed_mass, borrow_fraction)
+            if _filler_key(slot_type, filler) not in vectors and config.variant != "uniform_prior":
+                borrow_fraction = 0.0
+            new_probability = (
+                (1.0 - borrow_fraction) * base_probability
+                + borrow_fraction * semantic_prior.get(filler, base_probability)
+            )
+            new_row = dict(row)
+            new_row["probability"] = new_probability
+            new_row["log_probability"] = math.log(new_probability) if new_probability > 0 else float("-inf")
+            new_row["semantic_smoothing_mass"] = abs(new_probability - base_probability)
+            group_smoothed.append(new_row)
+        total = sum(float(row["probability"]) for row in group_smoothed)
+        for row in group_smoothed:
+            probability = float(row["probability"]) / total if total > 0 else 0.0
+            row["probability"] = probability
+            row["log_probability"] = math.log(probability) if probability > 0 else float("-inf")
+            smoothed.append(row)
+    return smoothed
+
+
+def _semantic_prior_for_group(
+    rows: list[dict[str, object]],
+    vectors: dict[str, list[float]],
+    *,
+    neighbor_count: int,
+    evidence_gate: str,
+) -> dict[str, float]:
+    import numpy as np
+
+    slot_type = str(rows[0]["slot_type"]) if rows else ""
+    keys = [
+        str(row["filler"])
+        for row in rows
+        if _filler_key(slot_type, str(row["filler"])) in vectors
+    ]
+    if not keys or neighbor_count <= 0:
+        return {str(row["filler"]): float(row["probability"]) for row in rows}
+    matrix = np.array(
+        [vectors[_filler_key(slot_type, key)] for key in keys],
+        dtype=np.float64,
+    )
+    probabilities = {
+        str(row["filler"]): float(row["probability"])
+        for row in rows
+    }
+    evidence_allowed = {
+        str(row["filler"])
+        for row in rows
+        if _passes_evidence_gate(row, evidence_gate)
+    }
+    prior: dict[str, float] = {}
+    similarities = matrix @ matrix.T
+    key_index = {key: index for index, key in enumerate(keys)}
+    for key in keys:
+        index = key_index[key]
+        candidates = []
+        for other_index, similarity in enumerate(similarities[index]):
+            other_key = keys[other_index]
+            if other_key == key or similarity <= 0:
+                continue
+            if other_key not in evidence_allowed:
+                continue
+            candidates.append((float(similarity), other_key))
+        if not candidates:
+            prior[key] = probabilities[key]
+            continue
+        candidates.sort(reverse=True)
+        selected = candidates[:neighbor_count]
+        total_weight = sum(weight for weight, _other_key in selected)
+        prior[key] = sum(
+            weight * probabilities[other_key]
+            for weight, other_key in selected
+        ) / total_weight
+    for row in rows:
+        key = str(row["filler"])
+        prior.setdefault(key, probabilities[key])
+    total = sum(prior.values())
+    if total > 0:
+        prior = {key: value / total for key, value in prior.items()}
+    return prior
+
+
+def _passes_evidence_gate(row: dict[str, object], evidence_gate: str) -> bool:
+    if evidence_gate == "none":
+        return True
+    if evidence_gate == "source_count>=2":
+        return int(row["source_count"]) >= 2
+    if evidence_gate == "anchored_mass":
+        return float(row["anchored_soft_count"]) > 0
+    raise RuntimeError(f"Unknown evidence gate: {evidence_gate}")
+
+
+def _smoothing_metrics(
+    config: SmoothingExperimentConfig,
+    base_rows: list[dict[str, object]],
+    smoothed_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    comparison = _distribution_comparison(smoothed_rows, base_rows)
+    base_lookup = {
+        (row["slot_type"], row["tier"], row["filler"]): row
+        for row in base_rows
+    }
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in smoothed_rows:
+        grouped[(str(row["slot_type"]), str(row["tier"]))].append(row)
+    result = []
+    for item in comparison:
+        key = (item["slot_type"], item["tier"])
+        group_rows = grouped[key]
+        probabilities = [float(row["probability"]) for row in group_rows]
+        entropy = -sum(p * math.log(p) for p in probabilities if p > 0)
+        moved = sum(
+            abs(float(row["probability"]) - float(base_lookup[(row["slot_type"], row["tier"], row["filler"])]["probability"]))
+            for row in group_rows
+        ) / 2.0
+        result.append({
+            "experiment": config.name,
+            "variant": config.variant,
+            "neighbor_count": config.neighbor_count,
+            "shrinkage": config.shrinkage,
+            "evidence_gate": config.evidence_gate,
+            "max_borrowed_mass": config.max_borrowed_mass,
+            "vector_transform": config.vector_transform,
+            "slot_type": item["slot_type"],
+            "tier": item["tier"],
+            "js_divergence": item["js_divergence"],
+            "top20_overlap": item["top20_overlap"],
+            "entropy": entropy,
+            "effective_n": math.exp(entropy),
+            "semantic_mass_moved": moved,
+        })
+    return result
+
+
+def _write_smoothing_metrics(path: Path, metrics: list[dict[str, object]]) -> None:
+    if not metrics:
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(metrics[0]))
+        writer.writeheader()
+        writer.writerows(metrics)
+
+
+def _read_smoothing_metrics(path: Path) -> list[dict[str, object]]:
+    with path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    numeric_fields = {
+        "neighbor_count": int,
+        "shrinkage": float,
+        "max_borrowed_mass": float,
+        "vector_transform": str,
+        "js_divergence": float,
+        "top20_overlap": int,
+        "entropy": float,
+        "effective_n": float,
+        "semantic_mass_moved": float,
+    }
+    for row in rows:
+        for field, caster in numeric_fields.items():
+            row[field] = caster(row[field])
+    return rows
+
+
+def _autoresearcher_findings(metrics: list[dict[str, object]]) -> list[dict[str, object]]:
+    by_experiment: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in metrics:
+        by_experiment[str(row["experiment"])].append(row)
+
+    findings: list[dict[str, object]] = []
+    for experiment, rows in sorted(by_experiment.items()):
+        variant = str(rows[0]["variant"])
+        if variant == "none":
+            continue
+        moved = [float(row["semantic_mass_moved"]) for row in rows]
+        overlaps = [int(row["top20_overlap"]) for row in rows]
+        js_values = [float(row["js_divergence"]) for row in rows]
+        max_moved_row = max(rows, key=lambda row: float(row["semantic_mass_moved"]))
+        min_overlap_row = min(rows, key=lambda row: int(row["top20_overlap"]))
+        findings.append({
+            "kind": "experiment_summary",
+            "experiment": experiment,
+            "variant": variant,
+            "summary": (
+                f"avg moved={sum(moved) / len(moved):.4f}, "
+                f"max moved={max(moved):.4f} at "
+                f"{max_moved_row['tier']} {max_moved_row['slot_type']}; "
+                f"max JS={max(js_values):.4f}; min top-20 overlap={min(overlaps)}/20 "
+                f"at {min_overlap_row['tier']} {min_overlap_row['slot_type']}"
+            ),
+            "severity": "info",
+        })
+        if min(overlaps) < 15:
+            findings.append({
+                "kind": "semantic_bleed_risk",
+                "experiment": experiment,
+                "variant": variant,
+                "summary": (
+                    f"Top-20 changed substantially for {min_overlap_row['tier']} "
+                    f"{min_overlap_row['slot_type']} ({min(overlaps)}/20). "
+                    "This needs qualitative tier/style review before any policy decision."
+                ),
+                "severity": "review",
+            })
+        if max(moved) > 0.05:
+            findings.append({
+                "kind": "large_mass_movement",
+                "experiment": experiment,
+                "variant": variant,
+                "summary": (
+                    f"Semantic mass moved reaches {max(moved):.4f}; treat this as a "
+                    "sensitivity boundary rather than a candidate default."
+                ),
+                "severity": "review",
+            })
+        zero_move_slots = [
+            f"{row['tier']} {row['slot_type']}"
+            for row in rows
+            if variant == "tier_evidence_filtered_kNN"
+            and float(row["semantic_mass_moved"]) <= 0.000001
+        ]
+        if zero_move_slots:
+            sample = ", ".join(zero_move_slots[:5])
+            findings.append({
+                "kind": "gate_under_smoothing",
+                "experiment": experiment,
+                "variant": variant,
+                "summary": (
+                    f"Evidence gate produced no measurable movement in "
+                    f"{len(zero_move_slots)} tier/slot groups, including {sample}."
+                ),
+                "severity": "design",
+            })
+    return findings
+
+
+def _next_smoothing_proposals(
+    metrics: list[dict[str, object]],
+    findings: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    experiments_seen = {str(row["experiment"]) for row in metrics}
+    has_top20_instability = any(finding["kind"] == "semantic_bleed_risk" for finding in findings)
+    has_gate_under_smoothing = any(finding["kind"] == "gate_under_smoothing" for finding in findings)
+    has_large_movement = any(finding["kind"] == "large_mass_movement" for finding in findings)
+
+    proposals = [
+        {
+            "proposal_id": "manual-k5-cap005",
+            "category": "fixed_sweep",
+            "status": "ready_to_run" if "knn5_m0_5_cap0_05" not in experiments_seen else "already_run",
+            "variant": "generic_embedding_kNN",
+            "neighbor_count": 5,
+            "shrinkage": 0.5,
+            "evidence_gate": "none",
+            "max_borrowed_mass": 0.05,
+            "rationale": "Mechanical sensitivity check for a smaller, conservative neighborhood and cap.",
+        },
+        {
+            "proposal_id": "manual-source2-cap005",
+            "category": "fixed_sweep",
+            "status": "ready_to_run",
+            "variant": "tier_evidence_filtered_kNN",
+            "neighbor_count": 10,
+            "shrinkage": 0.5,
+            "evidence_gate": "source_count>=2",
+            "max_borrowed_mass": 0.05,
+            "rationale": "Mechanical cap sensitivity check for the existing source-count evidence gate.",
+        },
+        {
+            "proposal_id": "manual-anchored-gate",
+            "category": "fixed_sweep",
+            "status": "ready_to_run",
+            "variant": "tier_evidence_filtered_kNN",
+            "neighbor_count": 10,
+            "shrinkage": 0.5,
+            "evidence_gate": "anchored_mass",
+            "max_borrowed_mass": 0.10,
+            "rationale": "Simple evidence gate that does not require LLM steering.",
+        },
+        {
+            "proposal_id": "weighted-similarity-knn",
+            "category": "hypothesis_driven",
+            "status": "needs_implementation",
+            "variant": "weighted_similarity_kNN",
+            "neighbor_count": 10,
+            "shrinkage": 0.5,
+            "evidence_gate": "source_count>=2",
+            "max_borrowed_mass": 0.10,
+            "rationale": (
+                "If evidence gating under-smooths, combine cosine similarity with "
+                "source support and confidence instead of a hard neighbor cutoff."
+            ),
+        },
+        {
+            "proposal_id": "slot-centered-vectors",
+            "category": "hypothesis_driven",
+            "status": "design_review_needed" if has_top20_instability else "defer",
+            "variant": "centered_embedding_kNN",
+            "neighbor_count": 10,
+            "shrinkage": 0.5,
+            "evidence_gate": "none",
+            "max_borrowed_mass": 0.10,
+            "rationale": (
+                "Qualitative failures may indicate generic vectors are too topical; "
+                "subtract per-slot centroids before cosine as a local subspace test."
+            ),
+        },
+        {
+            "proposal_id": "top-pc-removal",
+            "category": "hypothesis_driven",
+            "status": "design_review_needed" if has_top20_instability or has_large_movement else "defer",
+            "variant": "pc_removed_embedding_kNN",
+            "neighbor_count": 10,
+            "shrinkage": 0.5,
+            "evidence_gate": "none",
+            "max_borrowed_mass": 0.10,
+            "rationale": (
+                "Only try whitening/top-PC removal after reviewing semantic bleed "
+                "examples; this is a vector-space hypothesis, not a numeric sweep."
+            ),
+        },
+    ]
+    if has_gate_under_smoothing:
+        proposals.append({
+            "proposal_id": "soft-evidence-weighting",
+            "category": "hypothesis_driven",
+            "status": "design_review_needed",
+            "variant": "evidence_weighted_kNN",
+            "neighbor_count": 10,
+            "shrinkage": 0.5,
+            "evidence_gate": "none",
+            "max_borrowed_mass": 0.10,
+            "rationale": (
+                "The hard source-count gate appears to shut off whole slots; inspect "
+                "whether a soft support multiplier preserves movement without bleed."
+            ),
+        })
+    return proposals
+
+
+def _write_autoresearcher_proposals(path: Path, proposals: list[dict[str, object]]) -> None:
+    if not proposals:
+        return
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(proposals[0]))
+        writer.writeheader()
+        writer.writerows(proposals)
+
+
+def _format_autoresearcher_report(
+    *,
+    ablation_result: SemanticSmoothingAblationResult,
+    metrics: list[dict[str, object]],
+    findings: list[dict[str, object]],
+    proposals: list[dict[str, object]],
+) -> str:
+    lines = [
+        "# Semantic smoothing AutoResearcher packet",
+        "",
+        "This is the deterministic local Step 5 AutoResearcher harvesting loop. "
+        "It reruns the bounded ablation, inspects the metrics, and writes next-round "
+        "proposals. It does **not** call an external LLM, does **not** choose serving "
+        "defaults, and does **not** change runtime behavior.",
+        "",
+        "## Inputs",
+        "",
+        f"- Ablation report: `{ablation_result.report_path}`",
+        f"- Metrics CSV: `{ablation_result.metrics_path}`",
+        f"- Experiments inspected: {ablation_result.experiment_count}",
+        f"- Metric rows inspected: {len(metrics)}",
+        "",
+        "## What is fixed-sweep vs hypothesis-driven",
+        "",
+        "- Fixed/manual sweeps: `k`, shrinkage `m`, max borrowed mass, and simple "
+        "evidence gates. These should be small bounded sensitivity checks.",
+        "- Hypothesis-driven AutoResearcher work: vector-space transformations, "
+        "whitening/top-PC removal, weighted similarity, slot-specific spaces, "
+        "style/humor/tier-fit concerns, and semantic bleed analysis. These require "
+        "review of examples before adding or running the next variant.",
+        "",
+        "## Findings",
+        "",
+    ]
+    if findings:
+        for finding in findings:
+            lines.append(
+                f"- **{finding['kind']}** ({finding['severity']}, "
+                f"{finding['experiment']}): {finding['summary']}"
+            )
+    else:
+        lines.append("- No non-baseline findings were produced.")
+    lines.extend([
+        "",
+        "## Proposed next experiments",
+        "",
+        "| Proposal | Category | Status | Variant | k | m | Gate | Cap | Rationale |",
+        "|---|---|---|---|---:|---:|---|---:|---|",
+    ])
+    for proposal in proposals:
+        lines.append(
+            f"| {proposal['proposal_id']} | {proposal['category']} | "
+            f"{proposal['status']} | {proposal['variant']} | "
+            f"{proposal['neighbor_count']} | {float(proposal['shrinkage']):.2f} | "
+            f"{proposal['evidence_gate']} | {float(proposal['max_borrowed_mass']):.2f} | "
+            f"{proposal['rationale']} |"
+        )
+    lines.extend([
+        "",
+        "## Handoff",
+        "",
+        "- Treat this as a proposal packet, not a completed autonomous LLM loop.",
+        "- A human or future LLM reviewer should inspect the ablation review examples "
+        "before implementing vector-space proposals.",
+        "- No smoothing variant should become a runtime default in Step 5.",
+    ])
+    return "\n".join(lines)
+
+
+def _format_smoothing_report(
+    *,
+    base_rows: list[dict[str, object]],
+    experiment_outputs: list[tuple[SmoothingExperimentConfig, list[dict[str, object]]]],
+    metrics: list[dict[str, object]],
+    vector_coverage: dict[str, tuple[int, int]],
+    vector_source_counts: dict[str, int],
+) -> str:
+    lines = [
+        "# Semantic smoothing ablation report",
+        "",
+        "This report compares bounded smoothing variants against the unsmoothed "
+        "tier-slot distribution. It is an AutoResearcher-style experiment packet, "
+        "not a serving-default decision.",
+        "",
+        "## Vector coverage",
+        "",
+        "Vector smoothing uses the offline all-slot embedding cache when requested, "
+        "because persisted DB vectors only cover remix/object slots.",
+        "",
+        "| Vector source | Vectors |",
+        "|---|---:|",
+    ]
+    for source, count in vector_source_counts.items():
+        lines.append(f"| {source} | {count:,} |")
+    lines.extend([
+        "",
+        "| Slot type | Fillers | With vectors |",
+        "|---|---:|---:|",
+    ])
+    for slot_type, (total, with_vectors) in sorted(vector_coverage.items()):
+        lines.append(f"| {slot_type} | {total:,} | {with_vectors:,} |")
+    lines.extend([
+        "",
+        "## Experiment metrics",
+        "",
+        "| Experiment | Variant | Slot | Tier | JS divergence | Top-20 overlap | Effective N | Semantic mass moved |",
+        "|---|---|---|---|---:|---:|---:|---:|",
+    ])
+    for row in metrics:
+        lines.append(
+            f"| {row['experiment']} | {row['variant']} / {row['vector_transform']} | "
+            f"{row['slot_type']} | {row['tier']} | {float(row['js_divergence']):.6f} | "
+            f"{row['top20_overlap']}/20 | {float(row['effective_n']):.1f} | "
+            f"{float(row['semantic_mass_moved']):.6f} |"
+        )
+    lines.extend(["", "## Review examples", ""])
+    for config, rows in experiment_outputs:
+        if config.variant == "none":
+            continue
+        lines.extend([f"### {config.name}", ""])
+        for example in _smoothing_examples(config, base_rows, rows)[:12]:
+            lines.append(
+                f"- `{example['slot_type']}` {example['tier']} "
+                f"**{example['display_filler']}** [{example['filler']}]: "
+                f"{example['base_probability']:.6f} -> {example['smoothed_probability']:.6f} "
+                f"({example['delta']:+.6f}); soft={example['soft_count']:.3f}, "
+                f"sources={example['source_count']}, smoothing_mass={example['semantic_smoothing_mass']:.6f}"
+            )
+        lines.append("")
+    lines.extend([
+        "## Caveats",
+        "",
+        "- Persisted DB vectors still only cover remix/object slots, but this report uses the offline all-slot embedding cache so list-item and action-noun slots can participate in vector smoothing.",
+        "- The output is for human review and future tuning; runtime defaults are unchanged.",
+    ])
+    return "\n".join(lines)
+
+
+def _smoothing_examples(
+    config: SmoothingExperimentConfig,
+    base_rows: list[dict[str, object]],
+    smoothed_rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    base_lookup = {
+        (row["slot_type"], row["tier"], row["filler"]): row
+        for row in base_rows
+    }
+    examples = []
+    for row in smoothed_rows:
+        base = base_lookup[(row["slot_type"], row["tier"], row["filler"])]
+        delta = float(row["probability"]) - float(base["probability"])
+        examples.append({
+            "experiment": config.name,
+            "slot_type": str(row["slot_type"]),
+            "tier": str(row["tier"]),
+            "filler": str(row["filler"]),
+            "display_filler": str(row["display_filler"]),
+            "base_probability": float(base["probability"]),
+            "smoothed_probability": float(row["probability"]),
+            "delta": delta,
+            "soft_count": float(row["soft_count"]),
+            "source_count": int(row["source_count"]),
+            "semantic_smoothing_mass": float(row["semantic_smoothing_mass"]),
+        })
+    return sorted(examples, key=lambda item: (-abs(item["delta"]), item["filler"]))
+
+
+def _vector_coverage(
+    fillers: dict[str, _Filler],
+    vectors: dict[str, list[float]],
+) -> dict[str, tuple[int, int]]:
+    totals: Counter[str] = Counter()
+    covered: Counter[str] = Counter()
+    for key, filler in fillers.items():
+        totals[filler.slot_type] += 1
+        if key in vectors:
+            covered[filler.slot_type] += 1
+    return {
+        slot_type: (totals[slot_type], covered[slot_type])
+        for slot_type in sorted(totals)
+    }
 
 
 def _top_rows(rows: list[dict[str, object]]) -> dict[tuple[str, str], list[dict[str, object]]]:
