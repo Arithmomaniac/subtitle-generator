@@ -7,12 +7,19 @@ import math
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from subtitle_generator.schema_contracts import (
     TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
     TIER_SLOT_FILLER_DISTRIBUTION_TIERS,
     validate_tier_slot_distribution,
+)
+from subtitle_generator.slots import (
+    _is_valid_action,
+    _is_valid_list_item,
+    _is_valid_object,
+    _load_nlp,
 )
 
 TIERS = TIER_SLOT_FILLER_DISTRIBUTION_TIERS
@@ -1334,7 +1341,13 @@ def _apply_smoothing(
             else:
                 borrow_fraction = config.shrinkage / (evidence_strength + config.shrinkage)
             borrow_fraction = min(config.max_borrowed_mass, borrow_fraction)
-            if _filler_key(slot_type, filler) not in vectors and config.variant != "uniform_prior":
+            if (
+                not _is_valid_ml_slot_filler(slot_type, str(row["display_filler"]))
+                or (
+                    _filler_key(slot_type, filler) not in vectors
+                    and config.variant != "uniform_prior"
+                )
+            ):
                 borrow_fraction = 0.0
             new_probability = (
                 (1.0 - borrow_fraction) * base_probability
@@ -1368,6 +1381,7 @@ def _semantic_prior_for_group(
         str(row["filler"])
         for row in rows
         if _filler_key(slot_type, str(row["filler"])) in vectors
+        and _is_valid_ml_slot_filler(slot_type, str(row["display_filler"]))
     ]
     if not keys or neighbor_count <= 0:
         return {str(row["filler"]): float(row["probability"]) for row in rows}
@@ -1383,6 +1397,7 @@ def _semantic_prior_for_group(
         str(row["filler"])
         for row in rows
         if _passes_evidence_gate(row, evidence_gate)
+        and _is_valid_ml_slot_filler(slot_type, str(row["display_filler"]))
     }
     prior: dict[str, float] = {}
     similarities = matrix @ matrix.T
@@ -1424,6 +1439,24 @@ def _passes_evidence_gate(row: dict[str, object], evidence_gate: str) -> bool:
     if evidence_gate == "anchored_mass":
         return float(row["anchored_soft_count"]) > 0
     raise RuntimeError(f"Unknown evidence gate: {evidence_gate}")
+
+
+@lru_cache(maxsize=1)
+def _validation_nlp():
+    return _load_nlp()
+
+
+@lru_cache(maxsize=20000)
+def _is_valid_ml_slot_filler(slot_type: str, filler: str) -> bool:
+    if slot_type == "list_item":
+        return _is_valid_list_item(filler, _validation_nlp())
+    if slot_type == "action_noun":
+        return _is_valid_action(filler, _validation_nlp())
+    if slot_type == "of_object":
+        return _is_valid_object(filler, _validation_nlp())
+    # Remix subpart slots were produced from valid of-objects and have their own
+    # runtime decomposition semantics; keep them eligible for smoothing.
+    return True
 
 
 def _smoothing_metrics(

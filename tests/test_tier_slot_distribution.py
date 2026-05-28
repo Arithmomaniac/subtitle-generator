@@ -199,3 +199,58 @@ def test_run_semantic_smoothing_autoresearcher_writes_proposals(tmp_path: Path):
     assert "does **not** call an external LLM" in report
     assert "weighted-similarity-knn" in proposals
     assert result.ablation_result.experiment_count == 2
+
+
+def test_semantic_smoothing_does_not_boost_invalid_slot_fillers():
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        _apply_smoothing,
+        _filler_key,
+    )
+
+    rows = [
+        {
+            "slot_type": "action_noun",
+            "tier": "mainstream",
+            "filler": "u.s. house",
+            "display_filler": "U.S. House",
+            "probability": 0.1,
+            "log_probability": 0.0,
+            "soft_count": 0.01,
+            "source_count": 1,
+            "anchored_soft_count": 0.0,
+        },
+        {
+            "slot_type": "action_noun",
+            "tier": "mainstream",
+            "filler": "rise",
+            "display_filler": "Rise",
+            "probability": 0.9,
+            "log_probability": 0.0,
+            "soft_count": 10.0,
+            "source_count": 10,
+            "anchored_soft_count": 5.0,
+        },
+    ]
+    vectors = {
+        _filler_key("action_noun", "u.s. house"): [1.0, 0.0],
+        _filler_key("action_noun", "rise"): [0.99, 0.01],
+    }
+
+    smoothed = _apply_smoothing(
+        rows,
+        {},
+        vectors,
+        SmoothingExperimentConfig(
+            "test",
+            "generic_embedding_kNN",
+            neighbor_count=1,
+            shrinkage=10.0,
+            evidence_gate="none",
+            max_borrowed_mass=0.5,
+        ),
+    )
+
+    invalid_row = next(row for row in smoothed if row["filler"] == "u.s. house")
+    assert invalid_row["probability"] == 0.1
+    assert invalid_row["semantic_smoothing_mass"] == 0.0
