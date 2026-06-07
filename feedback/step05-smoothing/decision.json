@@ -3,10 +3,10 @@
   "run_id": "cd50777784a0b9f8",
   "variant": "pc1_removed_minsrc2_knn10_m0_5_cap0_10",
   "vector_source": "offline_spacy",
-  "decision": "iterate",
-  "summary": "but only if you see a good direction to move",
+  "decision": "accept",
+  "summary": "Accepted as the Step 5 smoothing direction: PC1-removed embeddings + a candidate-evidence source floor (best of four reviewed variants, ~80% good fit). Step 5 is analysis-only, so this records the recommended direction, not a serving change. Known residual: bleed concentrates in low-evidence multi-word compounds (5 of 6 remaining bleeds). Future lever, to pull if/when this config is promoted toward serving (Steps 7-9): a compound-aware evidence floor (require higher source support for multi-token fillers).",
   "reviewer": "Avi",
-  "created_at": "2026-06-07T19:27:41.464342+00:00",
+  "created_at": "2026-06-07T19:44:44.357377+00:00",
   "ratings_summary": {
     "total": 30,
     "runs": [
