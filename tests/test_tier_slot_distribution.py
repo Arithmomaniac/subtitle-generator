@@ -254,3 +254,390 @@ def test_semantic_smoothing_does_not_boost_invalid_slot_fillers():
     invalid_row = next(row for row in smoothed if row["filler"] == "u.s. house")
     assert invalid_row["probability"] == 0.1
     assert invalid_row["semantic_smoothing_mass"] == 0.0
+
+
+def _sidecar_path(distribution_path: Path) -> Path:
+    return distribution_path.with_name(
+        "tier_slot_filler_distribution_v1.confidence_weighted.csv"
+    )
+
+
+def test_source_reliability_weights_signal():
+    from subtitle_generator.tier_slot_distribution import (
+        _SourceLabel,
+        _source_reliability_weights,
+    )
+
+    source_labels = {
+        101: _SourceLabel("pop", 0.8),
+        103: _SourceLabel("niche", 1.0),
+        102: _SourceLabel(None, None),
+        999: _SourceLabel(None, None),
+    }
+    evidence_ids = {101, 102, 103}
+
+    weights = _source_reliability_weights(
+        source_labels, evidence_ids, exponent=1.0, unlabeled_reliability=0.70
+    )
+
+    # Labeled sources use confidence as the (non-circular) signal, lower-bounded
+    # at the unlabeled level: r = 0.70 + 0.30 * confidence.
+    assert abs(weights[101] - (0.70 + 0.30 * 0.8)) < 1e-9
+    assert abs(weights[103] - 1.0) < 1e-9
+    # Every labeled source is at least as reliable as an unlabeled one.
+    assert weights[101] >= 0.70 and weights[103] >= 0.70
+    # Unlabeled sources get the flat constant, regardless of evidence membership.
+    assert abs(weights[102] - 0.70) < 1e-9
+    assert abs(weights[999] - 0.70) < 1e-9
+
+
+def test_source_reliability_weights_monotonic_and_exponent():
+    from subtitle_generator.tier_slot_distribution import (
+        _SourceLabel,
+        _source_reliability_weights,
+    )
+
+    labels = {1: _SourceLabel("pop", 0.5), 2: _SourceLabel("pop", 0.9)}
+    linear = _source_reliability_weights(
+        labels, set(), exponent=1.0, unlabeled_reliability=0.70
+    )
+    assert linear[2] > linear[1]
+    # r = 0.70 + 0.30 * 0.5.
+    assert abs(linear[1] - 0.85) < 1e-9
+
+    squared = _source_reliability_weights(
+        labels, set(), exponent=2.0, unlabeled_reliability=0.70
+    )
+    # A larger exponent pulls mid-range signals down: 0.70 + 0.30 * 0.25.
+    assert squared[1] < linear[1]
+    assert abs(squared[1] - 0.775) < 1e-9
+
+
+def test_unlabeled_reliability_is_flat_constant():
+    from subtitle_generator.tier_slot_distribution import (
+        _SourceLabel,
+        _source_reliability_weights,
+    )
+
+    labels = {1: _SourceLabel(None, None), 2: _SourceLabel(None, None)}
+    # Whatever the evidence membership, unlabeled sources share one flat weight.
+    weights = _source_reliability_weights(
+        labels, {1}, exponent=1.0, unlabeled_reliability=0.6
+    )
+    assert weights[1] == 0.6
+    assert weights[2] == 0.6
+
+
+def test_evidence_source_ids_finds_linked_subtitles():
+    from subtitle_generator.tier_slot_distribution import _evidence_source_ids
+
+    conn = _create_distribution_db()
+    ids = _evidence_source_ids(conn)
+    # subtitles 101, 102, 103 each back at least one strict filler.
+    assert ids == {101, 102, 103}
+
+
+def test_weighted_sidecar_is_orthogonal_to_inferred_source_weight(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    result_a = build_tier_slot_distribution(
+        _create_distribution_db(), out_a, alpha=0.5, inferred_source_weight=1.0
+    )
+    result_b = build_tier_slot_distribution(
+        _create_distribution_db(), out_b, alpha=0.5, inferred_source_weight=0.5
+    )
+
+    weighted_a = _sidecar_path(result_a.distribution_path).read_text(encoding="utf-8")
+    weighted_b = _sidecar_path(result_b.distribution_path).read_text(encoding="utf-8")
+    served_a = result_a.distribution_path.read_text(encoding="utf-8")
+    served_b = result_b.distribution_path.read_text(encoding="utf-8")
+
+    # Reliability is the only magnitude axis in the weighted sidecar, so changing
+    # inferred_source_weight leaves it identical...
+    assert weighted_a == weighted_b
+    # ...while the served anchored artifact still responds to inferred_source_weight.
+    assert served_a != served_b
+
+
+def test_weighted_sidecar_clean_decomposition_values(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    result = build_tier_slot_distribution(
+        _create_distribution_db(), tmp_path, alpha=0.5
+    )
+    weighted = _read_distribution(_sidecar_path(result.distribution_path))
+
+    # "race" merges the labeled source 101 (pop, c=0.8, r=0.94) and the unlabeled
+    # source 102 (flat r=0.70, teacher vector pop=0.15/main=0.25/niche=0.6).
+    race_pop = weighted[("list_item", "pop", "race")]
+    race_mainstream = weighted[("list_item", "mainstream", "race")]
+    race_niche = weighted[("list_item", "niche", "race")]
+
+    # Anchored pop mass = confidence * reliability = 0.8 * 0.94.
+    assert abs(float(race_pop["anchored_soft_count"]) - 0.752) < 1e-6
+    # Inferred pop from the unlabeled teacher vector = 0.15 * 0.70.
+    assert abs(float(race_pop["inferred_soft_count"]) - 0.105) < 1e-6
+    assert abs(float(race_mainstream["inferred_soft_count"]) - (0.25 * 0.70)) < 1e-6
+    # niche = labeled residual (1-0.8)*0.94 routed to niche + 0.6*0.70 unlabeled.
+    assert abs(float(race_niche["inferred_soft_count"]) - (0.188 + 0.42)) < 1e-6
+    # Reliability mean for the pop cell averages the two contributing sources.
+    assert abs(float(race_pop["teacher_confidence_mean"]) - 0.8) < 1e-6
+
+
+def test_weighted_sidecar_normalizes_each_tier_slot(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    result = build_tier_slot_distribution(
+        _create_distribution_db(), tmp_path, alpha=0.5
+    )
+    rows = list(_read_distribution(_sidecar_path(result.distribution_path)).values())
+    groups: dict[tuple[str, str], float] = {}
+    for row in rows:
+        key = (row["slot_type"], row["tier"])
+        groups[key] = groups.get(key, 0.0) + float(row["probability"])
+    assert all(abs(total - 1.0) < 1e-6 for total in groups.values())
+
+
+def test_served_artifact_unchanged_by_reliability_knobs(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    result_a = build_tier_slot_distribution(
+        _create_distribution_db(), out_a, alpha=0.5
+    )
+    result_b = build_tier_slot_distribution(
+        _create_distribution_db(),
+        out_b,
+        alpha=0.5,
+        reliability_exponent=2.0,
+        unlabeled_reliability=0.4,
+    )
+
+    # The served artifact is anchored-only and must not move with report-only knobs.
+    assert result_a.distribution_path.read_text(encoding="utf-8") == (
+        result_b.distribution_path.read_text(encoding="utf-8")
+    )
+    # ...but the sidecar does respond to them.
+    assert _sidecar_path(result_a.distribution_path).read_text(encoding="utf-8") != (
+        _sidecar_path(result_b.distribution_path).read_text(encoding="utf-8")
+    )
+
+
+def test_report_contains_named_reliability_sections(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    result = build_tier_slot_distribution(
+        _create_distribution_db(), tmp_path, alpha=0.5
+    )
+    report = result.report_path.read_text(encoding="utf-8")
+
+    assert "Source reliability weighting" in report
+    assert "Teacher-output confidence diagnostics" in report
+    assert "Three-way distribution comparison" in report
+    assert "hard-label anchoring" in report
+    assert "confidence-weighted" in report
+    assert "Reliability movers" in report
+    assert "Pop/mainstream collapse guardrail" in report
+    assert "confidence_weighted.csv" in report
+    # The stale "not applied yet" reliability claim must be gone.
+    assert "not applied yet" not in report.split("Semantic smoothing")[0]
+
+
+def test_reliability_validation_errors(tmp_path: Path):
+    import pytest
+
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    with pytest.raises(RuntimeError):
+        build_tier_slot_distribution(
+            _create_distribution_db(), tmp_path / "b", reliability_exponent=0.0
+        )
+    with pytest.raises(RuntimeError):
+        build_tier_slot_distribution(
+            _create_distribution_db(), tmp_path / "c", unlabeled_reliability=1.5
+        )
+
+
+def test_collapse_guardrail_flags_effective_n_drop():
+    from subtitle_generator.tier_slot_distribution import _collapse_guardrail
+
+    def _row(slot, tier, filler, probability):
+        return {
+            "slot_type": slot,
+            "tier": tier,
+            "filler": filler,
+            "probability": probability,
+            "soft_count": probability,
+            "anchored_soft_count": 0.0,
+            "inferred_soft_count": probability,
+            "prior_count": 0.0,
+        }
+
+    anchored = [
+        _row("list_item", "pop", f"f{i}", 0.25) for i in range(4)
+    ]
+    weighted = [
+        _row("list_item", "pop", "f0", 0.97),
+        _row("list_item", "pop", "f1", 0.01),
+        _row("list_item", "pop", "f2", 0.01),
+        _row("list_item", "pop", "f3", 0.01),
+    ]
+
+    flags = _collapse_guardrail(anchored, weighted)
+    assert len(flags) == 1
+    flag = flags[0]
+    assert flag["slot_type"] == "list_item"
+    assert flag["tier"] == "pop"
+    assert flag["drop"] > 0.2
+    assert flag["weighted_effective_n"] < flag["anchored_effective_n"]
+
+
+def test_reliability_movers_rank_by_absolute_delta_with_evidence():
+    from subtitle_generator.tier_slot_distribution import _reliability_movers
+
+    anchored = [
+        {
+            "slot_type": "list_item",
+            "tier": "pop",
+            "filler": "race",
+            "display_filler": "Race",
+            "probability": 0.20,
+            "soft_count": 1.0,
+            "source_count": 2,
+        },
+        {
+            "slot_type": "list_item",
+            "tier": "pop",
+            "filler": "power",
+            "display_filler": "Power",
+            "probability": 0.50,
+            "soft_count": 2.0,
+            "source_count": 1,
+        },
+    ]
+    weighted = [
+        {
+            "slot_type": "list_item",
+            "tier": "pop",
+            "filler": "race",
+            "display_filler": "Race",
+            "probability": 0.55,
+            "soft_count": 1.4,
+            "source_count": 2,
+            "reliability_mean": 0.85,
+        },
+        {
+            "slot_type": "list_item",
+            "tier": "pop",
+            "filler": "power",
+            "display_filler": "Power",
+            "probability": 0.45,
+            "soft_count": 1.9,
+            "source_count": 1,
+            "reliability_mean": 0.55,
+        },
+    ]
+
+    movers = _reliability_movers(anchored, weighted, limit=5)
+    assert movers[0]["filler"] == "race"
+    assert abs(movers[0]["delta"] - 0.35) < 1e-9
+    assert movers[0]["anchored_soft"] == 1.0
+    assert movers[0]["weighted_soft"] == 1.4
+    assert movers[0]["weighted_source_count"] == 2
+    assert movers[0]["reliability_mean"] == 0.85
+
+
+def test_labeled_reliability_lower_bounded_by_unlabeled():
+    from subtitle_generator.tier_slot_distribution import (
+        _SourceLabel,
+        _source_reliability_weights,
+    )
+
+    labels = {1: _SourceLabel("pop", 0.4), 2: _SourceLabel(None, None)}
+    weights = _source_reliability_weights(
+        labels, {1, 2}, exponent=1.0, unlabeled_reliability=0.7
+    )
+    # Labeled weight starts at the unlabeled level and climbs with confidence:
+    # r = 0.7 + 0.3 * 0.4.
+    assert abs(weights[1] - 0.82) < 1e-9
+    # Unlabeled sources sit at the flat constant, which floors the labeled range.
+    assert abs(weights[2] - 0.7) < 1e-9
+    assert weights[1] >= weights[2]
+
+
+def test_diagnostics_ignore_sources_without_strict_links(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import _teacher_vector_diagnostics
+
+    conn = _create_distribution_db()
+    # Add a labeled source (subtitle 200) with NO strict filler links.
+    conn.execute(
+        "INSERT INTO pattern_matches VALUES (4, 200, 'pop', 0.5)"
+    )
+    conn.commit()
+
+    from subtitle_generator.tier_slot_distribution import (
+        _load_source_labels,
+        _load_source_fallback_vectors,
+        _evidence_source_ids,
+        _source_reliability_weights,
+    )
+
+    source_labels = _load_source_labels(conn)
+    source_fallbacks = _load_source_fallback_vectors(conn)
+    evidence_ids = _evidence_source_ids(conn)
+    weights = _source_reliability_weights(
+        source_labels, evidence_ids, exponent=1.0, unlabeled_reliability=0.7
+    )
+    diagnostics = _teacher_vector_diagnostics(
+        source_labels, source_fallbacks, evidence_ids, weights
+    )
+
+    # Sources with strict links: 101 + 103 (labeled), 102 (unlabeled).
+    # Subtitle 200 is labeled but link-less, so it must be excluded.
+    labeled_row = next(
+        row for row in diagnostics["reliability"]
+        if str(row["group"]).startswith("labeled")
+    )
+    assert labeled_row["count"] == 2  # 200 excluded (no links); would be 3 otherwise
+    assert diagnostics["unlabeled_total"] == 1
+
+
+def test_confidence_extremes_decomposition(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    # confidence 1.0 -> all mass anchored, no residual.
+    conn = _create_distribution_db()
+    conn.execute("UPDATE pattern_matches SET llm_market_tier_confidence = 1.0 WHERE subtitle_id = 101")
+    conn.commit()
+    result = build_tier_slot_distribution(conn, tmp_path, alpha=0.5)
+    weighted = _read_distribution(_sidecar_path(result.distribution_path))
+
+    # Source 101 (pop, c=1.0, r=1.0) contributes only to pop with no residual.
+    # "race" also has unlabeled source 102, so isolate the residual claim via the
+    # labeled-only contribution: pop anchored = c*r = 1.0.
+    race_pop = weighted[("list_item", "pop", "race")]
+    assert abs(float(race_pop["anchored_soft_count"]) - 1.0) < 1e-6
+
+
+def test_confidence_zero_routes_all_to_residual(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    # confidence 0.0 -> no anchored mass; the source's full reliability becomes
+    # residual, routed by the label-marginal prior.
+    conn = _create_distribution_db()
+    conn.execute("UPDATE pattern_matches SET llm_market_tier_confidence = 0.0 WHERE subtitle_id = 101")
+    conn.commit()
+    result = build_tier_slot_distribution(conn, tmp_path, alpha=0.5)
+    weighted = _read_distribution(_sidecar_path(result.distribution_path))
+
+    # Source 101 (pop, c=0.0, r=0.70): anchored pop mass = 0.0. It is the only
+    # anchored contributor to the race/pop cell (102 is inferred), so it stays 0.
+    race_pop = weighted[("list_item", "pop", "race")]
+    assert abs(float(race_pop["anchored_soft_count"]) - 0.0) < 1e-6
+    # 101's full reliability 0.70 routes to niche (pop residual prior -> niche),
+    # joined by unlabeled 102's niche mass 0.6 * 0.70 = 0.42.
+    race_niche = weighted[("list_item", "niche", "race")]
+    assert abs(float(race_niche["inferred_soft_count"]) - (0.70 + 0.42)) < 1e-6

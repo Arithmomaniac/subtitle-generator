@@ -104,6 +104,8 @@ class _EvidenceCell:
     inferred_sources: set[int] | None = None
     confidence_sum: float = 0.0
     confidence_count: int = 0
+    reliability_sum: float = 0.0
+    reliability_count: int = 0
 
     def __post_init__(self) -> None:
         if self.anchored_sources is None:
@@ -114,6 +116,12 @@ class _EvidenceCell:
     @property
     def soft_count(self) -> float:
         return self.anchored_soft_count + self.inferred_soft_count
+
+    @property
+    def reliability_mean(self) -> float | None:
+        if self.reliability_count == 0:
+            return None
+        return self.reliability_sum / self.reliability_count
 
     @property
     def anchored_source_count(self) -> int:
@@ -140,14 +148,26 @@ def build_tier_slot_distribution(
     *,
     alpha: float = 0.5,
     inferred_source_weight: float = 1.0,
+    reliability_exponent: float = 1.0,
+    unlabeled_reliability: float = 0.70,
     artifact_version: str = "tier_slot_filler_distribution_v1",
 ) -> TierSlotDistributionResult:
-    """Build a transparent empirical-Bayes tier-slot distribution artifact."""
+    """Build a transparent empirical-Bayes tier-slot distribution artifact.
+
+    The emitted served artifact is anchored-only. Source reliability weighting
+    is computed for analysis and written to a sidecar CSV
+    (``<artifact>.confidence_weighted.csv``) plus report sections; it does not
+    change the served distribution.
+    """
 
     if alpha < 0:
         raise RuntimeError("alpha must be nonnegative")
     if inferred_source_weight < 0:
         raise RuntimeError("inferred_source_weight must be nonnegative")
+    if not math.isfinite(reliability_exponent) or reliability_exponent <= 0:
+        raise RuntimeError("reliability_exponent must be a finite positive value")
+    if not 0.0 <= unlabeled_reliability <= 1.0:
+        raise RuntimeError("unlabeled_reliability must be in [0, 1]")
     if not artifact_version:
         raise RuntimeError("artifact_version must be nonempty")
 
@@ -157,6 +177,13 @@ def build_tier_slot_distribution(
     source_fallbacks = _load_source_fallback_vectors(conn)
     global_fallback = _global_fallback_vector(fillers.values())
     residual_priors = _label_residual_priors(source_labels.values())
+    evidence_source_ids = _evidence_source_ids(conn)
+    reliability_weights = _source_reliability_weights(
+        source_labels,
+        evidence_source_ids,
+        exponent=reliability_exponent,
+        unlabeled_reliability=unlabeled_reliability,
+    )
     cells = _build_evidence_cells(
         conn,
         fillers=fillers,
@@ -177,6 +204,17 @@ def build_tier_slot_distribution(
         residual_priors=residual_priors,
         inferred_source_weight=inferred_source_weight,
     )
+    weighted_cells = _build_evidence_cells(
+        conn,
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=source_labels,
+        source_fallbacks=source_fallbacks,
+        global_fallback=global_fallback,
+        residual_priors=residual_priors,
+        inferred_source_weight=inferred_source_weight,
+        reliability_weights=reliability_weights,
+    )
     rows = _distribution_rows(
         fillers=fillers,
         cells=cells,
@@ -189,21 +227,40 @@ def build_tier_slot_distribution(
         alpha=alpha,
         artifact_version=artifact_version,
     )
+    weighted_rows = _distribution_rows(
+        fillers=fillers,
+        cells=weighted_cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
 
     distribution_path = output_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv"
     _write_distribution(distribution_path, rows)
     _validate_rows(conn, rows)
+
+    weighted_path = (
+        output_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.confidence_weighted.csv"
+    )
+    _write_distribution(weighted_path, weighted_rows)
+    _validate_rows(conn, weighted_rows)
 
     report_path = output_dir / "tier_slot_distribution_report.md"
     report_path.write_text(
         _format_report(
             rows=rows,
             hard_label_rows=hard_label_rows,
+            weighted_rows=weighted_rows,
             fillers=fillers,
             source_labels=source_labels,
+            source_fallbacks=source_fallbacks,
+            evidence_source_ids=evidence_source_ids,
+            reliability_weights=reliability_weights,
             residual_priors=residual_priors,
             alpha=alpha,
             inferred_source_weight=inferred_source_weight,
+            reliability_exponent=reliability_exponent,
+            unlabeled_reliability=unlabeled_reliability,
+            weighted_path=weighted_path,
             artifact_version=artifact_version,
         ),
         encoding="utf-8",
@@ -522,6 +579,57 @@ def _label_residual_priors(labels: list[_SourceLabel] | tuple[_SourceLabel, ...]
     return result
 
 
+def _evidence_source_ids(conn: sqlite3.Connection) -> set[int]:
+    """Subtitle ids that contribute at least one strict filler link (evidence)."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT sfs.subtitle_id
+        FROM slot_filler_sources sfs
+        JOIN slot_fillers sf ON sf.id = sfs.slot_filler_id
+        WHERE sf.mode = 'strict'
+        """
+    ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
+def _source_reliability_weights(
+    source_labels: dict[int, _SourceLabel],
+    evidence_source_ids: set[int],
+    *,
+    exponent: float,
+    unlabeled_reliability: float,
+) -> dict[int, float]:
+    """Map each source subtitle_id to a reliability weight in [0, 1].
+
+    Labeled sources use the (non-circular) LLM confidence as the signal, but the
+    weight is lower-bounded at the unlabeled level so a labeled source is always
+    at least as reliable as an unlabeled one -- and strictly more when confidence
+    is positive, the exponent is finite and non-degenerate, and
+    ``unlabeled_reliability < 1``:
+    ``r = unlabeled_reliability + (1 - unlabeled_reliability) * confidence ** exponent``.
+
+    Unlabeled sources get the flat ``unlabeled_reliability`` constant -- which is
+    therefore also the floor of the labeled range. There is no per-source signal
+    with real spread for unlabeled sources in this corpus (a source emits only a
+    handful of strict fillers, so link counts are nearly constant), and the
+    teacher score-vector is circular, so we do not pretend to discriminate them.
+    Their score-vector entropy/margin is reported as a diagnostic only.
+    """
+    subtitle_ids = set(evidence_source_ids) | set(source_labels)
+    weights: dict[int, float] = {}
+    for subtitle_id in subtitle_ids:
+        label = source_labels.get(subtitle_id)
+        if label and label.tier in TIERS and label.confidence is not None:
+            signal = min(1.0, max(0.0, label.confidence))
+            weights[subtitle_id] = (
+                unlabeled_reliability
+                + (1.0 - unlabeled_reliability) * (signal ** exponent)
+            )
+        else:
+            weights[subtitle_id] = unlabeled_reliability
+    return weights
+
+
 def _build_evidence_cells(
     conn: sqlite3.Connection,
     *,
@@ -532,6 +640,7 @@ def _build_evidence_cells(
     global_fallback: dict[str, float],
     residual_priors: dict[str, dict[str, float]],
     inferred_source_weight: float,
+    reliability_weights: dict[int, float] | None = None,
 ) -> dict[tuple[str, str], _EvidenceCell]:
     cells: dict[tuple[str, str], _EvidenceCell] = defaultdict(_EvidenceCell)
     links = conn.execute(
@@ -549,6 +658,11 @@ def _build_evidence_cells(
         filler_key = filler_id_to_key.get(filler_id)
         if filler_key not in fillers:
             continue
+        reliability = (
+            reliability_weights.get(subtitle_id, 0.0)
+            if reliability_weights is not None
+            else None
+        )
         label = source_labels.get(subtitle_id)
         if label and label.tier in TIERS and label.confidence is not None:
             _add_labeled_source(
@@ -558,6 +672,7 @@ def _build_evidence_cells(
                 label=label,
                 residual_prior=residual_priors[label.tier],
                 inferred_source_weight=inferred_source_weight,
+                reliability=reliability,
             )
         else:
             vector = source_fallbacks.get(subtitle_id, global_fallback)
@@ -567,6 +682,7 @@ def _build_evidence_cells(
                 subtitle_id=subtitle_id,
                 vector=vector,
                 weight=inferred_source_weight,
+                reliability=reliability,
             )
     return cells
 
@@ -579,15 +695,27 @@ def _add_labeled_source(
     label: _SourceLabel,
     residual_prior: dict[str, float],
     inferred_source_weight: float,
+    reliability: float | None = None,
 ) -> None:
     assert label.tier is not None and label.confidence is not None
     confidence = label.confidence
+    # Anchoring (shape) keeps per-source total mass at 1.0; reliability (magnitude)
+    # scales that total. When reliability is applied the residual is NOT re-scaled
+    # by inferred_source_weight, so reliability is the only magnitude axis.
+    if reliability is None:
+        anchored_mass = confidence
+        residual = max(0.0, 1.0 - confidence) * inferred_source_weight
+    else:
+        anchored_mass = confidence * reliability
+        residual = max(0.0, 1.0 - confidence) * reliability
     anchored = cells[(filler_id, label.tier)]
-    anchored.anchored_soft_count += confidence
+    anchored.anchored_soft_count += anchored_mass
     anchored.anchored_sources.add(subtitle_id)
     anchored.confidence_sum += confidence
     anchored.confidence_count += 1
-    residual = max(0.0, 1.0 - confidence) * inferred_source_weight
+    if reliability is not None:
+        anchored.reliability_sum += reliability
+        anchored.reliability_count += 1
     for tier, share in residual_prior.items():
         if residual <= 0:
             continue
@@ -596,6 +724,9 @@ def _add_labeled_source(
         cell.inferred_sources.add(subtitle_id)
         cell.confidence_sum += confidence
         cell.confidence_count += 1
+        if reliability is not None:
+            cell.reliability_sum += reliability
+            cell.reliability_count += 1
 
 
 def _add_inferred_source(
@@ -605,16 +736,21 @@ def _add_inferred_source(
     subtitle_id: int,
     vector: dict[str, float],
     weight: float,
+    reliability: float | None = None,
 ) -> None:
-    if weight <= 0:
+    effective = weight if reliability is None else reliability
+    if effective <= 0:
         return
     for tier in TIERS:
-        mass = vector[tier] * weight
+        mass = vector[tier] * effective
         if mass <= 0:
             continue
         cell = cells[(filler_id, tier)]
         cell.inferred_soft_count += mass
         cell.inferred_sources.add(subtitle_id)
+        if reliability is not None:
+            cell.reliability_sum += reliability
+            cell.reliability_count += 1
 
 
 def _distribution_rows(
@@ -646,6 +782,7 @@ def _distribution_rows(
                 "anchored_soft_count": cell.anchored_soft_count,
                 "inferred_soft_count": cell.inferred_soft_count,
                 "teacher_confidence_mean": cell.teacher_confidence_mean,
+                "reliability_mean": cell.reliability_mean,
                 "frequency": filler.frequency,
                 "popularity_score": filler.popularity_score,
                 "semantic_smoothing_mass": 0.0,
@@ -741,11 +878,18 @@ def _format_report(
     *,
     rows: list[dict[str, object]],
     hard_label_rows: list[dict[str, object]],
+    weighted_rows: list[dict[str, object]],
     fillers: dict[str, _Filler],
     source_labels: dict[int, _SourceLabel],
+    source_fallbacks: dict[int, dict[str, float]],
+    evidence_source_ids: set[int],
+    reliability_weights: dict[int, float],
     residual_priors: dict[str, dict[str, float]],
     alpha: float,
     inferred_source_weight: float,
+    reliability_exponent: float,
+    unlabeled_reliability: float,
+    weighted_path: Path,
     artifact_version: str,
 ) -> str:
     label_counts = Counter(
@@ -757,7 +901,17 @@ def _format_report(
     top_rows = _top_rows(rows)
     current_comparison = _current_rollup_comparison(rows, fillers)
     confidence_summary = _confidence_summary(source_labels)
-    hard_label_comparison = _distribution_comparison(rows, hard_label_rows)
+    hard_label_comparison = _distribution_comparison(
+        rows, hard_label_rows, left_label="confidence", right_label="hard"
+    )
+    reliability_comparison = _distribution_comparison(
+        weighted_rows, rows, left_label="weighted", right_label="anchored"
+    )
+    teacher_diagnostics = _teacher_vector_diagnostics(
+        source_labels, source_fallbacks, evidence_source_ids, reliability_weights
+    )
+    reliability_movers = _reliability_movers(rows, weighted_rows)
+    collapse_flags = _collapse_guardrail(rows, weighted_rows)
     lines = [
         "# Tier-slot distribution report",
         "",
@@ -771,6 +925,8 @@ def _format_report(
         f"| artifact_version | `{artifact_version}` |",
         f"| alpha | {alpha:.6g} |",
         f"| inferred_source_weight | {inferred_source_weight:.6g} |",
+        f"| reliability_exponent (report-only) | {reliability_exponent:.6g} |",
+        f"| unlabeled_reliability (report-only) | {unlabeled_reliability:.6g} |",
         "",
         "## Source label coverage",
         "",
@@ -784,8 +940,9 @@ def _format_report(
         "## Label confidence diagnostics",
         "",
         "`llm_market_tier_confidence` is used as anchored probability mass for "
-        "the labeled tier. This is separate from source reliability weighting, "
-        "which is not applied yet.",
+        "the labeled tier (the shape axis). Source reliability weighting (the "
+        "magnitude axis) is computed separately and reported below; it is "
+        "written to a sidecar CSV and does not change the served artifact.",
         "",
         "| Label | Count | Mean | Min | P10 | Median | P90 | Max | <0.70 | 0.70-0.85 | 0.85-0.95 | >=0.95 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -863,6 +1020,138 @@ def _format_report(
             f"{row['left_increases']} | {row['right_increases']} |"
         )
     lines.extend([
+        "",
+        "## Source reliability weighting (report-only)",
+        "",
+        "Reliability scales each source's total contributed mass (the magnitude "
+        "axis), while confidence anchoring keeps controlling per-source shape.",
+        "",
+        "- Labeled sources use a confidence-driven weight "
+        "`r = unlabeled_reliability + (1 - unlabeled_reliability) * confidence ** exponent` "
+        "(`signal = llm_market_tier_confidence`, non-circular). The "
+        "`unlabeled_reliability` lower bound guarantees a labeled source is "
+        "always at least as reliable as an unlabeled one.",
+        "- Unlabeled sources get a flat `unlabeled_reliability` constant. There "
+        "is no per-source signal with real spread for them in this corpus (a "
+        "source emits only a handful of strict fillers, so link counts are "
+        "nearly constant), and the teacher score-vector is circular, so we do "
+        "not pretend to discriminate them.",
+        "",
+        "For labeled sources the weighted decomposition keeps reliability as the "
+        "sole magnitude axis: total mass is `r`, the anchored tier gets "
+        "`confidence * r`, and the residual `(1 - confidence) * r` is split "
+        "across other tiers by the label-marginal prior (the residual is NOT "
+        "re-scaled by `inferred_source_weight`). Unlabeled sources contribute "
+        "`teacher_vector * r`.",
+        "",
+        "| Source group | Sources | Mean r | Min r | P10 r | Median r | P90 r | Max r |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for row in teacher_diagnostics["reliability"]:
+        lines.append(
+            f"| {row['group']} | {row['count']:,} | {row['mean']:.3f} | "
+            f"{row['min']:.3f} | {row['p10']:.3f} | {row['median']:.3f} | "
+            f"{row['p90']:.3f} | {row['max']:.3f} |"
+        )
+    lines.extend([
+        "",
+        "## Teacher-output confidence diagnostics (circular; diagnostic only)",
+        "",
+        "These summarize the teacher score-vector for unlabeled sources "
+        "(`slot_filler_model_scores`). Vector entropy/margin are derived from the "
+        "same labeling signal, so they are reported as diagnostics only and are "
+        "NOT used to set reliability.",
+        "",
+        f"- Unlabeled sources with a teacher vector: "
+        f"{teacher_diagnostics['vector_coverage']:,} of "
+        f"{teacher_diagnostics['unlabeled_total']:,}.",
+        "",
+        "| Metric | Count | Mean | Min | P10 | Median | P90 | Max |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for row in teacher_diagnostics["vector"]:
+        lines.append(
+            f"| {row['metric']} | {row['count']:,} | {row['mean']:.3f} | "
+            f"{row['min']:.3f} | {row['p10']:.3f} | {row['median']:.3f} | "
+            f"{row['p90']:.3f} | {row['max']:.3f} |"
+        )
+    lines.extend([
+        "",
+        "## Three-way distribution comparison",
+        "",
+        "Named variants: **hard-label anchoring** (confidence=1, reliability=1), "
+        "**anchored-only** (the served artifact), and **confidence-weighted** "
+        "(anchored shape scaled by source reliability). The hard-vs-anchored "
+        "table above isolates the *anchoring effect*; the table below isolates "
+        "the *reliability effect* (confidence-weighted vs anchored-only).",
+        "",
+        "| Slot type | Tier | JS divergence | Top-20 overlap | Largest reliability-driven increases | Largest reliability-driven decreases |",
+        "|---|---:|---:|---:|---|---|",
+    ])
+    for row in reliability_comparison:
+        lines.append(
+            f"| {row['slot_type']} | {row['tier']} | "
+            f"{row['js_divergence']:.6f} | {row['top20_overlap']}/20 | "
+            f"{row['left_increases']} | {row['right_increases']} |"
+        )
+    lines.extend([
+        "",
+        "## Reliability movers (weighted vs anchored)",
+        "",
+        "Largest probability shifts from applying source reliability, with the "
+        "supporting evidence (anchored vs weighted soft count, weighted source "
+        "count, and mean reliability across the contributing evidence events for "
+        "the cell). The reliability mean is a per-contribution diagnostic, not a "
+        "unique-source average.",
+        "",
+        "| Slot type | Tier | Filler | Anchored p | Weighted p | Delta | Anchored soft | Weighted soft | Weighted sources | Mean reliability |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|",
+    ])
+    for row in reliability_movers:
+        reliability_mean = (
+            f"{row['reliability_mean']:.3f}"
+            if row["reliability_mean"] is not None
+            else "-"
+        )
+        lines.append(
+            f"| {row['slot_type']} | {row['tier']} | "
+            f"{row['display_filler']} [{row['filler']}] | "
+            f"{row['anchored_probability']:.5f} | {row['weighted_probability']:.5f} | "
+            f"{row['delta']:+.5f} | {row['anchored_soft']:.3f} | "
+            f"{row['weighted_soft']:.3f} | {row['weighted_source_count']:,} | "
+            f"{reliability_mean} |"
+        )
+    lines.extend([
+        "",
+        "## Pop/mainstream collapse guardrail",
+        "",
+        "Flags (tier, slot) groups where reliability weighting shrinks effective "
+        "N by more than 20% relative to the anchored-only distribution. This is "
+        "an early-warning check that reliability weighting is not collapsing the "
+        "popular/mainstream tails. It detects head-concentration collapse; the "
+        "opposite failure (evidence washing out toward the uniform prior) shows "
+        "up instead as high JS divergence in the reliability-effect comparison "
+        "above. Niche is intentionally excluded from this tail check.",
+        "",
+    ])
+    if collapse_flags:
+        lines.extend([
+            "| Slot type | Tier | Anchored effective N | Weighted effective N | Drop |",
+            "|---|---|---:|---:|---:|",
+        ])
+        for row in collapse_flags:
+            lines.append(
+                f"| {row['slot_type']} | {row['tier']} | "
+                f"{row['anchored_effective_n']:.1f} | "
+                f"{row['weighted_effective_n']:.1f} | "
+                f"{row['drop']:.1%} |"
+            )
+    else:
+        lines.append("No (tier, slot) group exceeded the 20% effective-N drop threshold.")
+    lines.extend([
+        "",
+        f"Confidence-weighted sidecar artifact: `{weighted_path.name}` "
+        "(analysis-only; not served).",
         "",
         "## Current rollup comparison",
         "",
@@ -993,9 +1282,176 @@ def _quantile(values: list[float], q: float) -> float:
     return values[lower] * (1 - weight) + values[upper] * weight
 
 
+def _vector_entropy(vector: dict[str, float]) -> float:
+    total = sum(max(0.0, vector[tier]) for tier in TIERS)
+    if total <= 0:
+        return 0.0
+    entropy = 0.0
+    for tier in TIERS:
+        share = max(0.0, vector[tier]) / total
+        if share > 0:
+            entropy -= share * math.log(share)
+    return entropy
+
+
+def _vector_margin(vector: dict[str, float]) -> float:
+    ordered = sorted((max(0.0, vector[tier]) for tier in TIERS), reverse=True)
+    total = sum(ordered)
+    if total <= 0:
+        return 0.0
+    return (ordered[0] - ordered[1]) / total
+
+
+def _summary_row(label: str, key: str, values: list[float]) -> dict[str, object]:
+    values = sorted(values)
+    return {
+        key: label,
+        "count": len(values),
+        "mean": sum(values) / len(values),
+        "min": values[0],
+        "p10": _quantile(values, 0.10),
+        "median": _quantile(values, 0.50),
+        "p90": _quantile(values, 0.90),
+        "max": values[-1],
+    }
+
+
+def _teacher_vector_diagnostics(
+    source_labels: dict[int, _SourceLabel],
+    source_fallbacks: dict[int, dict[str, float]],
+    evidence_source_ids: set[int],
+    reliability_weights: dict[int, float],
+) -> dict[str, object]:
+    labeled_ids = {
+        subtitle_id
+        for subtitle_id, label in source_labels.items()
+        if label.tier in TIERS and label.confidence is not None
+    }
+    # Diagnostics describe reliability for sources that actually contribute
+    # evidence (strict links). Labels with no strict link never reach the
+    # sidecar, so excluding them keeps the reported means/counts honest.
+    evidence_ids = set(evidence_source_ids)
+    unlabeled_ids = [
+        subtitle_id for subtitle_id in evidence_ids if subtitle_id not in labeled_ids
+    ]
+    labeled_evidence_ids = [
+        subtitle_id for subtitle_id in evidence_ids if subtitle_id in labeled_ids
+    ]
+
+    reliability_rows: list[dict[str, object]] = []
+    labeled_weights = [
+        reliability_weights[s] for s in labeled_evidence_ids if s in reliability_weights
+    ]
+    if labeled_weights:
+        reliability_rows.append(_summary_row("labeled (confidence)", "group", labeled_weights))
+    unlabeled_weights = [
+        reliability_weights[s] for s in unlabeled_ids if s in reliability_weights
+    ]
+    if unlabeled_weights:
+        reliability_rows.append(_summary_row("unlabeled (flat)", "group", unlabeled_weights))
+
+    entropies: list[float] = []
+    margins: list[float] = []
+    for subtitle_id in unlabeled_ids:
+        vector = source_fallbacks.get(subtitle_id)
+        if vector is None:
+            continue
+        entropies.append(_vector_entropy(vector))
+        margins.append(_vector_margin(vector))
+    vector_rows: list[dict[str, object]] = []
+    if entropies:
+        vector_rows.append(_summary_row("teacher vector entropy", "metric", entropies))
+    if margins:
+        vector_rows.append(_summary_row("teacher vector margin", "metric", margins))
+
+    return {
+        "reliability": reliability_rows,
+        "vector": vector_rows,
+        "vector_coverage": len(entropies),
+        "unlabeled_total": len(unlabeled_ids),
+    }
+
+
+def _reliability_movers(
+    anchored_rows: list[dict[str, object]],
+    weighted_rows: list[dict[str, object]],
+    *,
+    limit: int = 20,
+) -> list[dict[str, object]]:
+    anchored_lookup = {
+        (row["slot_type"], row["tier"], row["filler"]): row for row in anchored_rows
+    }
+    movers: list[dict[str, object]] = []
+    for weighted in weighted_rows:
+        key = (weighted["slot_type"], weighted["tier"], weighted["filler"])
+        anchored = anchored_lookup.get(key)
+        if anchored is None:
+            continue
+        anchored_soft = float(anchored["soft_count"])
+        weighted_soft = float(weighted["soft_count"])
+        if anchored_soft <= 0 and weighted_soft <= 0:
+            continue
+        delta = float(weighted["probability"]) - float(anchored["probability"])
+        movers.append({
+            "slot_type": str(weighted["slot_type"]),
+            "tier": str(weighted["tier"]),
+            "filler": str(weighted["filler"]),
+            "display_filler": str(weighted["display_filler"]),
+            "anchored_probability": float(anchored["probability"]),
+            "weighted_probability": float(weighted["probability"]),
+            "delta": delta,
+            "anchored_soft": anchored_soft,
+            "weighted_soft": weighted_soft,
+            "weighted_source_count": int(weighted["source_count"]),
+            "reliability_mean": weighted["reliability_mean"],
+        })
+    movers.sort(key=lambda item: (-abs(item["delta"]), item["filler"].lower()))
+    return movers[:limit]
+
+
+def _collapse_guardrail(
+    anchored_rows: list[dict[str, object]],
+    weighted_rows: list[dict[str, object]],
+    *,
+    threshold: float = 0.20,
+    tiers: tuple[str, ...] = ("pop", "mainstream"),
+) -> list[dict[str, object]]:
+    anchored = {
+        (row["slot_type"], row["tier"]): row for row in _group_summary(anchored_rows)
+    }
+    weighted = {
+        (row["slot_type"], row["tier"]): row for row in _group_summary(weighted_rows)
+    }
+    flags: list[dict[str, object]] = []
+    for key, anchored_summary in anchored.items():
+        if key[1] not in tiers:
+            continue
+        weighted_summary = weighted.get(key)
+        if weighted_summary is None:
+            continue
+        anchored_eff = float(anchored_summary["effective_n"])
+        weighted_eff = float(weighted_summary["effective_n"])
+        if anchored_eff <= 0:
+            continue
+        drop = (anchored_eff - weighted_eff) / anchored_eff
+        if drop > threshold:
+            flags.append({
+                "slot_type": key[0],
+                "tier": key[1],
+                "anchored_effective_n": anchored_eff,
+                "weighted_effective_n": weighted_eff,
+                "drop": drop,
+            })
+    flags.sort(key=lambda item: -item["drop"])
+    return flags
+
+
 def _distribution_comparison(
     left_rows: list[dict[str, object]],
     right_rows: list[dict[str, object]],
+    *,
+    left_label: str = "confidence",
+    right_label: str = "hard",
 ) -> list[dict[str, object]]:
     right_lookup = {
         (row["slot_type"], row["tier"], row["filler"]): row
@@ -1045,13 +1501,13 @@ def _distribution_comparison(
             "top20_overlap": len(left_top & right_top),
             "left_increases": _format_confidence_delta_examples(
                 sorted(deltas, key=lambda item: (-item["delta"], item["filler"].lower()))[:5],
-                left_label="confidence",
-                right_label="hard",
+                left_label=left_label,
+                right_label=right_label,
             ),
             "right_increases": _format_confidence_delta_examples(
                 sorted(deltas, key=lambda item: (item["delta"], item["filler"].lower()))[:5],
-                left_label="confidence",
-                right_label="hard",
+                left_label=left_label,
+                right_label=right_label,
             ),
         })
     return comparison

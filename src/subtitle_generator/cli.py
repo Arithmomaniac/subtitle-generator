@@ -1400,6 +1400,20 @@ def build_book_features_cmd(
     help="Weight for inferred residual and unlabeled-source evidence.",
 )
 @click.option(
+    "--reliability-exponent",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=1.0,
+    show_default=True,
+    help="Report-only: exponent on the labeled confidence signal (sidecar analysis).",
+)
+@click.option(
+    "--unlabeled-reliability",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=0.70,
+    show_default=True,
+    help="Report-only: flat reliability weight for unlabeled sources (sidecar analysis).",
+)
+@click.option(
     "--artifact-version",
     default="tier_slot_filler_distribution_v1",
     show_default=True,
@@ -1410,6 +1424,8 @@ def build_tier_slot_distribution_cmd(
     output_dir: Path,
     alpha: float,
     inferred_source_weight: float,
+    reliability_exponent: float,
+    unlabeled_reliability: float,
     artifact_version: str,
 ):
     """Build the first tier-conditioned filler distribution artifact."""
@@ -1426,6 +1442,8 @@ def build_tier_slot_distribution_cmd(
             output_dir,
             alpha=alpha,
             inferred_source_weight=inferred_source_weight,
+            reliability_exponent=reliability_exponent,
+            unlabeled_reliability=unlabeled_reliability,
             artifact_version=artifact_version,
         )
     except RuntimeError as exc:
