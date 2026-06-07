@@ -383,6 +383,48 @@ def test_build_smoothing_review_feed_rejects_unknown_and_none_variant(tmp_path: 
         )
 
 
+def test_min_candidate_sources_floor_suppresses_low_source_borrowing():
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        _apply_smoothing,
+        _filler_key,
+    )
+
+    rows = [
+        {
+            "slot_type": "action_noun", "tier": "mainstream", "filler": "rise",
+            "display_filler": "Rise", "probability": 0.1, "log_probability": 0.0,
+            "soft_count": 0.02, "source_count": 1, "anchored_soft_count": 0.0,
+        },
+        {
+            "slot_type": "action_noun", "tier": "mainstream", "filler": "making",
+            "display_filler": "Making", "probability": 0.9, "log_probability": 0.0,
+            "soft_count": 50.0, "source_count": 40, "anchored_soft_count": 5.0,
+        },
+    ]
+    vectors = {
+        _filler_key("action_noun", "rise"): [1.0, 0.0],
+        _filler_key("action_noun", "making"): [0.95, 0.05],
+    }
+
+    def run(min_src):
+        return _apply_smoothing(
+            [dict(r) for r in rows], {}, vectors,
+            SmoothingExperimentConfig(
+                "t", "generic_embedding_kNN", neighbor_count=1, shrinkage=10.0,
+                evidence_gate="none", max_borrowed_mass=0.5,
+                min_candidate_sources=min_src,
+            ),
+        )
+
+    # Without a floor the low-source "rise" (src=1) borrows and moves.
+    no_floor = {r["filler"]: r["semantic_smoothing_mass"] for r in run(0)}
+    assert no_floor["rise"] > 0
+    # With a floor of 2, "rise" (src=1) is left at baseline (no borrowing).
+    floored = {r["filler"]: r["semantic_smoothing_mass"] for r in run(2)}
+    assert floored["rise"] == 0.0
+
+
 def test_source_reliability_weights_signal():
     from subtitle_generator.tier_slot_distribution import (
         _SourceLabel,

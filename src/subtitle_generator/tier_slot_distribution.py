@@ -89,6 +89,7 @@ class SmoothingExperimentConfig:
     evidence_gate: str = "none"
     max_borrowed_mass: float = 0.10
     vector_transform: str = "raw"
+    min_candidate_sources: int = 0
 
 
 @dataclass(frozen=True)
@@ -845,6 +846,12 @@ def default_smoothing_experiments() -> tuple[SmoothingExperimentConfig, ...]:
         SmoothingExperimentConfig("slot_centered_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "slot_center"),
         SmoothingExperimentConfig("pc1_removed_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "remove_pc1"),
         SmoothingExperimentConfig("pc3_removed_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "remove_pc3"),
+        # Round-4 hypothesis from human ratings: bleed concentrates in low-evidence
+        # fillers (src=1 ~36% bleed vs src>=3 ~7%), especially compounds in
+        # mainstream. Stack the best transform (PC1-removal) with a candidate-side
+        # evidence floor so barely-attested fillers are left at baseline instead of
+        # borrowing (and bleeding).
+        SmoothingExperimentConfig("pc1_removed_minsrc2_knn10_m0_5_cap0_10", "generic_embedding_kNN", 10, 0.5, "none", 0.10, "remove_pc1", min_candidate_sources=2),
     )
 
 
@@ -2337,6 +2344,16 @@ def _apply_smoothing(
                     _filler_key(slot_type, filler) not in vectors
                     and config.variant != "uniform_prior"
                 )
+            ):
+                borrow_fraction = 0.0
+            # Candidate-evidence floor: human ratings showed bleed concentrates in
+            # very-low-source fillers (src=1 -> ~36% bleed vs src>=3 -> ~7%). Such
+            # fillers are barely attested, so smoothing them on embedding neighbours
+            # is the riskiest case. When set, do not let a filler below the source
+            # floor borrow at all -- it stays at its (safe) baseline.
+            if (
+                config.min_candidate_sources > 0
+                and int(row.get("source_count", 0) or 0) < config.min_candidate_sources
             ):
                 borrow_fraction = 0.0
             new_probability = (
