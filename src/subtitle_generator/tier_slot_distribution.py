@@ -24,6 +24,7 @@ from subtitle_generator.slots import (
     _is_valid_object,
     _load_nlp,
 )
+from subtitle_generator.smoothing_feedback import summarize_smoothing_ratings
 
 TIERS = TIER_SLOT_FILLER_DISTRIBUTION_TIERS
 DISTRIBUTION_COLUMNS = (
@@ -408,7 +409,10 @@ def run_semantic_smoothing_autoresearcher(
     )
     metrics = _read_smoothing_metrics(ablation_result.metrics_path)
     findings = _autoresearcher_findings(metrics)
-    proposals = _next_smoothing_proposals(metrics, findings)
+    # Human ratings live in the same DB; they are the AutoResearcher's objective
+    # where present. summarize is read-only safe (empty when no ratings yet).
+    ratings_summary = summarize_smoothing_ratings(conn)
+    proposals = _next_smoothing_proposals(metrics, findings, ratings_summary)
 
     proposals_path = output_dir / "semantic_smoothing_autoresearcher_proposals.csv"
     _write_autoresearcher_proposals(proposals_path, proposals)
@@ -419,6 +423,7 @@ def run_semantic_smoothing_autoresearcher(
             metrics=metrics,
             findings=findings,
             proposals=proposals,
+            ratings_summary=ratings_summary,
         ),
         encoding="utf-8",
     )
@@ -2587,14 +2592,60 @@ def _autoresearcher_findings(metrics: list[dict[str, object]]) -> list[dict[str,
     return findings
 
 
+def _human_review_signals(ratings_summary: dict[str, object] | None) -> dict[str, object]:
+    """Distil human smoothing ratings into AutoResearcher steering signals.
+
+    Human ratings are the objective: ``semantic_bleed`` / ``too_generic`` verdicts
+    point at topical/over-generic borrowing, which the vector-space transforms
+    (centering, top-PC removal) are designed to address. Returns an empty/no-op
+    signal when no ratings exist yet.
+    """
+    if not ratings_summary or int(ratings_summary.get("total", 0)) == 0:
+        return {"has_ratings": False, "bleed": 0, "generic": 0, "repair": 0, "bleed_tiers": []}
+    by_decision = ratings_summary.get("by_decision", {}) or {}
+    bleed = int(by_decision.get("semantic_bleed", 0))
+    generic = int(by_decision.get("too_generic", 0))
+    repair = int(by_decision.get("plausible_repair", 0))
+    bleed_tiers: list[str] = []
+    for key, counts in (ratings_summary.get("by_variant_tier", {}) or {}).items():
+        b = int(counts.get("semantic_bleed", 0))
+        r = int(counts.get("plausible_repair", 0))
+        if b > 0 and b >= r:  # bleed at least as common as repair in this tier
+            tier = key.split("|", 1)[1] if "|" in key else key
+            bleed_tiers.append(tier)
+    return {
+        "has_ratings": True,
+        "bleed": bleed,
+        "generic": generic,
+        "repair": repair,
+        "bleed_tiers": sorted(set(bleed_tiers)),
+    }
+
+
 def _next_smoothing_proposals(
     metrics: list[dict[str, object]],
     findings: list[dict[str, object]],
+    ratings_summary: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     experiments_seen = {str(row["experiment"]) for row in metrics}
     has_top20_instability = any(finding["kind"] == "semantic_bleed_risk" for finding in findings)
     has_gate_under_smoothing = any(finding["kind"] == "gate_under_smoothing" for finding in findings)
     has_large_movement = any(finding["kind"] == "large_mass_movement" for finding in findings)
+
+    signals = _human_review_signals(ratings_summary)
+    human_bleed = bool(signals["has_ratings"]) and int(signals["bleed"]) > 0
+    human_generic = bool(signals["has_ratings"]) and int(signals["generic"]) > 0
+    human_vector_space = human_bleed or human_generic
+    if human_vector_space:
+        tiers = ", ".join(signals["bleed_tiers"]) or "mixed"
+        human_clause = (
+            f" Human review flagged {signals['bleed']} bleed / "
+            f"{signals['generic']} too-generic candidates (weakest tiers: {tiers}); "
+            "vector-space centering/PC-removal directly targets topical bleed, so "
+            "this is prioritized as the human-rated objective."
+        )
+    else:
+        human_clause = ""
 
     proposals = [
         {
@@ -2647,7 +2698,10 @@ def _next_smoothing_proposals(
         {
             "proposal_id": "slot-centered-vectors",
             "category": "hypothesis_driven",
-            "status": "design_review_needed" if has_top20_instability else "defer",
+            "status": (
+                "prioritized_by_human_review" if human_vector_space
+                else "design_review_needed" if has_top20_instability else "defer"
+            ),
             "variant": "centered_embedding_kNN",
             "neighbor_count": 10,
             "shrinkage": 0.5,
@@ -2656,12 +2710,17 @@ def _next_smoothing_proposals(
             "rationale": (
                 "Qualitative failures may indicate generic vectors are too topical; "
                 "subtract per-slot centroids before cosine as a local subspace test."
+                + human_clause
             ),
         },
         {
             "proposal_id": "top-pc-removal",
             "category": "hypothesis_driven",
-            "status": "design_review_needed" if has_top20_instability or has_large_movement else "defer",
+            "status": (
+                "prioritized_by_human_review" if human_vector_space
+                else "design_review_needed" if has_top20_instability or has_large_movement
+                else "defer"
+            ),
             "variant": "pc_removed_embedding_kNN",
             "neighbor_count": 10,
             "shrinkage": 0.5,
@@ -2670,6 +2729,7 @@ def _next_smoothing_proposals(
             "rationale": (
                 "Only try whitening/top-PC removal after reviewing semantic bleed "
                 "examples; this is a vector-space hypothesis, not a numeric sweep."
+                + human_clause
             ),
         },
     ]
@@ -2700,12 +2760,46 @@ def _write_autoresearcher_proposals(path: Path, proposals: list[dict[str, object
         writer.writerows(proposals)
 
 
+def _human_objective_section(ratings_summary: dict[str, object] | None) -> list[str]:
+    """Report block stating the human ratings as the optimization objective."""
+    signals = _human_review_signals(ratings_summary)
+    if not signals["has_ratings"]:
+        return [
+            "## Human review objective",
+            "",
+            "_No human ratings recorded yet._ Proposals below are heuristic "
+            "(metric-driven). Once a review is saved via the Step 5 review canvas, "
+            "rerun this loop and the human verdicts become the optimization target.",
+            "",
+        ]
+    summary = ratings_summary or {}
+    by_decision = summary.get("by_decision", {}) or {}
+    tiers = ", ".join(signals["bleed_tiers"]) or "none"
+    lines = [
+        "## Human review objective",
+        "",
+        "Human smoothing ratings are the optimization target for this loop "
+        "(persisted in the `smoothing_ratings` table; overall decision in "
+        "`feedback/step05-smoothing/decision.json`).",
+        "",
+        f"- Total candidates rated: {summary.get('total', 0)}",
+        f"- Verdicts: {', '.join(f'{k} {v}' for k, v in sorted(by_decision.items())) or 'none'}",
+        f"- Tiers where bleed >= repair: {tiers}",
+        "",
+        "Proposals that address topical bleed (vector-space centering / top-PC "
+        "removal) are prioritized accordingly below.",
+        "",
+    ]
+    return lines
+
+
 def _format_autoresearcher_report(
     *,
     ablation_result: SemanticSmoothingAblationResult,
     metrics: list[dict[str, object]],
     findings: list[dict[str, object]],
     proposals: list[dict[str, object]],
+    ratings_summary: dict[str, object] | None = None,
 ) -> str:
     lines = [
         "# Semantic smoothing AutoResearcher packet",
@@ -2715,6 +2809,9 @@ def _format_autoresearcher_report(
         "proposals. It does **not** call an external LLM, does **not** choose serving "
         "defaults, and does **not** change runtime behavior.",
         "",
+    ]
+    lines.extend(_human_objective_section(ratings_summary))
+    lines.extend([
         "## Inputs",
         "",
         f"- Ablation report: `{ablation_result.report_path}`",
@@ -2733,7 +2830,7 @@ def _format_autoresearcher_report(
         "",
         "## Findings",
         "",
-    ]
+    ])
     if findings:
         for finding in findings:
             lines.append(

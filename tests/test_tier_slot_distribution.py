@@ -199,6 +199,47 @@ def test_run_semantic_smoothing_autoresearcher_writes_proposals(tmp_path: Path):
     assert "does **not** call an external LLM" in report
     assert "weighted-similarity-knn" in proposals
     assert result.ablation_result.experiment_count == 2
+    # No ratings in this in-memory DB -> heuristic objective section.
+    assert "No human ratings recorded yet" in report
+
+
+def test_autoresearcher_prioritizes_proposals_from_human_ratings(tmp_path: Path):
+    from subtitle_generator.smoothing_feedback import store_smoothing_rating
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        run_semantic_smoothing_autoresearcher,
+    )
+
+    conn = _create_distribution_db()
+    _seed_smoothing_vectors(conn)
+    # Record human ratings flagging semantic bleed + too-generic borrowing.
+    for filler, decision in [
+        ("race", "semantic_bleed"),
+        ("power", "semantic_bleed"),
+        ("rise", "too_generic"),
+    ]:
+        store_smoothing_rating(
+            conn, run_id="r1", variant="knn", vector_source="db",
+            slot_type="list_item", tier="mainstream", filler=filler, decision=decision,
+        )
+
+    result = run_semantic_smoothing_autoresearcher(
+        conn,
+        tmp_path,
+        vector_source="db",
+        configs=(
+            SmoothingExperimentConfig("none", "none", 0, 0.0, "none", 0.0),
+            SmoothingExperimentConfig("knn", "generic_embedding_kNN", 1, 0.5, "none", 0.10),
+        ),
+    )
+    report = result.report_path.read_text(encoding="utf-8")
+    proposals = result.proposals_path.read_text(encoding="utf-8")
+
+    # Human ratings become the stated objective and steer the vector-space work.
+    assert "Human review objective" in report
+    assert "optimization target" in report
+    assert "prioritized_by_human_review" in proposals
+    assert "slot-centered-vectors" in proposals
 
 
 def test_semantic_smoothing_does_not_boost_invalid_slot_fillers():
