@@ -131,3 +131,59 @@ def test_decision_record_roundtrip(tmp_path):
 def test_validate_decision_record_missing_field():
     with pytest.raises(ValueError):
         validate_decision_record({"schema_version": 1, "decision": "accept"})
+
+
+def test_ingest_submission_stores_ratings_and_writes_decision(tmp_path):
+    from subtitle_generator.smoothing_feedback import ingest_submission
+
+    conn = _conn()
+    submission = {
+        "run_id": "run-abc",
+        "variant": "knn10_m0_5_cap0_10",
+        "vector_source": "offline_spacy",
+        "reviewer": "avi",
+        "ratings": [
+            {
+                "slot_type": "action_noun", "tier": "mainstream", "filler": "saving",
+                "base_p": 0.0002, "smoothed_p": 0.0012, "delta": 0.001,
+                "evidence": {"soft": 0.02, "src": 1, "anchored": 0.0},
+                "decision": "plausible_repair", "notes": "reads fine",
+            },
+            {
+                "slot_type": "action_noun", "tier": "mainstream", "filler": "currency",
+                "base_p": 0.0003, "smoothed_p": 0.0009, "delta": 0.0006,
+                "evidence": {"soft": 0.2, "src": 1, "anchored": 0.0},
+                "decision": "semantic_bleed",
+            },
+        ],
+        "overall": {"decision": "iterate", "summary": "Promising but bleed in niche."},
+    }
+    decision_path = tmp_path / "feedback" / "step05-smoothing" / "decision.json"
+    status = ingest_submission(conn, submission, decision_path=decision_path)
+
+    assert status["stored_ratings"] == 2
+    assert status["decision"] == "iterate"
+    assert decision_path.exists()
+
+    summary = summarize_smoothing_ratings(conn, run_id="run-abc")
+    assert summary["total"] == 2
+    assert summary["by_decision"] == {"plausible_repair": 1, "semantic_bleed": 1}
+
+    loaded = read_decision_record(decision_path)
+    assert loaded["run_id"] == "run-abc"
+    assert loaded["ratings_summary"]["total"] == 2
+
+
+def test_ingest_submission_rejects_bad_overall_decision(tmp_path):
+    from subtitle_generator.smoothing_feedback import ingest_submission
+
+    conn = _conn()
+    submission = {
+        "run_id": "r", "variant": "v", "vector_source": "v",
+        "ratings": [],
+        "overall": {"decision": "approve", "summary": "x"},
+    }
+    with pytest.raises(ValueError):
+        ingest_submission(
+            conn, submission, decision_path=tmp_path / "decision.json"
+        )

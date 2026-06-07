@@ -234,3 +234,85 @@ def validate_decision_record(record: dict[str, Any]) -> None:
         )
     if not str(record["summary"]).strip():
         raise ValueError("summary must be non-empty")
+
+
+# ---------------------------------------------------------------------------
+# Ingest a canvas submission (per-candidate ratings + overall decision)
+# ---------------------------------------------------------------------------
+
+def ingest_submission(
+    conn: sqlite3.Connection,
+    submission: dict[str, Any],
+    *,
+    decision_path: Path,
+) -> dict[str, Any]:
+    """Persist a review submission: ratings -> DB, overall decision -> JSON.
+
+    ``submission`` is the payload the review canvas posts::
+
+        {
+          "run_id": "...", "variant": "...", "vector_source": "...",
+          "reviewer": "avi",
+          "ratings": [
+            {"slot_type","tier","filler","base_p","smoothed_p","delta",
+             "evidence": {"soft","src","anchored"}, "decision","notes"}
+          ],
+          "overall": {"decision": "accept|reject|iterate", "summary": "..."}
+        }
+
+    Returns a small status dict (stored count + decision path).
+    """
+    run_id = str(submission["run_id"])
+    variant = str(submission["variant"])
+    vector_source = str(submission.get("vector_source", "unknown"))
+    reviewer = submission.get("reviewer")
+
+    ensure_smoothing_ratings_table(conn)
+    stored = 0
+    for rating in submission.get("ratings", []):
+        evidence = rating.get("evidence", {}) or {}
+        store_smoothing_rating(
+            conn,
+            run_id=run_id,
+            variant=variant,
+            vector_source=vector_source,
+            slot_type=str(rating["slot_type"]),
+            tier=str(rating["tier"]),
+            filler=str(rating["filler"]),
+            decision=str(rating["decision"]),
+            base_p=_opt_float(rating.get("base_p")),
+            smoothed_p=_opt_float(rating.get("smoothed_p")),
+            delta=_opt_float(rating.get("delta")),
+            evidence_soft=_opt_float(evidence.get("soft")),
+            evidence_src=_opt_int(evidence.get("src")),
+            evidence_anchored=_opt_float(evidence.get("anchored")),
+            notes=rating.get("notes"),
+            reviewer=reviewer,
+        )
+        stored += 1
+
+    overall = submission.get("overall") or {}
+    record = build_decision_record(
+        run_id=run_id,
+        variant=variant,
+        vector_source=vector_source,
+        decision=str(overall["decision"]),
+        summary=str(overall.get("summary", "")),
+        reviewer=reviewer,
+        ratings_summary=summarize_smoothing_ratings(conn, run_id=run_id),
+    )
+    write_decision_record(decision_path, record)
+    return {
+        "stored_ratings": stored,
+        "run_id": run_id,
+        "decision": record["decision"],
+        "decision_path": str(decision_path),
+    }
+
+
+def _opt_float(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _opt_int(value: Any) -> int | None:
+    return None if value is None else int(value)

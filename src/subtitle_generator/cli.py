@@ -1732,6 +1732,54 @@ def summarize_smoothing_ratings_cmd(
     click.echo(payload)
 
 
+@cli.command("ingest-smoothing-ratings")
+@click.option(
+    "--submission",
+    "submission_path",
+    type=click.Path(path_type=Path, exists=True),
+    required=True,
+    help="Review submission JSON written by the review canvas.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to write smoothing_ratings into.",
+)
+@click.option(
+    "--decision-path",
+    type=click.Path(path_type=Path),
+    default=Path("feedback/step05-smoothing/decision.json"),
+    show_default=True,
+    help="Committed decision.json gate-evidence path.",
+)
+def ingest_smoothing_ratings_cmd(
+    submission_path: Path,
+    db_path: Path,
+    decision_path: Path,
+):
+    """Persist a review canvas submission: ratings -> DB, decision -> JSON."""
+
+    import json
+
+    from subtitle_generator.smoothing_feedback import ingest_submission
+
+    submission = json.loads(submission_path.read_text(encoding="utf-8"))
+    conn = sqlite3.connect(db_path)
+    try:
+        status = ingest_submission(conn, submission, decision_path=decision_path)
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(f"Invalid submission: {exc}") from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Stored {status['stored_ratings']:,} ratings (run_id {status['run_id']}, "
+        f"decision {status['decision']}); wrote {status['decision_path']}"
+    )
+
+
 @cli.command("build-book-metadata")
 @click.option(
     "--db",
