@@ -379,9 +379,22 @@ def test_weighted_sidecar_clean_decomposition_values(tmp_path: Path):
     assert abs(float(race_pop["anchored_soft_count"]) - 0.752) < 1e-6
     # Inferred pop from the unlabeled teacher vector = 0.15 * 0.70.
     assert abs(float(race_pop["inferred_soft_count"]) - 0.105) < 1e-6
-    assert abs(float(race_mainstream["inferred_soft_count"]) - (0.25 * 0.70)) < 1e-6
-    # niche = labeled residual (1-0.8)*0.94 routed to niche + 0.6*0.70 unlabeled.
-    assert abs(float(race_niche["inferred_soft_count"]) - (0.188 + 0.42)) < 1e-6
+    # Step 4b: source 101's residual (1-0.8)*0.94 = 0.188 is split by its OWN
+    # teacher vector (0.45/0.30/0.25); dropping the pop anchor leaves
+    # main=0.30/niche=0.25 -> renormalized shares 0.30/0.55 and 0.25/0.55.
+    labeled_residual = (1 - 0.8) * 0.94
+    main_share = 0.30 / 0.55
+    niche_share = 0.25 / 0.55
+    # mainstream = unlabeled 0.25*0.70 + labeled residual redirected to mainstream.
+    assert abs(
+        float(race_mainstream["inferred_soft_count"])
+        - (0.25 * 0.70 + labeled_residual * main_share)
+    ) < 1e-6
+    # niche = unlabeled 0.6*0.70 + labeled residual redirected to niche.
+    assert abs(
+        float(race_niche["inferred_soft_count"])
+        - (0.6 * 0.70 + labeled_residual * niche_share)
+    ) < 1e-6
     # Reliability mean for the pop cell averages the two contributing sources.
     assert abs(float(race_pop["teacher_confidence_mean"]) - 0.8) < 1e-6
 
@@ -622,11 +635,11 @@ def test_confidence_extremes_decomposition(tmp_path: Path):
     assert abs(float(race_pop["anchored_soft_count"]) - 1.0) < 1e-6
 
 
-def test_confidence_zero_routes_all_to_residual(tmp_path: Path):
+def test_confidence_zero_routes_residual_by_teacher_vector(tmp_path: Path):
     from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
 
     # confidence 0.0 -> no anchored mass; the source's full reliability becomes
-    # residual, routed by the label-marginal prior.
+    # residual, split (Step 4b) by the source's own teacher vector.
     conn = _create_distribution_db()
     conn.execute("UPDATE pattern_matches SET llm_market_tier_confidence = 0.0 WHERE subtitle_id = 101")
     conn.commit()
@@ -637,7 +650,122 @@ def test_confidence_zero_routes_all_to_residual(tmp_path: Path):
     # anchored contributor to the race/pop cell (102 is inferred), so it stays 0.
     race_pop = weighted[("list_item", "pop", "race")]
     assert abs(float(race_pop["anchored_soft_count"]) - 0.0) < 1e-6
-    # 101's full reliability 0.70 routes to niche (pop residual prior -> niche),
-    # joined by unlabeled 102's niche mass 0.6 * 0.70 = 0.42.
+    # 101's full reliability 0.70 is the residual, split by its teacher vector
+    # (0.45/0.30/0.25) over the non-pop tiers: main 0.30/0.55, niche 0.25/0.55.
+    main_share = 0.30 / 0.55
+    niche_share = 0.25 / 0.55
+    race_mainstream = weighted[("list_item", "mainstream", "race")]
     race_niche = weighted[("list_item", "niche", "race")]
-    assert abs(float(race_niche["inferred_soft_count"]) - (0.70 + 0.42)) < 1e-6
+    # mainstream = unlabeled 0.25*0.70 + 0.70*main_share.
+    assert abs(
+        float(race_mainstream["inferred_soft_count"]) - (0.25 * 0.70 + 0.70 * main_share)
+    ) < 1e-6
+    # niche = unlabeled 0.6*0.70 + 0.70*niche_share.
+    assert abs(
+        float(race_niche["inferred_soft_count"]) - (0.6 * 0.70 + 0.70 * niche_share)
+    ) < 1e-6
+
+
+def test_labeled_residual_shares_renormalizes_teacher_vector():
+    from subtitle_generator.tier_slot_distribution import _labeled_residual_shares
+
+    corpus_prior = {"mainstream": 0.0, "niche": 1.0}
+    shares = _labeled_residual_shares(
+        "pop", {"pop": 0.45, "mainstream": 0.30, "niche": 0.25}, corpus_prior
+    )
+    assert abs(shares["mainstream"] - 0.30 / 0.55) < 1e-9
+    assert abs(shares["niche"] - 0.25 / 0.55) < 1e-9
+    assert abs(sum(shares.values()) - 1.0) < 1e-9
+
+
+def test_labeled_residual_shares_falls_back_when_all_mass_on_anchor():
+    from subtitle_generator.tier_slot_distribution import _labeled_residual_shares
+
+    corpus_prior = {"mainstream": 0.4, "niche": 0.6}
+    shares = _labeled_residual_shares(
+        "pop", {"pop": 1.0, "mainstream": 0.0, "niche": 0.0}, corpus_prior
+    )
+    assert shares == corpus_prior
+
+
+def test_labeled_residual_shares_falls_back_when_vector_missing():
+    from subtitle_generator.tier_slot_distribution import _labeled_residual_shares
+
+    corpus_prior = {"mainstream": 0.4, "niche": 0.6}
+    assert _labeled_residual_shares("pop", None, corpus_prior) == corpus_prior
+
+
+def test_labeled_residual_shares_falls_back_on_negligible_off_anchor_mass():
+    from subtitle_generator.tier_slot_distribution import _labeled_residual_shares
+
+    corpus_prior = {"mainstream": 0.4, "niche": 0.6}
+    # Off-anchor mass below the noise floor -> corpus prior, not a 100% spike.
+    shares = _labeled_residual_shares(
+        "pop", {"pop": 1.0, "mainstream": 1e-12, "niche": 0.0}, corpus_prior
+    )
+    assert shares == corpus_prior
+
+
+def test_scored_source_ids_excludes_sources_without_real_scores():
+    from subtitle_generator.tier_slot_distribution import _scored_source_ids
+
+    conn = _create_distribution_db()
+    # All three sources start with real scores.
+    assert _scored_source_ids(conn) == {101, 102, 103}
+    # Drop source 101's fillers' score rows (fillers 1 and 3) -> 101 (and 103,
+    # whose only filler is 3) lose real scores; 102 keeps fillers 2 and 4.
+    conn.execute("DELETE FROM slot_filler_model_scores WHERE slot_filler_id IN (1, 3)")
+    conn.commit()
+    assert _scored_source_ids(conn) == {102}
+
+
+def test_missing_scores_residual_falls_back_to_corpus_prior(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    # Source 101 (pop, c=0.8) keeps its label but loses all real model scores, so
+    # its teacher vector is uniform noise. Step 4b must fall back to the corpus
+    # prior (pop -> 100% niche) rather than splitting the residual 50/50.
+    conn = _create_distribution_db()
+    conn.execute("DELETE FROM slot_filler_model_scores WHERE slot_filler_id IN (1, 3)")
+    conn.commit()
+    result = build_tier_slot_distribution(conn, tmp_path, alpha=0.5)
+    weighted = _read_distribution(_sidecar_path(result.distribution_path))
+
+    # 101's residual (1-0.8)*0.94 = 0.188 routes entirely to niche (corpus prior);
+    # mainstream gets only the unlabeled 102 contribution 0.25*0.70.
+    race_mainstream = weighted[("list_item", "mainstream", "race")]
+    race_niche = weighted[("list_item", "niche", "race")]
+    assert abs(float(race_mainstream["inferred_soft_count"]) - (0.25 * 0.70)) < 1e-6
+    assert abs(float(race_niche["inferred_soft_count"]) - (0.6 * 0.70 + 0.188)) < 1e-6
+
+
+def test_served_residual_still_uses_corpus_prior(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    # The served artifact must keep the corpus-prior residual direction (Step 4b
+    # only touches the weighted sidecar). For an anchored-pop source the corpus
+    # prior sends 100% of the residual to niche (the only other labeled source,
+    # 103, is niche), so the served "race" cell has zero mainstream-from-residual.
+    result = build_tier_slot_distribution(_create_distribution_db(), tmp_path, alpha=0.5)
+    served = _read_distribution(result.distribution_path)
+
+    # Source 101 residual (1-0.8) routed entirely to niche under the corpus prior;
+    # source 102 (unlabeled) is the only mainstream contributor to the cell.
+    race_mainstream = served[("list_item", "mainstream", "race")]
+    assert abs(float(race_mainstream["inferred_soft_count"]) - 0.25) < 1e-6
+    # Residual (1-0.8)=0.2 to niche + unlabeled 0.6 = 0.8.
+    race_niche = served[("list_item", "niche", "race")]
+    assert abs(float(race_niche["inferred_soft_count"]) - (0.2 + 0.6)) < 1e-6
+
+
+def test_report_contains_source_aware_residual_section(tmp_path: Path):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    result = build_tier_slot_distribution(_create_distribution_db(), tmp_path, alpha=0.5)
+    report = result.report_path.read_text(encoding="utf-8")
+
+    assert "Source-aware residual direction" in report
+    # Source 101's teacher vector is non-degenerate, so its residual moves off the
+    # corpus prior and at least one mover row (the "race" filler) is listed.
+    assert "Teacher-vector p" in report
+    assert "race" in report.split("Source-aware residual direction")[1]

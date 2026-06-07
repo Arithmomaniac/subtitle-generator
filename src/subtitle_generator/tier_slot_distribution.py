@@ -178,6 +178,7 @@ def build_tier_slot_distribution(
     global_fallback = _global_fallback_vector(fillers.values())
     residual_priors = _label_residual_priors(source_labels.values())
     evidence_source_ids = _evidence_source_ids(conn)
+    scored_source_ids = _scored_source_ids(conn)
     reliability_weights = _source_reliability_weights(
         source_labels,
         evidence_source_ids,
@@ -214,6 +215,23 @@ def build_tier_slot_distribution(
         residual_priors=residual_priors,
         inferred_source_weight=inferred_source_weight,
         reliability_weights=reliability_weights,
+        residual_from_teacher_vector=True,
+        scored_source_ids=scored_source_ids,
+    )
+    # Same reliability magnitudes as ``weighted_cells`` but with the corpus-prior
+    # residual direction -- a report-only baseline to isolate the Step 4b
+    # source-aware residual movement. Not written to disk.
+    weighted_corpus_residual_cells = _build_evidence_cells(
+        conn,
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=source_labels,
+        source_fallbacks=source_fallbacks,
+        global_fallback=global_fallback,
+        residual_priors=residual_priors,
+        inferred_source_weight=inferred_source_weight,
+        reliability_weights=reliability_weights,
+        residual_from_teacher_vector=False,
     )
     rows = _distribution_rows(
         fillers=fillers,
@@ -230,6 +248,12 @@ def build_tier_slot_distribution(
     weighted_rows = _distribution_rows(
         fillers=fillers,
         cells=weighted_cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
+    weighted_corpus_residual_rows = _distribution_rows(
+        fillers=fillers,
+        cells=weighted_corpus_residual_cells,
         alpha=alpha,
         artifact_version=artifact_version,
     )
@@ -250,6 +274,7 @@ def build_tier_slot_distribution(
             rows=rows,
             hard_label_rows=hard_label_rows,
             weighted_rows=weighted_rows,
+            weighted_corpus_residual_rows=weighted_corpus_residual_rows,
             fillers=fillers,
             source_labels=source_labels,
             source_fallbacks=source_fallbacks,
@@ -579,6 +604,53 @@ def _label_residual_priors(labels: list[_SourceLabel] | tuple[_SourceLabel, ...]
     return result
 
 
+def _labeled_residual_shares(
+    anchor: str,
+    teacher_vector: dict[str, float] | None,
+    corpus_prior: dict[str, float],
+) -> dict[str, float]:
+    """Residual split for a labeled source's ``(1 - confidence)`` mass.
+
+    Step 4b (#44): split the residual by the source's *own* teacher score-vector
+    rather than the corpus-wide label-marginal prior. Drop the anchored tier,
+    renormalize over the remaining two tiers, and use those shares. Fall back to
+    ``corpus_prior`` when the teacher vector is missing or degenerate -- either
+    all of its mass sits on the anchor tier, or the off-anchor mass is so small
+    (or non-finite) that the split would be numerical noise rather than signal.
+    """
+    other_tiers = [tier for tier in TIERS if tier != anchor]
+    if teacher_vector is None:
+        return corpus_prior
+    other_mass = sum(max(0.0, teacher_vector.get(tier, 0.0)) for tier in other_tiers)
+    if not math.isfinite(other_mass) or other_mass <= 1e-9:
+        return corpus_prior
+    return {
+        tier: max(0.0, teacher_vector.get(tier, 0.0)) / other_mass
+        for tier in other_tiers
+    }
+
+
+def _scored_source_ids(conn: sqlite3.Connection) -> set[int]:
+    """Sources with at least one strict filler carrying a real model score.
+
+    Used to distinguish a genuine teacher score-vector from the uniform vector
+    that ``_load_source_fallback_vectors`` emits when every contributing filler
+    lacks a (non-zero) ``slot_filler_model_scores`` row. Step 4b treats the
+    latter as a *missing* vector and falls back to the corpus prior.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT sfs.subtitle_id
+        FROM slot_filler_sources sfs
+        JOIN slot_fillers sf ON sf.id = sfs.slot_filler_id
+        JOIN slot_filler_model_scores ms ON ms.slot_filler_id = sf.id
+        WHERE sf.mode = 'strict'
+          AND (ms.score_pop != 0.0 OR ms.score_mainstream != 0.0 OR ms.score_niche != 0.0)
+        """
+    ).fetchall()
+    return {int(row[0]) for row in rows}
+
+
 def _evidence_source_ids(conn: sqlite3.Connection) -> set[int]:
     """Subtitle ids that contribute at least one strict filler link (evidence)."""
     rows = conn.execute(
@@ -641,6 +713,8 @@ def _build_evidence_cells(
     residual_priors: dict[str, dict[str, float]],
     inferred_source_weight: float,
     reliability_weights: dict[int, float] | None = None,
+    residual_from_teacher_vector: bool = False,
+    scored_source_ids: set[int] | None = None,
 ) -> dict[tuple[str, str], _EvidenceCell]:
     cells: dict[tuple[str, str], _EvidenceCell] = defaultdict(_EvidenceCell)
     links = conn.execute(
@@ -665,12 +739,24 @@ def _build_evidence_cells(
         )
         label = source_labels.get(subtitle_id)
         if label and label.tier in TIERS and label.confidence is not None:
+            corpus_prior = residual_priors[label.tier]
+            if residual_from_teacher_vector:
+                teacher_vector = source_fallbacks.get(subtitle_id)
+                if scored_source_ids is not None and subtitle_id not in scored_source_ids:
+                    teacher_vector = None
+                residual_prior = _labeled_residual_shares(
+                    label.tier,
+                    teacher_vector,
+                    corpus_prior,
+                )
+            else:
+                residual_prior = corpus_prior
             _add_labeled_source(
                 cells,
                 filler_id=filler_key,
                 subtitle_id=subtitle_id,
                 label=label,
-                residual_prior=residual_priors[label.tier],
+                residual_prior=residual_prior,
                 inferred_source_weight=inferred_source_weight,
                 reliability=reliability,
             )
@@ -879,6 +965,7 @@ def _format_report(
     rows: list[dict[str, object]],
     hard_label_rows: list[dict[str, object]],
     weighted_rows: list[dict[str, object]],
+    weighted_corpus_residual_rows: list[dict[str, object]],
     fillers: dict[str, _Filler],
     source_labels: dict[int, _SourceLabel],
     source_fallbacks: dict[int, dict[str, float]],
@@ -911,6 +998,7 @@ def _format_report(
         source_labels, source_fallbacks, evidence_source_ids, reliability_weights
     )
     reliability_movers = _reliability_movers(rows, weighted_rows)
+    residual_movers = _reliability_movers(weighted_corpus_residual_rows, weighted_rows)
     collapse_flags = _collapse_guardrail(rows, weighted_rows)
     lines = [
         "# Tier-slot distribution report",
@@ -1040,9 +1128,12 @@ def _format_report(
         "For labeled sources the weighted decomposition keeps reliability as the "
         "sole magnitude axis: total mass is `r`, the anchored tier gets "
         "`confidence * r`, and the residual `(1 - confidence) * r` is split "
-        "across other tiers by the label-marginal prior (the residual is NOT "
-        "re-scaled by `inferred_source_weight`). Unlabeled sources contribute "
-        "`teacher_vector * r`.",
+        "across the other tiers (the residual is NOT re-scaled by "
+        "`inferred_source_weight`). The **served** artifact splits that residual "
+        "by the corpus label-marginal prior; the **confidence-weighted sidecar** "
+        "splits it by each source's own teacher score-vector (Step 4b, #44) and "
+        "falls back to the corpus prior when that vector is degenerate. Unlabeled "
+        "sources contribute `teacher_vector * r`.",
         "",
         "| Source group | Sources | Mean r | Min r | P10 r | Median r | P90 r | Max r |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
@@ -1120,6 +1211,39 @@ def _format_report(
             f"{row['delta']:+.5f} | {row['anchored_soft']:.3f} | "
             f"{row['weighted_soft']:.3f} | {row['weighted_source_count']:,} | "
             f"{reliability_mean} |"
+        )
+    lines.extend([
+        "",
+        "## Source-aware residual direction (Step 4b)",
+        "",
+        "For a labeled source, the served artifact splits its "
+        "`(1 - confidence)` residual across the two non-anchor tiers by a single "
+        "corpus-wide label-marginal prior. The confidence-weighted sidecar "
+        "instead splits that residual by the source's own teacher score-vector "
+        "(drop the anchor tier, renormalize over the other two), falling back to "
+        "the corpus prior when the vector is degenerate. The table below isolates "
+        "fillers whose weighted probability moved purely because of this "
+        "*direction* change: both variants use identical reliability magnitudes, "
+        "so the only difference is where each labeled source's residual landed.",
+        "",
+        "| Slot type | Tier | Filler | Corpus-prior p | Teacher-vector p | Delta |",
+        "|---|---|---|---:|---:|---:|",
+    ])
+    residual_movers_shown = [
+        row for row in residual_movers if abs(float(row["delta"])) > 1e-9
+    ]
+    if residual_movers_shown:
+        for row in residual_movers_shown:
+            lines.append(
+                f"| {row['slot_type']} | {row['tier']} | "
+                f"{row['display_filler']} [{row['filler']}] | "
+                f"{row['anchored_probability']:.5f} | "
+                f"{row['weighted_probability']:.5f} | {row['delta']:+.5f} |"
+            )
+    else:
+        lines.append(
+            "| _(no movement: every labeled residual fell back to the corpus "
+            "prior)_ | | | | | |"
         )
     lines.extend([
         "",
