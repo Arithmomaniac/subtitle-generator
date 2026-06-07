@@ -1,41 +1,38 @@
 {
   "schema_version": 1,
-  "run_id": "119da519600577e4",
-  "variant": "pc1_removed_knn10_m0_5_cap0_10",
+  "run_id": "cd50777784a0b9f8",
+  "variant": "pc1_removed_minsrc2_knn10_m0_5_cap0_10",
   "vector_source": "offline_spacy",
   "decision": "iterate",
-  "summary": "my gut feeling is that the flags lead in a certain direction(s)",
+  "summary": "but only if you see a good direction to move",
   "reviewer": "Avi",
-  "created_at": "2026-06-07T19:02:47.859694+00:00",
+  "created_at": "2026-06-07T19:27:41.464342+00:00",
   "ratings_summary": {
     "total": 30,
     "runs": [
-      "119da519600577e4"
+      "cd50777784a0b9f8"
     ],
     "variants": [
-      "pc1_removed_knn10_m0_5_cap0_10"
+      "pc1_removed_minsrc2_knn10_m0_5_cap0_10"
     ],
     "by_decision": {
-      "plausible_repair": 22,
-      "semantic_bleed": 8
+      "plausible_repair": 24,
+      "semantic_bleed": 6
     },
     "by_variant": {
-      "pc1_removed_knn10_m0_5_cap0_10": {
-        "plausible_repair": 22,
-        "semantic_bleed": 8
+      "pc1_removed_minsrc2_knn10_m0_5_cap0_10": {
+        "plausible_repair": 24,
+        "semantic_bleed": 6
       }
     },
     "by_variant_tier": {
-      "pc1_removed_knn10_m0_5_cap0_10|mainstream": {
-        "plausible_repair": 12,
+      "pc1_removed_minsrc2_knn10_m0_5_cap0_10|mainstream": {
+        "plausible_repair": 14,
         "semantic_bleed": 4
       },
-      "pc1_removed_knn10_m0_5_cap0_10|niche": {
-        "semantic_bleed": 4,
-        "plausible_repair": 9
-      },
-      "pc1_removed_knn10_m0_5_cap0_10|pop": {
-        "plausible_repair": 1
+      "pc1_removed_minsrc2_knn10_m0_5_cap0_10|niche": {
+        "plausible_repair": 10,
+        "semantic_bleed": 2
       }
     }
   }
