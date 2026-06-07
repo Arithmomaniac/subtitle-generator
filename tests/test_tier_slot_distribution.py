@@ -305,8 +305,12 @@ def test_build_smoothing_review_feed_writes_deterministic_feed(tmp_path: Path):
     assert feed["candidate_count"] == len(feed["candidates"])
     for cand in feed["candidates"]:
         assert {"slot_type", "tier", "filler", "base_p", "smoothed_p", "delta",
-                "evidence", "flags", "nearest_contributors"} <= cand.keys()
+                "evidence", "flags", "nearest_contributors", "context"} <= cand.keys()
         assert {"soft", "src", "anchored"} <= cand["evidence"].keys()
+        # Human-readable context for the review canvas.
+        assert {"tier_label", "slot_label", "example_subtitle", "similar_words",
+                "lift_phrase", "source_titles"} <= cand["context"].keys()
+        assert str(cand["display_filler"]).lower() in cand["context"]["example_subtitle"].lower()
 
     # Deterministic: a second build from identical inputs yields the same run_id.
     conn2 = _create_distribution_db()

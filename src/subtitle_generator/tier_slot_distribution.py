@@ -508,6 +508,9 @@ def build_smoothing_review_feed(
         neighbor_limit=neighbor_limit,
     )
     run_id = _smoothing_feed_run_id(config.name, vector_source, candidates)
+    # Enrich AFTER run_id so human-readable context never affects the hash that
+    # ties ratings to candidates (wording can change without invalidating ratings).
+    _enrich_smoothing_candidates(conn, candidates)
     feed = {
         "schema_version": SMOOTHING_REVIEW_FEED_SCHEMA_VERSION,
         "run_id": run_id,
@@ -546,6 +549,124 @@ def _smoothing_feed_run_id(
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+# Human-readable context for the review canvas. The reviewer judges semantic fit,
+# so the feed carries plain-language framing (what tier *feels* like, where the
+# word lands in a real subtitle, which familiar words it resembles) rather than
+# only ML internals.
+_TIER_LABELS = {
+    "pop": "Mass-market",
+    "mainstream": "Broad trade",
+    "niche": "Scholarly / niche",
+}
+_TIER_BLURBS = {
+    "pop": "airport-bookstore, bestseller, BookTok — instantly legible, high-concept hook",
+    "mainstream": "general trade, book-club, NPR/NYT — accessible but substantial",
+    "niche": "academic, specialty, small-press — for a defined field or community",
+}
+_SLOT_LABELS = {
+    "list_item": "opening list word",
+    "action_noun": "action word (\u201cthe ___ of \u2026\u201d)",
+    "of_object": "object (\u201c\u2026 of the ___\u201d)",
+    "of_modifier": "object modifier (\u201c\u2026 of the ___ Dream\u201d)",
+    "of_head": "object head-word (\u201c\u2026 of the American ___\u201d)",
+    "of_topic": "object topic (\u201c\u2026 of ___ in \u2026\u201d)",
+    "of_complement": "object complement (\u201c\u2026 of Scripture in ___\u201d)",
+}
+# Example subtitle scaffolds; {f} is replaced with the (title-cased) candidate so
+# the reviewer sees the word in situ. Style: "X, Y, and the ACTION of OBJECT".
+_SLOT_EXAMPLES = {
+    "list_item": "{f}, Grit, and the Rise of the American Dream",
+    "action_noun": "Greed, Grit, and the {f} of the American Dream",
+    "of_object": "Greed, Grit, and the Rise of {f}",
+    "of_modifier": "Greed, Grit, and the Rise of the {f} Dream",
+    "of_head": "Greed, Grit, and the Rise of the American {f}",
+    "of_topic": "Greed, Grit, and the Study of {f} in Kabbala",
+    "of_complement": "Greed, Grit, and the Study of Scripture in {f}",
+}
+
+
+def _enrich_smoothing_candidates(
+    conn: sqlite3.Connection,
+    candidates: list[dict[str, object]],
+) -> None:
+    """Attach human-readable context to each candidate (in place)."""
+    for cand in candidates:
+        slot_type = str(cand["slot_type"])
+        tier = str(cand["tier"])
+        display = str(cand["display_filler"])
+        word = display if display[:1].isupper() else display.title()
+        base_p = float(cand["base_p"])
+        smoothed_p = float(cand["smoothed_p"])
+        ratio = smoothed_p / base_p if base_p > 0 else 0.0
+        cand["context"] = {
+            "tier_label": _TIER_LABELS.get(tier, tier),
+            "tier_blurb": _TIER_BLURBS.get(tier, ""),
+            "slot_label": _SLOT_LABELS.get(slot_type, slot_type),
+            "example_subtitle": _SLOT_EXAMPLES.get(
+                slot_type, "Greed, Grit, and the Rise of {f}"
+            ).format(f=word),
+            "similar_words": [
+                str(n["display_filler"]) for n in cand.get("nearest_contributors", [])
+            ],
+            "lift_phrase": _lift_phrase(ratio),
+            "source_titles": _source_titles_for(conn, slot_type, str(cand["filler"])),
+        }
+
+
+def _lift_phrase(ratio: float) -> str:
+    """Plain-language description of how much more likely the move makes a word."""
+    if ratio <= 0:
+        return "would gain some weight"
+    if ratio < 1.5:
+        return "a little more likely"
+    if ratio < 3:
+        return f"~{ratio:.1f}\u00d7 more likely (still uncommon)"
+    return f"~{ratio:.0f}\u00d7 more likely (from very rare)"
+
+
+def _source_titles_for(
+    conn: sqlite3.Connection,
+    slot_type: str,
+    filler: str,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """A few real source book titles a filler came from (best-effort).
+
+    Helps a reviewer answer "needs_context". Resilient to schema differences
+    between the full dev DB and the deployment mini-DB; returns [] if neither
+    join is available.
+    """
+    queries = (
+        # Full dev DB: filler -> source subtitle row.
+        """
+        SELECT DISTINCT s.title
+        FROM slot_fillers sf
+        JOIN slot_filler_sources sfs ON sfs.slot_filler_id = sf.id
+        JOIN subtitles s ON s.id = sfs.subtitle_id
+        WHERE sf.filler = ? AND sf.slot_type = ? AND s.title IS NOT NULL AND s.title != ''
+        LIMIT ?
+        """,
+        # Deployment mini-DB: pre-joined sources table.
+        """
+        SELECT DISTINCT sr.title
+        FROM slot_fillers sf
+        JOIN sources sr ON sr.slot_filler_id = sf.id
+        WHERE sf.filler = ? AND sf.slot_type = ? AND sr.title IS NOT NULL AND sr.title != ''
+        LIMIT ?
+        """,
+    )
+    for query in queries:
+        try:
+            rows = conn.execute(query, (filler, slot_type, limit)).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        titles = [str(row[0]) for row in rows if row[0]]
+        if titles:
+            return titles
+    return []
 
 
 def _select_smoothing_candidates(

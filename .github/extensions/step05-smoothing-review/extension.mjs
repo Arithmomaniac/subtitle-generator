@@ -82,7 +82,9 @@ async function saveSubmission(submission, log) {
 
 function renderHtml() {
     // The page fetches the feed from /api/feed and posts to /api/save on this
-    // same local server, so all data flow stays on loopback.
+    // same local server, so all data flow stays on loopback. The UI leads with
+    // plain-language context (an example subtitle, the tier "feel", familiar
+    // similar words, source books) and tucks ML internals into a details toggle.
     return `<!doctype html>
 <html>
 <head>
@@ -90,74 +92,119 @@ function renderHtml() {
   <title>Step 5 smoothing review</title>
   <style>
     :root { color-scheme: light dark; }
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem 1.25rem 6rem; line-height: 1.4; }
-    h1 { font-size: 1.2rem; margin: 0 0 .25rem; }
-    .meta { opacity: .7; font-size: .85rem; margin-bottom: 1rem; }
-    .cand { border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 8px; padding: .65rem .8rem; margin-bottom: .7rem; }
-    .cand h3 { font-size: .95rem; margin: 0 0 .3rem; }
-    .move { font-variant-numeric: tabular-nums; opacity: .85; font-size: .85rem; }
-    .flags { font-size: .72rem; opacity: .7; }
-    .nbrs { font-size: .78rem; opacity: .8; margin: .35rem 0; padding-left: 1rem; }
-    .opts { display: flex; gap: .35rem; flex-wrap: wrap; margin-top: .4rem; }
-    .opts label { border: 1px solid color-mix(in srgb, currentColor 25%, transparent); border-radius: 999px; padding: .12rem .55rem; font-size: .8rem; cursor: pointer; }
-    .opts input { margin-right: .3rem; }
-    .notes { width: 100%; margin-top: .35rem; font: inherit; padding: .25rem .4rem; box-sizing: border-box; }
-    .bar { position: fixed; left: 0; right: 0; bottom: 0; padding: .6rem 1.25rem; background: Canvas; border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent); display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
-    .bar select, .bar input, .bar button { font: inherit; padding: .3rem .5rem; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1rem 1.25rem 7rem; line-height: 1.45; max-width: 60rem; }
+    h1 { font-size: 1.25rem; margin: 0 0 .35rem; }
+    .intro { font-size: .9rem; opacity: .85; margin-bottom: .6rem; }
+    .legend { font-size: .78rem; opacity: .7; margin-bottom: 1rem; }
+    .legend b { opacity: .9; }
+    .cand { border: 1px solid color-mix(in srgb, currentColor 18%, transparent); border-radius: 10px; padding: .8rem .95rem; margin-bottom: .85rem; }
+    .subtitle { font-size: 1.05rem; margin: 0 0 .45rem; }
+    .subtitle .w { font-weight: 700; background: color-mix(in srgb, gold 35%, transparent); padding: 0 .15rem; border-radius: 3px; }
+    .why { font-size: .9rem; margin: .15rem 0; }
+    .why .tier { font-weight: 600; }
+    .sim { font-size: .88rem; opacity: .9; }
+    .src { font-size: .82rem; opacity: .75; font-style: italic; margin-top: .2rem; }
+    .opts { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .6rem; }
+    .opts label { border: 1px solid color-mix(in srgb, currentColor 30%, transparent); border-radius: 999px; padding: .2rem .7rem; font-size: .85rem; cursor: pointer; user-select: none; }
+    .opts input { margin-right: .35rem; }
+    .opts label:has(input:checked) { background: color-mix(in srgb, currentColor 14%, transparent); border-color: currentColor; }
+    .notes { width: 100%; margin-top: .4rem; font: inherit; padding: .3rem .45rem; box-sizing: border-box; }
+    details { margin-top: .45rem; font-size: .78rem; opacity: .65; }
+    details code { font-variant-numeric: tabular-nums; }
+    .bar { position: fixed; left: 0; right: 0; bottom: 0; padding: .65rem 1.25rem; background: Canvas; border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent); display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+    .bar select, .bar input, .bar button { font: inherit; padding: .35rem .55rem; }
     .bar input[type=text] { flex: 1; min-width: 12rem; }
     button { cursor: pointer; border-radius: 6px; }
-    #status { font-size: .82rem; }
+    #status { font-size: .85rem; }
+    #progress { font-size: .8rem; opacity: .7; }
   </style>
 </head>
 <body>
-  <h1>Step 5 semantic-smoothing review</h1>
-  <div class="meta" id="meta">Loading feed…</div>
+  <h1>Which words fit which subtitle style?</h1>
+  <div class="intro">
+    The generator builds subtitles like <i>“Greed, Grit, and the Rise of the American Dream.”</i>
+    It’s learning which words feel right for each <b>style tier</b>. For each suggestion below,
+    the system wants to make a word a more likely choice for a tier because it resembles words
+    already common there — <b>your call is whether it actually fits</b> that style and slot.
+    Rate the ones you have a view on; you don’t have to rate them all.
+  </div>
+  <div class="legend">
+    Tiers: <b>Mass-market</b> (bestseller / BookTok) ·
+    <b>Broad trade</b> (book-club / NPR) ·
+    <b>Scholarly</b> (academic / specialty).
+  </div>
+  <div id="meta" class="legend">Loading…</div>
   <div id="list"></div>
 
   <div class="bar">
+    <span id="progress"></span>
     <label>Overall:
       <select id="overall">
         <option value="">— choose —</option>
-        <option value="accept">accept</option>
-        <option value="iterate">iterate</option>
-        <option value="reject">reject</option>
+        <option value="accept">accept (use this smoothing)</option>
+        <option value="iterate">iterate (try another variant)</option>
+        <option value="reject">reject (don’t smooth)</option>
       </select>
     </label>
-    <input type="text" id="summary" placeholder="One-line rationale for the overall decision (required)" />
-    <input type="text" id="reviewer" placeholder="reviewer" style="max-width:8rem" />
+    <input type="text" id="summary" placeholder="One-line reason for your overall call (required)" />
+    <input type="text" id="reviewer" placeholder="your name" style="max-width:7rem" />
     <button id="save">Save review</button>
     <span id="status"></span>
   </div>
 
 <script>
-const DECISIONS = ["plausible_repair", "semantic_bleed", "too_generic", "needs_context"];
+// value = stored enum; label = plain-language meaning shown to the reviewer.
+const OPTIONS = [
+  ["plausible_repair", "Good fit"],
+  ["semantic_bleed", "Wrong vibe / off-topic"],
+  ["too_generic", "Too generic / bland"],
+  ["needs_context", "Can’t tell"],
+];
 let FEED = null;
 
-function fmt(n) { return Number(n).toFixed(6); }
+function esc(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+function exampleHtml(text, word) {
+  // Highlight the candidate word within the example subtitle.
+  const i = text.toLowerCase().indexOf(String(word).toLowerCase());
+  if (i < 0) return esc(text);
+  return esc(text.slice(0, i)) + '<span class="w">' + esc(text.slice(i, i + word.length)) + '</span>' + esc(text.slice(i + word.length));
+}
+
+function updateProgress() {
+  const rated = FEED.candidates.filter((_, i) => document.querySelector(\`input[name="d\${i}"]:checked\`)).length;
+  document.getElementById("progress").textContent = \`\${rated}/\${FEED.candidates.length} rated\`;
+}
 
 async function load() {
   const res = await fetch("/api/feed");
   if (!res.ok) { document.getElementById("meta").textContent = "No feed found. Run build-smoothing-review-feed first."; return; }
   FEED = await res.json();
   document.getElementById("meta").textContent =
-    \`variant \${FEED.variant} · run_id \${FEED.run_id} · \${FEED.candidate_count} candidates · vectors \${FEED.vector_source}\`;
+    \`\${FEED.candidate_count} suggestions from variant “\${FEED.variant}”.\`;
   const list = document.getElementById("list");
   list.innerHTML = "";
   FEED.candidates.forEach((c, i) => {
+    const x = c.context || {};
+    const word = c.display_filler;
+    const similar = (x.similar_words || []).slice(0, 5).join(", ");
+    const sources = (x.source_titles || []);
     const div = document.createElement("div");
     div.className = "cand";
-    const nbrs = (c.nearest_contributors || []).map(n =>
-      \`\${n.display_filler} (sim \${n.similarity}, p \${n.p}, src \${n.src})\`).join("; ");
     div.innerHTML =
-      \`<h3>\${c.slot_type} · <b>\${c.tier}</b> · \${c.display_filler}</h3>\` +
-      \`<div class="move">\${fmt(c.base_p)} → \${fmt(c.smoothed_p)} (Δ +\${fmt(c.delta)}) · soft \${c.evidence.soft} · src \${c.evidence.src}</div>\` +
-      \`<div class="flags">\${(c.flags||[]).join(" · ")}</div>\` +
-      (nbrs ? \`<div class="nbrs">← \${nbrs}</div>\` : "") +
-      \`<div class="opts">\` + DECISIONS.map(d =>
-        \`<label><input type="radio" name="d\${i}" value="\${d}" />\${d}</label>\`).join("") + \`</div>\` +
-      \`<input class="notes" id="n\${i}" placeholder="notes (optional)" />\`;
+      \`<p class="subtitle">\${exampleHtml(x.example_subtitle || word, word)}</p>\` +
+      \`<p class="why">Style: <span class="tier">\${esc(x.tier_label || c.tier)}</span> — \${esc(x.tier_blurb || "")}<br>\` +
+      \`Role: \${esc(x.slot_label || c.slot_type)}. Smoothing would make <b>\${esc(word)}</b> \${esc(x.lift_phrase || "more likely")} here.</p>\` +
+      (similar ? \`<p class="sim">Suggested because it resembles: \${esc(similar)}.</p>\` : "") +
+      (sources.length ? \`<p class="src">From books like: \${sources.map(esc).join("; ")}</p>\` : "") +
+      \`<div class="opts">\` + OPTIONS.map(([v, lbl]) =>
+        \`<label><input type="radio" name="d\${i}" value="\${v}" />\${lbl}</label>\`).join("") + \`</div>\` +
+      \`<input class="notes" id="n\${i}" placeholder="notes (optional)" />\` +
+      \`<details><summary>stats</summary><code>p \${Number(c.base_p).toExponential(2)} → \${Number(c.smoothed_p).toExponential(2)} · soft \${c.evidence.soft} · src \${c.evidence.src} · \${(c.flags||[]).join(", ")}</code></details>\`;
     list.appendChild(div);
   });
+  list.addEventListener("change", updateProgress);
+  updateProgress();
 }
 
 async function save() {
@@ -166,7 +213,7 @@ async function save() {
   const summary = document.getElementById("summary").value.trim();
   const reviewer = document.getElementById("reviewer").value.trim() || null;
   if (!overall) { status.textContent = "Choose an overall decision."; return; }
-  if (!summary) { status.textContent = "Add a one-line rationale."; return; }
+  if (!summary) { status.textContent = "Add a one-line reason."; return; }
   const ratings = [];
   FEED.candidates.forEach((c, i) => {
     const sel = document.querySelector(\`input[name="d\${i}"]:checked\`);
@@ -176,6 +223,7 @@ async function save() {
       base_p: c.base_p, smoothed_p: c.smoothed_p, delta: c.delta,
       evidence: c.evidence, decision: sel.value, notes });
   });
+  if (!ratings.length) { status.textContent = "Rate at least one suggestion first."; return; }
   status.textContent = "Saving…";
   const payload = { run_id: FEED.run_id, variant: FEED.variant,
     vector_source: FEED.vector_source, reviewer, ratings,
@@ -184,7 +232,7 @@ async function save() {
     headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
   const out = await res.json();
   status.textContent = out.ok
-    ? \`Saved \${ratings.length} ratings + decision (\${overall}).\`
+    ? \`Saved \${ratings.length} ratings + your “\${overall}” decision.\`
     : \`Submission written but ingest failed: \${out.error}\`;
 }
 
