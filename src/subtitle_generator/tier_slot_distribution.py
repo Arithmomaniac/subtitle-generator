@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import json
 import math
 import sqlite3
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -66,6 +69,14 @@ class SemanticSmoothingAutoResearcherResult:
     report_path: Path
     proposals_path: Path
     ablation_result: SemanticSmoothingAblationResult
+
+
+@dataclass(frozen=True)
+class SmoothingReviewFeedResult:
+    feed_path: Path
+    run_id: str
+    variant: str
+    candidate_count: int
 
 
 @dataclass(frozen=True)
@@ -416,6 +427,279 @@ def run_semantic_smoothing_autoresearcher(
         proposals_path=proposals_path,
         ablation_result=ablation_result,
     )
+
+
+SMOOTHING_REVIEW_FEED_SCHEMA_VERSION = 1
+
+
+def build_smoothing_review_feed(
+    conn: sqlite3.Connection,
+    output_dir: Path,
+    *,
+    variant_name: str = "knn10_m0_5_cap0_10",
+    alpha: float = 0.5,
+    inferred_source_weight: float = 1.0,
+    artifact_version: str = "tier_slot_filler_distribution_v1",
+    vector_source: str = "offline_spacy",
+    limit: int = 60,
+    neighbor_limit: int = 5,
+    configs: tuple[SmoothingExperimentConfig, ...] | None = None,
+) -> SmoothingReviewFeedResult:
+    """Emit a candidate feed of rate-worthy smoothing moves for human review.
+
+    Replaces the throwaway review-packet generator with a committed, deterministic
+    producer. For one chosen smoothing ``variant_name`` it ranks the largest
+    base->smoothed probability moves on valid ML fillers, attaches the evidence
+    and the nearest semantic contributors that drove each move, flags
+    repair/bleed candidates, and writes ``step05_review_feed.json``. The feed is
+    analysis-only and never affects the served distribution.
+
+    The ``run_id`` is a content hash of the variant, vector source, and the
+    selected candidates' base/smoothed probabilities, so an unchanged build is
+    reproducible and a rating can always be tied to the exact candidates it
+    judged.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    configs = configs or default_smoothing_experiments()
+    config = next((c for c in configs if c.name == variant_name), None)
+    if config is None:
+        raise RuntimeError(
+            f"Unknown smoothing variant {variant_name!r}; available: "
+            f"{', '.join(c.name for c in configs)}"
+        )
+    if config.variant == "none":
+        raise RuntimeError("variant 'none' has no smoothing moves to review")
+
+    fillers, filler_id_to_key = _load_fillers(conn)
+    source_labels = _load_source_labels(conn)
+    source_fallbacks = _load_source_fallback_vectors(conn)
+    residual_priors = _label_residual_priors(source_labels.values())
+    cells = _build_evidence_cells(
+        conn,
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=source_labels,
+        source_fallbacks=source_fallbacks,
+        global_fallback=_global_fallback_vector(fillers.values()),
+        residual_priors=residual_priors,
+        inferred_source_weight=inferred_source_weight,
+    )
+    base_rows = _distribution_rows(
+        fillers=fillers,
+        cells=cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
+    vectors, _vector_source_counts = _load_smoothing_vectors(
+        conn,
+        fillers,
+        output_dir / "tier_slot_embedding_cache.csv",
+        vector_source=vector_source,
+    )
+    transformed_vectors = _transform_vectors(vectors, config.vector_transform)
+    smoothed_rows = _apply_smoothing(base_rows, fillers, transformed_vectors, config)
+
+    candidates = _select_smoothing_candidates(
+        base_rows,
+        smoothed_rows,
+        transformed_vectors,
+        config,
+        limit=limit,
+        neighbor_limit=neighbor_limit,
+    )
+    run_id = _smoothing_feed_run_id(config.name, vector_source, candidates)
+    feed = {
+        "schema_version": SMOOTHING_REVIEW_FEED_SCHEMA_VERSION,
+        "run_id": run_id,
+        "variant": config.name,
+        "vector_source": vector_source,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+    }
+    feed_path = output_dir / "step05_review_feed.json"
+    feed_path.write_text(json.dumps(feed, indent=2) + "\n", encoding="utf-8")
+    return SmoothingReviewFeedResult(
+        feed_path=feed_path,
+        run_id=run_id,
+        variant=config.name,
+        candidate_count=len(candidates),
+    )
+
+
+def _smoothing_feed_run_id(
+    variant: str,
+    vector_source: str,
+    candidates: list[dict[str, object]],
+) -> str:
+    """Deterministic content hash tying ratings to the exact candidate set."""
+    payload = {
+        "variant": variant,
+        "vector_source": vector_source,
+        "candidates": [
+            [
+                c["slot_type"], c["tier"], c["filler"],
+                round(float(c["base_p"]), 9), round(float(c["smoothed_p"]), 9),
+            ]
+            for c in candidates
+        ],
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _select_smoothing_candidates(
+    base_rows: list[dict[str, object]],
+    smoothed_rows: list[dict[str, object]],
+    vectors: dict[str, list[float]],
+    config: SmoothingExperimentConfig,
+    *,
+    limit: int,
+    neighbor_limit: int,
+    min_abs_delta: float = 1e-9,
+) -> list[dict[str, object]]:
+    """Rank the largest valid-ML smoothing *boosts* and attach evidence.
+
+    The review decision enum (plausible_repair / semantic_bleed / too_generic) is
+    entirely about *boosted* fillers -- "is this borrowed mass a good repair or
+    topical bleed?". Pure |delta| ranking would instead surface head demotions
+    (high-probability fillers shedding mass), which carry no such decision. So we
+    keep positive-delta moves and rank by descending boost, matching the user's
+    pop/mainstream-repair priority.
+    """
+    base_lookup = {
+        (str(r["slot_type"]), str(r["tier"]), str(r["filler"])): r for r in base_rows
+    }
+    moves: list[dict[str, object]] = []
+    for srow in smoothed_rows:
+        key = (str(srow["slot_type"]), str(srow["tier"]), str(srow["filler"]))
+        base = base_lookup.get(key)
+        if base is None:
+            continue
+        slot_type = key[0]
+        if not _is_valid_ml_slot_filler(slot_type, str(srow["display_filler"])):
+            continue
+        base_p = float(base["probability"])
+        smoothed_p = float(srow["probability"])
+        delta = smoothed_p - base_p
+        if delta <= min_abs_delta:
+            continue
+        src = int(base["source_count"])
+        anchored = float(base["anchored_soft_count"])
+        flags: list[str] = ["repair_candidate"]
+        if src <= 1:
+            flags.append("low_source_support")
+        if anchored <= 0:
+            flags.append("no_anchored_same_tier")
+        moves.append({
+            "slot_type": slot_type,
+            "tier": key[1],
+            "filler": key[2],
+            "display_filler": str(srow["display_filler"]),
+            "base_p": base_p,
+            "smoothed_p": smoothed_p,
+            "delta": delta,
+            "evidence": {
+                "soft": float(base["soft_count"]),
+                "src": src,
+                "anchored": anchored,
+            },
+            "flags": flags,
+        })
+    moves.sort(key=lambda m: (-float(m["delta"]), str(m["filler"]).lower()))
+    selected = moves[:limit]
+
+    neighbors = _smoothing_candidate_neighbors(
+        selected, base_rows, vectors, config, neighbor_limit=neighbor_limit
+    )
+    for move in selected:
+        nkey = (str(move["slot_type"]), str(move["tier"]), str(move["filler"]))
+        move["nearest_contributors"] = neighbors.get(nkey, [])
+    return selected
+
+
+def _smoothing_candidate_neighbors(
+    candidates: list[dict[str, object]],
+    base_rows: list[dict[str, object]],
+    vectors: dict[str, list[float]],
+    config: SmoothingExperimentConfig,
+    *,
+    neighbor_limit: int,
+) -> dict[tuple[str, str, str], list[dict[str, object]]]:
+    """For each candidate, the top semantic contributors that drove its move.
+
+    Mirrors the neighbor selection in ``_semantic_prior_for_group`` but captures
+    the contributing fillers (similarity + their probability/evidence) instead of
+    only the blended prior. Returns empty lists for variants without semantic
+    neighbors (e.g. ``uniform_prior``).
+    """
+    if config.variant not in {"generic_embedding_kNN", "tier_evidence_filtered_kNN"}:
+        return {}
+    import numpy as np
+
+    evidence_gate = (
+        config.evidence_gate
+        if config.variant == "tier_evidence_filtered_kNN"
+        else "none"
+    )
+    rows_by_group: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in base_rows:
+        rows_by_group[(str(row["slot_type"]), str(row["tier"]))].append(row)
+
+    wanted: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for cand in candidates:
+        wanted[(str(cand["slot_type"]), str(cand["tier"]))].add(str(cand["filler"]))
+
+    result: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+    for (slot_type, tier), targets in wanted.items():
+        group_rows = rows_by_group.get((slot_type, tier), [])
+        keys = [
+            str(row["filler"])
+            for row in group_rows
+            if _filler_key(slot_type, str(row["filler"])) in vectors
+            and _is_valid_ml_slot_filler(slot_type, str(row["display_filler"]))
+        ]
+        if not keys or config.neighbor_count <= 0:
+            continue
+        row_by_filler = {str(row["filler"]): row for row in group_rows}
+        evidence_allowed = {
+            str(row["filler"])
+            for row in group_rows
+            if _passes_evidence_gate(row, evidence_gate)
+            and _is_valid_ml_slot_filler(slot_type, str(row["display_filler"]))
+        }
+        matrix = np.array(
+            [vectors[_filler_key(slot_type, key)] for key in keys],
+            dtype=np.float64,
+        )
+        similarities = matrix @ matrix.T
+        key_index = {key: index for index, key in enumerate(keys)}
+        for target in targets:
+            if target not in key_index:
+                continue
+            index = key_index[target]
+            contributors: list[tuple[float, str]] = []
+            for other_index, similarity in enumerate(similarities[index]):
+                other_key = keys[other_index]
+                if other_key == target or similarity <= 0:
+                    continue
+                if other_key not in evidence_allowed:
+                    continue
+                contributors.append((float(similarity), other_key))
+            contributors.sort(reverse=True)
+            top = []
+            for similarity, other_key in contributors[:neighbor_limit]:
+                nrow = row_by_filler.get(other_key, {})
+                top.append({
+                    "filler": other_key,
+                    "display_filler": str(nrow.get("display_filler", other_key)),
+                    "similarity": round(similarity, 4),
+                    "p": round(float(nrow.get("probability", 0.0)), 6),
+                    "soft": round(float(nrow.get("soft_count", 0.0)), 3),
+                    "src": int(nrow.get("source_count", 0)),
+                })
+            result[(slot_type, tier, target)] = top
+    return result
 
 
 def default_smoothing_experiments() -> tuple[SmoothingExperimentConfig, ...]:

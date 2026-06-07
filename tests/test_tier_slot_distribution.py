@@ -262,6 +262,82 @@ def _sidecar_path(distribution_path: Path) -> Path:
     )
 
 
+def _seed_smoothing_vectors(conn) -> None:
+    import struct
+
+    conn.execute("ALTER TABLE slot_fillers ADD COLUMN vector_sum BLOB")
+    conn.execute("ALTER TABLE slot_fillers ADD COLUMN token_count INTEGER")
+    conn.execute(
+        "UPDATE slot_fillers SET vector_sum = ?, token_count = 1 WHERE filler = 'Race'",
+        (struct.pack("3f", 1.0, 0.0, 0.0),),
+    )
+    conn.execute(
+        "UPDATE slot_fillers SET vector_sum = ?, token_count = 1 WHERE filler = 'race'",
+        (struct.pack("3f", 0.9, 0.1, 0.0),),
+    )
+    conn.commit()
+
+
+def test_build_smoothing_review_feed_writes_deterministic_feed(tmp_path: Path):
+    import json
+
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        build_smoothing_review_feed,
+    )
+
+    configs = (
+        SmoothingExperimentConfig("none", "none", 0, 0.0, "none", 0.0),
+        SmoothingExperimentConfig("knn", "generic_embedding_kNN", 1, 0.5, "none", 0.10),
+    )
+
+    conn = _create_distribution_db()
+    _seed_smoothing_vectors(conn)
+    result = build_smoothing_review_feed(
+        conn, tmp_path / "a", variant_name="knn", vector_source="db", configs=configs
+    )
+
+    assert result.feed_path.exists()
+    feed = json.loads(result.feed_path.read_text(encoding="utf-8"))
+    assert feed["schema_version"] == 1
+    assert feed["variant"] == "knn"
+    assert feed["run_id"] == result.run_id
+    assert feed["candidate_count"] == len(feed["candidates"])
+    for cand in feed["candidates"]:
+        assert {"slot_type", "tier", "filler", "base_p", "smoothed_p", "delta",
+                "evidence", "flags", "nearest_contributors"} <= cand.keys()
+        assert {"soft", "src", "anchored"} <= cand["evidence"].keys()
+
+    # Deterministic: a second build from identical inputs yields the same run_id.
+    conn2 = _create_distribution_db()
+    _seed_smoothing_vectors(conn2)
+    result2 = build_smoothing_review_feed(
+        conn2, tmp_path / "b", variant_name="knn", vector_source="db", configs=configs
+    )
+    assert result2.run_id == result.run_id
+
+
+def test_build_smoothing_review_feed_rejects_unknown_and_none_variant(tmp_path: Path):
+    import pytest
+
+    from subtitle_generator.tier_slot_distribution import (
+        SmoothingExperimentConfig,
+        build_smoothing_review_feed,
+    )
+
+    configs = (SmoothingExperimentConfig("none", "none", 0, 0.0, "none", 0.0),)
+    conn = _create_distribution_db()
+    _seed_smoothing_vectors(conn)
+    with pytest.raises(RuntimeError):
+        build_smoothing_review_feed(
+            conn, tmp_path / "x", variant_name="missing", vector_source="db", configs=configs
+        )
+    with pytest.raises(RuntimeError):
+        build_smoothing_review_feed(
+            conn, tmp_path / "y", variant_name="none", vector_source="db", configs=configs
+        )
+
+
 def test_source_reliability_weights_signal():
     from subtitle_generator.tier_slot_distribution import (
         _SourceLabel,

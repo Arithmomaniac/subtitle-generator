@@ -1596,6 +1596,142 @@ def run_semantic_smoothing_autoresearcher_cmd(
     click.echo(f"Wrote next-round proposals to {result.proposals_path}")
 
 
+@cli.command("build-smoothing-review-feed")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for the smoothing review feed (regenerable input).",
+)
+@click.option(
+    "--variant",
+    "variant_name",
+    default="knn10_m0_5_cap0_10",
+    show_default=True,
+    help="Smoothing experiment variant to surface candidates for.",
+)
+@click.option(
+    "--vector-source",
+    type=click.Choice(["offline_spacy", "db"]),
+    default="offline_spacy",
+    show_default=True,
+    help="Vector source for semantic smoothing neighbors.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=60,
+    show_default=True,
+    help="Maximum number of candidate moves to surface.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+def build_smoothing_review_feed_cmd(
+    db_path: Path,
+    output_dir: Path,
+    variant_name: str,
+    vector_source: str,
+    limit: int,
+    alpha: float,
+    inferred_source_weight: float,
+):
+    """Emit a candidate feed of smoothing moves for human review (analysis-only)."""
+
+    from subtitle_generator.tier_slot_distribution import build_smoothing_review_feed
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_smoothing_review_feed(
+            conn,
+            output_dir,
+            variant_name=variant_name,
+            vector_source=vector_source,
+            limit=limit,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.candidate_count:,} review candidates to {result.feed_path} "
+        f"(run_id {result.run_id}, variant {result.variant})."
+    )
+
+
+@cli.command("summarize-smoothing-ratings")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database holding smoothing_ratings.",
+)
+@click.option(
+    "--run-id",
+    default=None,
+    help="Scope the summary to a single review feed run_id.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional path to write the summary JSON.",
+)
+def summarize_smoothing_ratings_cmd(
+    db_path: Path,
+    run_id: str | None,
+    output_path: Path | None,
+):
+    """Aggregate smoothing ratings into the AutoResearcher / gate summary."""
+
+    import json
+
+    from subtitle_generator.smoothing_feedback import summarize_smoothing_ratings
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        summary = summarize_smoothing_ratings(conn, run_id=run_id)
+    finally:
+        conn.close()
+    payload = json.dumps(summary, indent=2)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(payload + "\n", encoding="utf-8")
+        click.echo(f"Wrote ratings summary to {output_path}")
+    click.echo(payload)
+
+
 @cli.command("build-book-metadata")
 @click.option(
     "--db",
