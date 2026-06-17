@@ -1780,6 +1780,315 @@ def ingest_smoothing_ratings_cmd(
     )
 
 
+_CALIBRATION_OUTPUT_DIR = Path("generated-artifacts/tier-slot-distribution")
+
+
+@cli.command("build-tier-slot-calibration")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR,
+    show_default=True,
+    help="Directory for calibrated side-by-side artifacts (never the served file).",
+)
+@click.option(
+    "--granularity",
+    type=click.Choice(["none", "global", "per_tier", "per_tier_slot"]),
+    default="per_tier",
+    show_default=True,
+    help="Temperature granularity; per_tier is the issue's first lever.",
+)
+@click.option(
+    "--folds",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Held-out cross-validation fold count over labeled sources.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=20260612,
+    show_default=True,
+    help="Deterministic seed for the source fold assignment (replayable).",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--artifact-version",
+    default="tier_slot_filler_distribution_v1",
+    show_default=True,
+    help="Version string written to calibrated distribution rows.",
+)
+def build_tier_slot_calibration_cmd(
+    db_path: Path,
+    output_dir: Path,
+    granularity: str,
+    folds: int,
+    seed: int,
+    alpha: float,
+    inferred_source_weight: float,
+    artifact_version: str,
+):
+    """Fit calibration temperatures and emit the calibrated side-by-side artifact."""
+
+    from subtitle_generator.tier_slot_calibration import (
+        CalibrationConfig,
+        build_tier_slot_calibration,
+    )
+
+    config = CalibrationConfig(
+        name=f"{granularity}_temperature",
+        granularity=granularity,
+        folds=folds,
+        seed=seed,
+        alpha=alpha,
+        inferred_source_weight=inferred_source_weight,
+        artifact_version=artifact_version,
+    )
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_tier_slot_calibration(conn, output_dir, config=config)
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.row_count:,} calibrated rows to {result.distribution_path}"
+    )
+    click.echo(f"Temperatures: {result.temperatures}")
+    click.echo(f"Wrote calibration metadata to {result.metadata_path}")
+    click.echo(f"Wrote calibration report to {result.report_path}")
+
+
+@cli.command("run-calibration-ablation")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR,
+    show_default=True,
+    help="Directory for calibration ablation artifacts.",
+)
+@click.option(
+    "--folds",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Held-out cross-validation fold count over labeled sources.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=20260612,
+    show_default=True,
+    help="Deterministic seed for the source fold assignment (replayable).",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+def run_calibration_ablation_cmd(
+    db_path: Path,
+    output_dir: Path,
+    folds: int,
+    seed: int,
+    alpha: float,
+    inferred_source_weight: float,
+):
+    """Sweep calibration granularities (none/global/per-tier/per-tier-slot)."""
+
+    from subtitle_generator.tier_slot_calibration import run_calibration_ablation
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_calibration_ablation(
+            conn,
+            output_dir,
+            folds=folds,
+            seed=seed,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Ran {result.experiment_count:,} calibration experiments; "
+        f"metrics: {result.metrics_path}"
+    )
+    click.echo(f"Wrote calibration ablation report to {result.report_path}")
+
+
+@cli.command("run-calibration-autoresearcher")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR,
+    show_default=True,
+    help="Directory for calibration AutoResearcher artifacts.",
+)
+@click.option(
+    "--folds",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Held-out cross-validation fold count over labeled sources.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=20260612,
+    show_default=True,
+    help="Deterministic seed for the source fold assignment (replayable).",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+def run_calibration_autoresearcher_cmd(
+    db_path: Path,
+    output_dir: Path,
+    folds: int,
+    seed: int,
+    alpha: float,
+    inferred_source_weight: float,
+):
+    """Run the bounded calibration sweep, then propose the next config + packet."""
+
+    from subtitle_generator.tier_slot_calibration import run_calibration_autoresearcher
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_calibration_autoresearcher(
+            conn,
+            output_dir,
+            folds=folds,
+            seed=seed,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Wrote AutoResearcher report to {result.report_path}")
+    click.echo(f"Wrote next-round proposals to {result.proposals_path}")
+
+
+@cli.command("ingest-calibration-decision")
+@click.option(
+    "--submission",
+    "submission_path",
+    type=click.Path(path_type=Path, exists=True),
+    required=True,
+    help="Calibration sign-off submission JSON (accept/reject/iterate).",
+)
+@click.option(
+    "--decision-path",
+    type=click.Path(path_type=Path),
+    default=Path("feedback/step06-calibration/decision.json"),
+    show_default=True,
+    help="Committed decision.json gate-evidence path.",
+)
+@click.option(
+    "--metadata-path",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR / "tier_slot_calibration_metadata.json",
+    show_default=True,
+    help="Calibration metadata the decision is tied to (temperatures + metrics).",
+)
+def ingest_calibration_decision_cmd(
+    submission_path: Path,
+    decision_path: Path,
+    metadata_path: Path,
+):
+    """Persist a calibration review sign-off to the committed decision.json."""
+
+    import json
+
+    from subtitle_generator.calibration_feedback import ingest_decision
+
+    submission = json.loads(submission_path.read_text(encoding="utf-8"))
+    try:
+        status = ingest_decision(
+            submission,
+            decision_path=decision_path,
+            metadata_path=metadata_path,
+        )
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(f"Invalid submission: {exc}") from exc
+    click.echo(
+        f"Recorded {status['decision']} decision ({status['granularity']}); "
+        f"wrote {status['decision_path']}"
+    )
+
+
 @cli.command("build-book-metadata")
 @click.option(
     "--db",

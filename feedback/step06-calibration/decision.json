@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "granularity": "per_tier",
+  "decision": "accept",
+  "summary": "LGTM",
+  "temperatures": {
+    "pop": 0.6384369654414069,
+    "mainstream": 0.7986318759171256,
+    "niche": 1.0099808733352318
+  },
+  "metadata_digest": "299c74f72b344f6a",
+  "metrics": {
+    "heldout_nll": {
+      "baseline": 48890.67413898821,
+      "calibrated": 48787.56033617514,
+      "improvement": 103.11380281306629
+    },
+    "reliability_ece": {
+      "baseline": 9.75781955236954e-19,
+      "calibrated": 2.862168849444601e-06
+    },
+    "distinctiveness": {
+      "baseline_mean_cross_tier_js": 0.024218918826409867,
+      "calibrated_mean_cross_tier_js": 0.037067820822408046
+    },
+    "ranking": {
+      "top1_hit_rate": 0.15217391304347827,
+      "ranking_preserved": true
+    }
+  },
+  "reviewer": null,
+  "created_at": "2026-06-17T06:25:33.841554+00:00"
+}

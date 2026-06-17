@@ -310,6 +310,96 @@ def build_tier_slot_distribution(
     )
 
 
+@dataclass(frozen=True)
+class DistributionInputs:
+    """Pre-loaded inputs shared across repeated anchored-distribution builds.
+
+    Calibration (#39) builds the anchored distribution many times -- once per
+    cross-validation fold and per swept config -- over different source subsets.
+    Loading the fillers/labels/fallbacks once and reusing them keeps the
+    held-out sweep cheap. The per-build cost is then only the strict-source link
+    scan inside ``_build_evidence_cells``.
+    """
+
+    fillers: dict[str, _Filler]
+    filler_id_to_key: dict[int, str]
+    source_labels: dict[int, _SourceLabel]
+    source_fallbacks: dict[int, dict[str, float]]
+    global_fallback: dict[str, float]
+    residual_priors: dict[str, dict[str, float]]
+
+
+def load_distribution_inputs(conn: sqlite3.Connection) -> DistributionInputs:
+    """Load the inputs needed to build the anchored served-shaped distribution."""
+
+    fillers, filler_id_to_key = _load_fillers(conn)
+    source_labels = _load_source_labels(conn)
+    source_fallbacks = _load_source_fallback_vectors(conn)
+    return DistributionInputs(
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=source_labels,
+        source_fallbacks=source_fallbacks,
+        global_fallback=_global_fallback_vector(fillers.values()),
+        residual_priors=_label_residual_priors(source_labels.values()),
+    )
+
+
+def build_anchored_rows(
+    conn: sqlite3.Connection,
+    inputs: DistributionInputs,
+    *,
+    include_subtitle_ids: set[int] | None = None,
+    alpha: float = 0.5,
+    inferred_source_weight: float = 1.0,
+    artifact_version: str = "tier_slot_filler_distribution_v1",
+) -> list[dict[str, object]]:
+    """Build the anchored-only served-shaped distribution rows.
+
+    This is the same anchored distribution that ``build_tier_slot_distribution``
+    writes as the served artifact, exposed for calibration so a held-out *train*
+    subset of sources can be passed via ``include_subtitle_ids`` (default
+    ``None`` reproduces the full served build exactly).
+    """
+
+    cells = _build_evidence_cells(
+        conn,
+        fillers=inputs.fillers,
+        filler_id_to_key=inputs.filler_id_to_key,
+        source_labels=inputs.source_labels,
+        source_fallbacks=inputs.source_fallbacks,
+        global_fallback=inputs.global_fallback,
+        residual_priors=inputs.residual_priors,
+        inferred_source_weight=inferred_source_weight,
+        include_subtitle_ids=include_subtitle_ids,
+    )
+    return _distribution_rows(
+        fillers=inputs.fillers,
+        cells=cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
+
+
+def load_strict_source_links(conn: sqlite3.Connection) -> list[tuple[int, int]]:
+    """Return ``(slot_filler_id, subtitle_id)`` links for strict fillers.
+
+    These are the raw source/filler co-occurrences used both to build the
+    distribution and -- for calibration -- to score held-out sources.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT sfs.slot_filler_id, sfs.subtitle_id
+        FROM slot_filler_sources sfs
+        JOIN slot_fillers sf ON sf.id = sfs.slot_filler_id
+        WHERE sf.mode = 'strict'
+        ORDER BY sfs.slot_filler_id, sfs.subtitle_id
+        """
+    ).fetchall()
+    return [(int(filler_id), int(subtitle_id)) for filler_id, subtitle_id in rows]
+
+
 def run_semantic_smoothing_ablation(
     conn: sqlite3.Connection,
     output_dir: Path,
@@ -1132,6 +1222,7 @@ def _build_evidence_cells(
     reliability_weights: dict[int, float] | None = None,
     residual_from_teacher_vector: bool = False,
     scored_source_ids: set[int] | None = None,
+    include_subtitle_ids: set[int] | None = None,
 ) -> dict[tuple[str, str], _EvidenceCell]:
     cells: dict[tuple[str, str], _EvidenceCell] = defaultdict(_EvidenceCell)
     links = conn.execute(
@@ -1146,6 +1237,10 @@ def _build_evidence_cells(
     for filler_id_raw, subtitle_id_raw in links:
         filler_id = int(filler_id_raw)
         subtitle_id = int(subtitle_id_raw)
+        # Calibration held-out support: restrict to a train subset of sources.
+        # Default None keeps every link, so the served build is unchanged.
+        if include_subtitle_ids is not None and subtitle_id not in include_subtitle_ids:
+            continue
         filler_key = filler_id_to_key.get(filler_id)
         if filler_key not in fillers:
             continue
