@@ -1249,7 +1249,8 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
     assert observed["allowed_tiers"] is None
     assert observed["remix_prob"] == 0.33
     assert observed["min_sim"] == 0.44
-    assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim"}
+    assert observed["runtime"].mode.value == "legacy"
+    assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim", "runtime"}
 
 
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):

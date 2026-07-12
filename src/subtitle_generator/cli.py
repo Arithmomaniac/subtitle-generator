@@ -32,6 +32,11 @@ from subtitle_generator.jacket import (
     generate_jacket,
 )
 from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
+from subtitle_generator.shadow_runtime import build_generation_runtime
+from subtitle_generator.shadow_runtime_compare import (
+    DEFAULT_COMPARISON_SEEDS,
+    build_shadow_runtime_comparison,
+)
 from subtitle_generator.slots import build_slots, ensure_slot_tables
 from subtitle_generator.tiering import compute_tier_evidence
 
@@ -127,6 +132,22 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
         click.echo(f"     ✓ saved (system: {system_tone}, score: {score:.2f})")
 
     return thumbs
+
+
+def _build_runtime_selection_for_cli(
+    *,
+    runtime_mode: str,
+    shadow_artifact: Path | None,
+    shadow_sampling_temperature: float,
+):
+    try:
+        return build_generation_runtime(
+            mode=runtime_mode,
+            shadow_artifact=shadow_artifact,
+            shadow_sampling_temperature=shadow_sampling_temperature,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _parse_tone(tone_str: str | None) -> set[str] | None:
@@ -366,7 +387,28 @@ def precompute_vectors_cmd():
 @click.option("--remix-prob", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
 @click.option("--min-sim", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
 @click.option("--review", is_flag=True, help="Interactively rate each subtitle (thumbs, tone override, comment).")
-def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool):
+@click.option(
+    "--runtime",
+    "runtime_mode",
+    type=click.Choice(["legacy", "shadow"]),
+    default="legacy",
+    show_default=True,
+    help="Runtime selection. 'shadow' uses tier-slot distribution artifacts without changing the default serving path.",
+)
+@click.option(
+    "--shadow-artifact",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional tier_slot_filler_distribution_v1 CSV to use with --runtime shadow. Defaults to the DB table when omitted.",
+)
+@click.option(
+    "--shadow-sampling-temperature",
+    type=click.FloatRange(min=0.000001),
+    default=1.0,
+    show_default=True,
+    help="Explicit runtime sampling temperature for --runtime shadow.",
+)
+def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool, runtime_mode: str, shadow_artifact: Path | None, shadow_sampling_temperature: float):
     """Generate random subtitles in the "X, Y, and [the/a/an] Z of W" pattern.
 
     Draws slot fillers from the extracted pool, optionally remixing multi-word
@@ -382,6 +424,11 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
       subtitle-gen generate --review                # rate each subtitle
     """
     tone_set = _parse_tone(tone)
+    runtime = _build_runtime_selection_for_cli(
+        runtime_mode=runtime_mode,
+        shadow_artifact=shadow_artifact,
+        shadow_sampling_temperature=shadow_sampling_temperature,
+    )
 
     if count is None:
         count = 1 if jacket else 10
@@ -402,6 +449,12 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
         click.echo(f"Tier filter: {', '.join(sorted(tone_set))}")
+    if runtime_mode == "shadow":
+        source_label = str(shadow_artifact) if shadow_artifact is not None else "db:tier_slot_filler_distribution_v1"
+        click.echo(
+            "Shadow runtime: "
+            f"artifact={source_label}, sampling_temperature={shadow_sampling_temperature:.3f}"
+        )
     if effective_remix_prob > 0:
         click.echo(f"Remix: prob={effective_remix_prob:.1f}, min_sim={min_sim:.2f}")
     click.echo()
@@ -419,8 +472,11 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
                 seed=s,
                 remix_prob=effective_remix_prob,
                 min_sim=min_sim,
+                runtime=runtime,
             )
         except TierFilterError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
 
         if jacket:
@@ -460,6 +516,93 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
         click.echo(f"\nReviewed {reviewed_count}/{count} subtitles ({thumbs_up} 👍, {thumbs_down} 👎). Ratings saved.")
 
     conn.close()
+
+
+@cli.command("compare-shadow-runtime")
+@click.option(
+    "--shadow-artifact",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional tier_slot_filler_distribution_v1 CSV to compare against the legacy runtime. Defaults to the DB table when omitted.",
+)
+@click.option(
+    "--shadow-sampling-temperature",
+    type=click.FloatRange(min=0.000001),
+    default=1.0,
+    show_default=True,
+    help="Explicit runtime sampling temperature for the shadow runtime.",
+)
+@click.option(
+    "--seed",
+    "seeds",
+    type=int,
+    multiple=True,
+    default=DEFAULT_COMPARISON_SEEDS,
+    show_default=True,
+    help="Fixed seed(s) to replay across pop/mainstream/niche/default scenarios.",
+)
+@click.option(
+    "--remix-prob",
+    default=None,
+    type=click.FloatRange(min=0.0, max=1.0),
+    help="Probability of remixing a multi-word of-object. Default: calibrated or 0.8.",
+)
+@click.option(
+    "--min-sim",
+    default=None,
+    type=click.FloatRange(min=0.0, max=1.0),
+    help="Minimum cosine similarity for remix coherence. Default: calibrated or 0.1.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("test-results/shadow-runtime"),
+    show_default=True,
+    help="Directory where the markdown report and replay JSON are written.",
+)
+def compare_shadow_runtime_cmd(
+    shadow_artifact: Path | None,
+    shadow_sampling_temperature: float,
+    seeds: tuple[int, ...],
+    remix_prob: float | None,
+    min_sim: float | None,
+    output_dir: Path,
+):
+    """Write deterministic legacy-vs-shadow comparison samples and provenance."""
+
+    runtime = _build_runtime_selection_for_cli(
+        runtime_mode="shadow",
+        shadow_artifact=shadow_artifact,
+        shadow_sampling_temperature=shadow_sampling_temperature,
+    )
+    conn = get_db()
+    try:
+        if remix_prob is None:
+            row = conn.execute(
+                "SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'"
+            ).fetchone()
+            remix_prob = float(row[0]) if row else 0.8
+        if min_sim is None:
+            row = conn.execute(
+                "SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'"
+            ).fetchone()
+            min_sim = float(row[0]) if row else 0.1
+        result = build_shadow_runtime_comparison(
+            conn,
+            output_dir,
+            shadow_runtime=runtime,
+            seeds=tuple(seeds),
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+
+    click.echo(f"Shadow runtime comparison written to {result.report_path}")
+    click.echo(f"Replay packet: {result.details_path}")
+    click.echo(f"Comparisons: {result.comparison_count}")
 
 
 @cli.command()
@@ -932,7 +1075,13 @@ def export_db_cmd(output: str):
 
 @cli.command("export-data")
 @click.option("--output-dir", "-o", default="api/data", help="Output directory for CSV files.")
-def export_data_cmd(output_dir: str):
+@click.option(
+    "--shadow-distribution",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional tier_slot_filler_distribution_v1 CSV to export alongside the tracked runtime data.",
+)
+def export_data_cmd(output_dir: str, shadow_distribution: Path | None):
     """Export slot data as CSV files for version control.
 
     Writes slot_fillers.csv, config.csv, and sources.csv to the output
@@ -947,7 +1096,11 @@ def export_data_cmd(output_dir: str):
     out = Path(output_dir)
     conn = get_db()
     click.echo(f"Exporting data to {out}/ ...")
-    stats = export_data(conn, out)
+    stats = export_data(
+        conn,
+        out,
+        shadow_distribution_source=shadow_distribution,
+    )
     conn.close()
 
     for filename, count in stats.items():

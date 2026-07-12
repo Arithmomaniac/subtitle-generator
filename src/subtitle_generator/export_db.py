@@ -4,8 +4,18 @@ import csv
 import sqlite3
 from pathlib import Path
 
+from subtitle_generator.schema_contracts import (
+    MINI_DB_SCHEMA_CONTRACTS,
+    TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+    validate_schema,
+    validate_tier_slot_distribution,
+)
+from subtitle_generator.shadow_runtime import (
+    ShadowArtifactSource,
+    load_shadow_distribution_source,
+    write_shadow_distribution_csv,
+)
 from subtitle_generator.config import ALL_TUNABLE_PARAMS
-from subtitle_generator.schema_contracts import MINI_DB_SCHEMA_CONTRACTS, validate_schema
 
 _CURRENT_PATTERN_LIST_ITEM_COUNTS = (2, 3)
 _RUNTIME_CONFIG_KEYS = frozenset(ALL_TUNABLE_PARAMS) | frozenset(
@@ -123,7 +133,12 @@ exportable_slot_fillers AS (
 """
 
 
-def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
+def export_data(
+    source_conn: sqlite3.Connection,
+    output_dir: Path,
+    *,
+    shadow_distribution_source: Path | None = None,
+) -> dict:
     """Export slot_fillers, config, and sources as CSV files.
 
     These text files are committed to the repo and used by ``build_mini_db``
@@ -194,6 +209,25 @@ def export_data(source_conn: sqlite3.Connection, output_dir: Path) -> dict:
         stats["slot_filler_model_scores.csv"] = len(rows)
     elif model_path.exists():
         model_path.unlink()
+
+    # -- optional tier-slot runtime distribution --
+    shadow_path = output_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv"
+    if shadow_distribution_source is not None:
+        loaded = load_shadow_distribution_source(
+            source_conn,
+            ShadowArtifactSource.csv_path(shadow_distribution_source),
+        )
+        write_shadow_distribution_csv(shadow_path, list(loaded.rows))
+        stats[shadow_path.name] = len(loaded.rows)
+    elif _table_exists(source_conn, TIER_SLOT_FILLER_DISTRIBUTION_TABLE):
+        loaded = load_shadow_distribution_source(
+            source_conn,
+            ShadowArtifactSource.db_table(),
+        )
+        write_shadow_distribution_csv(shadow_path, list(loaded.rows))
+        stats[shadow_path.name] = len(loaded.rows)
+    elif shadow_path.exists():
+        shadow_path.unlink()
 
     # -- config --
     placeholders = ", ".join("?" for _ in _RUNTIME_CONFIG_KEYS)
@@ -366,6 +400,77 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
     else:
         stats["slot_filler_model_scores"] = 0
 
+    # -- optional tier-slot runtime distribution --
+    shadow_distribution_path = data_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv"
+    if shadow_distribution_path.exists():
+        conn.execute(f"""
+            CREATE TABLE {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} (
+                slot_type TEXT NOT NULL,
+                tier TEXT NOT NULL,
+                filler TEXT NOT NULL,
+                display_filler TEXT NOT NULL,
+                probability REAL NOT NULL,
+                log_probability REAL NOT NULL,
+                soft_count REAL NOT NULL,
+                prior_count REAL NOT NULL,
+                evidence_count REAL NOT NULL,
+                source_count INTEGER NOT NULL,
+                anchored_source_count INTEGER NOT NULL,
+                inferred_source_count INTEGER NOT NULL,
+                anchored_soft_count REAL NOT NULL,
+                inferred_soft_count REAL NOT NULL,
+                teacher_confidence_mean REAL,
+                frequency INTEGER NOT NULL,
+                popularity_score REAL,
+                semantic_smoothing_mass REAL NOT NULL,
+                calibration_temperature REAL NOT NULL,
+                artifact_version TEXT NOT NULL
+            )
+        """)
+        with open(shadow_distribution_path, encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            rows = [
+                (
+                    row["slot_type"],
+                    row["tier"],
+                    row["filler"],
+                    row["display_filler"],
+                    float(row["probability"]),
+                    float(row["log_probability"]),
+                    float(row["soft_count"]),
+                    float(row["prior_count"]),
+                    float(row["evidence_count"]),
+                    int(row["source_count"]),
+                    int(row["anchored_source_count"]),
+                    int(row["inferred_source_count"]),
+                    float(row["anchored_soft_count"]),
+                    float(row["inferred_soft_count"]),
+                    float(row["teacher_confidence_mean"]) if row.get("teacher_confidence_mean") else None,
+                    int(row["frequency"]),
+                    float(row["popularity_score"]) if row.get("popularity_score") else None,
+                    float(row["semantic_smoothing_mass"]),
+                    float(row["calibration_temperature"]),
+                    row["artifact_version"],
+                )
+                for row in reader
+            ]
+            conn.executemany(
+                f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] = len(rows)
+        issues = validate_tier_slot_distribution(conn)
+        if issues:
+            detail = "\n".join(issue.message for issue in issues)
+            conn.close()
+            raise RuntimeError(
+                "tier_slot_filler_distribution_v1 validation failed:\n"
+                f"{detail}"
+            )
+    else:
+        stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] = 0
+
     # -- indexes --
     conn.execute("CREATE INDEX idx_sf_slot_type ON slot_fillers(slot_type)")
     conn.execute("CREATE INDEX idx_sf_slot_type_pos ON slot_fillers(slot_type, pos_tag)")
@@ -375,6 +480,11 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
     conn.execute(
         "CREATE INDEX idx_model_scores_tier ON slot_filler_model_scores(model_tier)"
     )
+    if stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE]:
+        conn.execute(
+            f"CREATE INDEX idx_tier_slot_dist_group ON "
+            f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}(slot_type, tier)"
+        )
 
     conn.commit()
     issues = validate_schema(conn, MINI_DB_SCHEMA_CONTRACTS)

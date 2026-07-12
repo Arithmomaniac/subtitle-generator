@@ -23,6 +23,7 @@ from subtitle_generator.jacket import (
     build_jacket_prompt,
     generate_jacket,
 )
+from subtitle_generator.shadow_runtime import build_generation_runtime
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -100,6 +101,14 @@ def build_sources(conn: sqlite3.Connection, sub: GeneratedSubtitle) -> dict:
     return sources
 
 
+def _parse_runtime_selection(body: dict):
+    return build_generation_runtime(
+        mode=body.get("runtime_mode"),
+        shadow_artifact=body.get("shadow_artifact"),
+        shadow_sampling_temperature=body.get("shadow_sampling_temperature", 1.0),
+    )
+
+
 def subtitle_to_dict(sub: GeneratedSubtitle, sources: dict) -> dict:
     """Convert a GeneratedSubtitle + sources into the API response dict."""
     return {
@@ -137,6 +146,10 @@ def handle_generate(body: dict) -> tuple[int, dict]:
         tone_set = parse_tone(tone_str)
     except ValueError as exc:
         return 400, {"error": str(exc)}
+    try:
+        runtime = _parse_runtime_selection(body)
+    except (ValueError, RuntimeError) as exc:
+        return 400, {"error": str(exc)}
 
     conn = get_db()
     try:
@@ -157,9 +170,12 @@ def handle_generate(body: dict) -> tuple[int, dict]:
                 allowed_tiers=tone_set,
                 remix_prob=remix_prob,
                 min_sim=min_sim,
+                runtime=runtime,
             )
         except TierFilterError as exc:
             return 422, {"error": str(exc)}
+        except RuntimeError as exc:
+            return 400, {"error": str(exc)}
         sources = build_sources(conn, sub)
         return 200, subtitle_to_dict(sub, sources)
     finally:
