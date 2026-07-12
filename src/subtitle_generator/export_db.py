@@ -1,7 +1,9 @@
 """Export data for deployment and build mini SQLite from exported data."""
 
 import csv
+import os
 import sqlite3
+import tempfile
 from pathlib import Path
 
 from subtitle_generator.schema_contracts import (
@@ -272,11 +274,39 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
 
     Returns stats dict: {table: row_count, ...}.
     """
-    if output_path.exists():
-        output_path.unlink()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_handle = tempfile.NamedTemporaryFile(
+        prefix=f"{output_path.stem}-",
+        suffix=".tmp.db",
+        dir=output_path.parent,
+        delete=False,
+    )
+    temp_path = Path(temp_handle.name)
+    temp_handle.close()
 
-    conn = sqlite3.connect(str(output_path))
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(temp_path))
+        stats = _populate_mini_db(conn, data_dir)
+        conn.commit()
+        issues = validate_schema(conn, MINI_DB_SCHEMA_CONTRACTS)
+        if issues:
+            detail = "\n".join(issue.message for issue in issues)
+            raise RuntimeError(f"Mini DB schema validation failed:\n{detail}")
+        conn.execute("VACUUM")
+        conn.close()
+        conn = None
+        os.replace(temp_path, output_path)
+        return stats
+    except Exception:
+        if conn is not None:
+            conn.close()
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
+
+
+def _populate_mini_db(conn: sqlite3.Connection, data_dir: Path) -> dict:
     stats: dict[str, int] = {}
 
     # -- slot_fillers (with scalar decomposition + remix columns) --
@@ -485,16 +515,6 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
             f"CREATE INDEX idx_tier_slot_dist_group ON "
             f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}(slot_type, tier)"
         )
-
-    conn.commit()
-    issues = validate_schema(conn, MINI_DB_SCHEMA_CONTRACTS)
-    if issues:
-        detail = "\n".join(issue.message for issue in issues)
-        conn.close()
-        raise RuntimeError(f"Mini DB schema validation failed:\n{detail}")
-    conn.execute("VACUUM")
-    conn.close()
-
     return stats
 
 

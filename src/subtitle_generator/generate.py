@@ -597,7 +597,7 @@ def compose_compound(
         ),
         (chosen_mod_pos, mod_space_count),
     ).fetchall()
-    mod_rows = _filter_generation_rows("of_modifier", mod_rows)
+    mod_rows = _filter_shadow_generation_rows("of_modifier", mod_rows, runtime)
     if not mod_rows:
         return None
     modifier = _sample_slot_rows(
@@ -615,7 +615,7 @@ def compose_compound(
             include_model_scores=_has_model_scores(conn),
         ),
     ).fetchall()
-    head_rows = _filter_generation_rows("of_head", head_rows)
+    head_rows = _filter_shadow_generation_rows("of_head", head_rows, runtime)
     if not head_rows:
         return None
     head = _sample_slot_rows(
@@ -653,7 +653,7 @@ def compose_prepositional(
         ),
         (prep,),
     ).fetchall()
-    topic_rows = _filter_generation_rows("of_topic", topic_rows)
+    topic_rows = _filter_shadow_generation_rows("of_topic", topic_rows, runtime)
     if not topic_rows:
         return None
     topic = _sample_slot_rows(
@@ -672,7 +672,7 @@ def compose_prepositional(
         ),
         (prep,),
     ).fetchall()
-    comp_rows = _filter_generation_rows("of_complement", comp_rows)
+    comp_rows = _filter_shadow_generation_rows("of_complement", comp_rows, runtime)
     if not comp_rows:
         return None
     complement = _sample_slot_rows(
@@ -850,6 +850,16 @@ def _slot_sampling_select(where: str, *, include_model_scores: bool) -> str:
 
 def _filter_generation_rows(slot_type: str, rows: list[tuple]) -> list[tuple]:
     return filter_runtime_eligible_rows(slot_type, rows)
+
+
+def _filter_shadow_generation_rows(
+    slot_type: str,
+    rows: list[tuple],
+    runtime: PreparedGenerationRuntime | None,
+) -> list[tuple]:
+    if runtime is not None and runtime.mode == RuntimeSelectionMode.SHADOW:
+        return _filter_generation_rows(slot_type, rows)
+    return rows
 
 
 def _has_model_scores(conn: sqlite3.Connection) -> bool:

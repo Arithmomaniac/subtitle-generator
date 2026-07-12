@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from subtitle_generator.export_db import build_mini_db, export_data
-from subtitle_generator.generate import generate_subtitle_matching_tiers
+from subtitle_generator.generate import compose_compound, generate_subtitle_matching_tiers
 from subtitle_generator.schema_contracts import TIER_SLOT_FILLER_DISTRIBUTION_TABLE
 from subtitle_generator.shadow_runtime import (
     PreparedGenerationRuntime,
@@ -203,6 +203,130 @@ def _distribution_rows(*, calibration_temperature: float = 0.73):
 def _write_shadow_artifact(path: Path, rows: list[dict[str, object]]) -> Path:
     write_shadow_distribution_csv(path, rows)
     return path
+
+
+def _make_legacy_remix_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            vector_sum BLOB,
+            token_count INTEGER,
+            centroid_dot REAL,
+            norm_sq REAL,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO slot_fillers (
+            slot_type, filler, mode, freq, pos_tag, popularity_score,
+            popularity_level, popularity_confidence
+        )
+        VALUES (?, ?, 'strict', ?, ?, 1.0, 1, 1.0)
+        """,
+        [
+            ("of_modifier", "C.E.ric", 10, "PROPN"),
+            ("of_head", "E.G.riggs", 10, None),
+        ],
+    )
+    conn.commit()
+    return conn
+
+
+def _make_shadow_remix_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            source_subtitle_id INTEGER,
+            freq INTEGER NOT NULL DEFAULT 1,
+            pos_tag TEXT,
+            prep TEXT,
+            remix_type TEXT,
+            remix_prep TEXT,
+            remix_word_count INTEGER,
+            vector_sum BLOB,
+            token_count INTEGER,
+            centroid_dot REAL,
+            norm_sq REAL,
+            popularity_score REAL,
+            popularity_level INTEGER DEFAULT 1,
+            popularity_confidence REAL DEFAULT 1.0,
+            UNIQUE(slot_type, filler)
+        )
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO slot_fillers (
+            slot_type, filler, mode, freq, pos_tag, popularity_score,
+            popularity_level, popularity_confidence
+        )
+        VALUES (?, ?, 'strict', ?, ?, 1.0, 1, 1.0)
+        """,
+        [
+            ("of_modifier", "C.E.ric", 10, "PROPN"),
+            ("of_modifier", "Atlas", 1, "PROPN"),
+            ("of_head", "E.G.riggs", 10, None),
+            ("of_head", "Archive", 1, None),
+        ],
+    )
+    conn.commit()
+    return conn
+
+
+def _remix_distribution_rows() -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for slot_type, display_filler in (
+        ("of_modifier", "Atlas"),
+        ("of_head", "Archive"),
+    ):
+        for tier in ("pop", "mainstream", "niche"):
+            rows.append(
+                {
+                    "slot_type": slot_type,
+                    "tier": tier,
+                    "filler": display_filler.casefold(),
+                    "display_filler": display_filler,
+                    "probability": 1.0,
+                    "log_probability": 0.0,
+                    "soft_count": 1.0,
+                    "prior_count": 0.0,
+                    "evidence_count": 1.0,
+                    "source_count": 1,
+                    "anchored_source_count": 1,
+                    "inferred_source_count": 0,
+                    "anchored_soft_count": 1.0,
+                    "inferred_soft_count": 0.0,
+                    "teacher_confidence_mean": 1.0,
+                    "frequency": 1,
+                    "popularity_score": 1.0,
+                    "semantic_smoothing_mass": 0.0,
+                    "calibration_temperature": 1.0,
+                    "artifact_version": "shadow-remix-v1",
+                }
+            )
+    return rows
 
 
 def _prepare_shadow_runtime(
@@ -565,6 +689,39 @@ def test_shadow_runtime_does_not_reapply_calibration_temperature(tmp_path):
     assert base == shifted
 
 
+def test_legacy_remix_runtime_keeps_prior_candidate_semantics():
+    conn = _make_legacy_remix_db()
+
+    composed = compose_compound(
+        conn,
+        random.Random(7),
+        {"config": {"remix_mod_pos_2word": {"PROPN": 1.0}}},
+        word_count=2,
+    )
+
+    assert composed == (
+        "C.E.ric E.G.riggs",
+        {"modifier": "C.E.ric", "head": "E.G.riggs"},
+    )
+
+
+def test_shadow_remix_runtime_filters_to_artifact_eligible_support(tmp_path):
+    conn = _make_shadow_remix_db()
+    artifact = _write_shadow_artifact(tmp_path / "remix-shadow.csv", _remix_distribution_rows())
+    runtime = _prepare_shadow_runtime(conn, artifact)
+
+    composed = compose_compound(
+        conn,
+        random.Random(7),
+        {"config": {"remix_mod_pos_2word": {"PROPN": 1.0}}},
+        word_count=2,
+        model_tier="pop",
+        runtime=runtime,
+    )
+
+    assert composed == ("Atlas Archive", {"modifier": "Atlas", "head": "Archive"})
+
+
 def test_shadow_runtime_comparison_outputs_replayable_provenance(tmp_path):
     conn = _make_shadow_runtime_db()
     artifact = _write_shadow_artifact(
@@ -683,3 +840,55 @@ def test_export_and_build_mini_db_include_shadow_distribution(tmp_path):
     assert stats[f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv"] == len(rows)
     assert build_stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] == len(rows)
     assert shadow_count == len(rows)
+
+
+def test_build_mini_db_preserves_existing_output_on_invalid_shadow_import(tmp_path):
+    conn = _make_shadow_runtime_db(tmp_path / "runtime.db")
+    data_dir = tmp_path / "data"
+    export_data(conn, data_dir)
+
+    invalid_rows = [
+        row
+        for row in _distribution_rows()
+        if not (row["slot_type"] == "of_object" and row["tier"] == "niche")
+    ]
+    _write_shadow_artifact(
+        data_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv",
+        invalid_rows,
+    )
+    mini_db_path = tmp_path / "mini.db"
+    original_bytes = b"keep-this-mini-db"
+    mini_db_path.write_bytes(original_bytes)
+
+    with pytest.raises(RuntimeError, match="distribution support must match"):
+        build_mini_db(data_dir, mini_db_path)
+
+    assert mini_db_path.read_bytes() == original_bytes
+    assert list(tmp_path.glob("mini-*.tmp.db")) == []
+
+
+def test_build_mini_db_replaces_existing_output_atomically_on_success(tmp_path):
+    conn = _make_shadow_runtime_db(tmp_path / "runtime.db")
+    data_dir = tmp_path / "data"
+    export_data(conn, data_dir)
+    shadow_rows = _distribution_rows()
+    _write_shadow_artifact(
+        data_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv",
+        shadow_rows,
+    )
+    mini_db_path = tmp_path / "mini.db"
+    mini_db_path.write_bytes(b"stale-mini-db")
+
+    build_stats = build_mini_db(data_dir, mini_db_path)
+    rebuilt = sqlite3.connect(mini_db_path)
+    try:
+        shadow_count = rebuilt.execute(
+            f"SELECT COUNT(*) FROM {TIER_SLOT_FILLER_DISTRIBUTION_TABLE}"
+        ).fetchone()[0]
+    finally:
+        rebuilt.close()
+
+    assert mini_db_path.read_bytes() != b"stale-mini-db"
+    assert build_stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] == len(shadow_rows)
+    assert shadow_count == len(shadow_rows)
+    assert list(tmp_path.glob("mini-*.tmp.db")) == []
