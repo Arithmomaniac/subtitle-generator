@@ -4,24 +4,24 @@
   "decision": "accept",
   "summary": "LGTM",
   "temperatures": {
-    "pop": 0.6383941030681763,
-    "mainstream": 0.7986318759171256,
-    "niche": 1.0099808733352318
+    "pop": 0.6388403387877195,
+    "mainstream": 0.7989968750641284,
+    "niche": 1.0100958599820107
   },
-  "metadata_digest": "3a7c8a1f07e6240d",
+  "metadata_digest": "48c5eee1989e8792",
   "metrics": {
     "heldout_nll": {
-      "baseline": 48890.623729718696,
-      "calibrated": 48787.48380965492,
-      "improvement": 103.13992006377521
+      "baseline": 48787.18580810517,
+      "calibrated": 48684.52438118338,
+      "improvement": 102.66142692178983
     },
     "reliability_ece": {
-      "baseline": 9.75781955236954e-19,
-      "calibrated": 2.8619532345496103e-06
+      "baseline": 1.0299920638612292e-18,
+      "calibrated": 2.8741992068926175e-06
     },
     "distinctiveness": {
-      "baseline_mean_cross_tier_js": 0.024218918826409867,
-      "calibrated_mean_cross_tier_js": 0.03707040974028351
+      "baseline_mean_cross_tier_js": 0.024219496866607508,
+      "calibrated_mean_cross_tier_js": 0.037037065596987086
     },
     "ranking": {
       "top1_hit_rate": 0.15217391304347827,
@@ -29,5 +29,5 @@
     }
   },
   "reviewer": null,
-  "created_at": "2026-07-12T05:51:01.442303+00:00"
+  "created_at": "2026-07-12T06:40:37.649785+00:00"
 }
