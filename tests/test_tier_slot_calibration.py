@@ -8,6 +8,7 @@ import pytest
 
 from subtitle_generator.tier_slot_calibration import (
     CalibrationConfig,
+    _next_calibration_proposals,
     apply_temperature,
     assign_source_folds,
     build_tier_slot_calibration,
@@ -394,3 +395,137 @@ def test_run_calibration_autoresearcher_emits_proposals(tmp_path: Path):
     with result.proposals_path.open(encoding="utf-8", newline="") as handle:
         proposals = list(csv.DictReader(handle))
     assert proposals  # at least one next-round proposal
+
+
+# ---------------------------------------------------------------------------
+# Regression: fold leakage via residual priors (#39 review bug 1)
+# ---------------------------------------------------------------------------
+
+
+def test_fold_train_build_ignores_heldout_source_labels():
+    """A fold's train distribution must not depend on held-out sources' labels.
+
+    ``residual_priors`` is the tier-marginal direction the ``(1 - confidence)``
+    residual mass spills into. If it were computed from the whole corpus and
+    reused per fold, relabeling the *held-out* sources would move a fold's
+    *train* distribution -- leaking the validation target into training. The
+    fold-safe build recomputes it from the train subset only, so held-out label
+    changes leave the train build byte-for-byte identical.
+    """
+
+    conn = _create_calibration_db()
+    inputs = load_distribution_inputs(conn)
+    links = load_strict_source_links(conn)
+    all_ids = sorted({subtitle_id for _f, subtitle_id in links})
+    # Hold out a slice that straddles the mainstream block (ids are laid out in
+    # tier order: pop, then mainstream, then niche) so relabeling it actually
+    # shifts the whole-corpus tier marginal.
+    heldout = set(all_ids[15:30])
+    train_ids = set(all_ids) - heldout
+
+    before = build_anchored_rows(conn, inputs, include_subtitle_ids=train_ids)
+
+    # Flip every held-out source's tier label to a single tier: this shifts the
+    # corpus tier-marginal prior, so a leaky build would move the train rows.
+    conn.executemany(
+        "UPDATE pattern_matches SET llm_market_tier = 'pop' WHERE subtitle_id = ?",
+        [(subtitle_id,) for subtitle_id in heldout],
+    )
+    conn.commit()
+    mutated_inputs = load_distribution_inputs(conn)
+    # Sanity: the mutation actually changed the whole-corpus residual priors,
+    # so this is a live leakage channel and not a no-op.
+    assert mutated_inputs.residual_priors != inputs.residual_priors
+    after = build_anchored_rows(conn, mutated_inputs, include_subtitle_ids=train_ids)
+
+    assert after == before
+
+
+# ---------------------------------------------------------------------------
+# Regression: unsafe AutoResearcher adoption fallback (#39 review bug 3)
+# ---------------------------------------------------------------------------
+
+
+def _metrics_row(name, *, distinct, nll_improvement, drop):
+    return {
+        "experiment": name,
+        "granularity": name,
+        "nll_improvement": nll_improvement,
+        "distinctiveness_drop": drop,
+        "tiers_kept_distinct": distinct,
+        "ece_baseline": 0.10,
+        "ece_calibrated": 0.10,
+    }
+
+
+def test_proposals_do_not_adopt_when_no_candidate_keeps_tiers_distinct():
+    rows = [
+        {**_metrics_row("baseline_T1", distinct=True, nll_improvement=0.0, drop=0.0),
+         "granularity": "none"},
+        _metrics_row("global_temperature", distinct=False, nll_improvement=5.0, drop=0.30),
+        _metrics_row("per_tier_temperature", distinct=False, nll_improvement=9.0, drop=0.42),
+    ]
+    proposals = _next_calibration_proposals(rows)
+    assert proposals  # it still says something actionable
+    top = proposals[0]
+    # No adoption language: never adopt a config that flattened every tier.
+    assert not str(top["proposal"]).startswith("adopt:")
+    assert "iterate" in str(top["proposal"]).lower()
+    assert "do not adopt" in str(top["rationale"]).lower()
+    assert not any(str(p["proposal"]).startswith("adopt:") for p in proposals)
+
+
+def test_proposals_adopt_only_the_safe_best():
+    rows = [
+        {**_metrics_row("baseline_T1", distinct=True, nll_improvement=0.0, drop=0.0),
+         "granularity": "none"},
+        _metrics_row("global_temperature", distinct=True, nll_improvement=4.0, drop=0.05),
+        # Higher NLL gain but it flattened the tiers -- must not be adopted.
+        _metrics_row("per_tier_slot_temperature", distinct=False, nll_improvement=12.0, drop=0.40),
+    ]
+    proposals = _next_calibration_proposals(rows)
+    assert proposals[0]["proposal"] == "adopt:global_temperature"
+
+
+# ---------------------------------------------------------------------------
+# Regression: reproducibility fingerprint covers real inputs (#39 review bug 4)
+# ---------------------------------------------------------------------------
+
+
+def test_input_digest_changes_when_evidence_changes_but_folds_identical(tmp_path: Path):
+    conn = _create_calibration_db()
+    config = CalibrationConfig("per_tier_temperature", "per_tier", folds=4)
+    first = build_tier_slot_calibration(conn, tmp_path / "a", config=config)
+    meta_a = json.loads(first.metadata_path.read_text(encoding="utf-8"))
+
+    # Retier one source. Its subtitle_id set is unchanged, so the fold
+    # assignment is byte-identical, but the evidence differs.
+    links = load_strict_source_links(conn)
+    a_source = sorted({subtitle_id for _f, subtitle_id in links})[0]
+    conn.execute(
+        "UPDATE pattern_matches SET llm_market_tier = 'niche' WHERE subtitle_id = ?",
+        (a_source,),
+    )
+    conn.commit()
+    second = build_tier_slot_calibration(conn, tmp_path / "b", config=config)
+    meta_b = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+
+    # Fold assignment is identical (same sources, same seed)...
+    assert meta_a["fold_assignment_digest"] == meta_b["fold_assignment_digest"]
+    # ...but the full-input digest reflects the changed evidence, so the strong
+    # "replays exactly" claim cannot be satisfied by a stale fold digest alone.
+    assert meta_a["input_digest"] != meta_b["input_digest"]
+
+
+def test_input_digest_is_stable_across_identical_runs(tmp_path: Path):
+    config = CalibrationConfig("per_tier_temperature", "per_tier", folds=4)
+    first = build_tier_slot_calibration(
+        _create_calibration_db(), tmp_path / "a", config=config
+    )
+    second = build_tier_slot_calibration(
+        _create_calibration_db(), tmp_path / "b", config=config
+    )
+    meta_a = json.loads(first.metadata_path.read_text(encoding="utf-8"))
+    meta_b = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+    assert meta_a["input_digest"] == meta_b["input_digest"]
+

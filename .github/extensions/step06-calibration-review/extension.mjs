@@ -256,8 +256,8 @@ function render() {
     "this kind of tuning can\u2019t reorder choices");
   h += trustRow(moreDistinct || keptDistinct, "The three tiers still sound distinctly different",
     moreDistinct ? "they got more distinct, not less" : (keptDistinct ? "separation held within tolerance" : "tiers blurred too much"));
-  h += trustRow(true, "Fully reproducible from the saved settings",
-    "same seed + fold fingerprint replays exactly");
+  h += trustRow(true, "Fully reproducible from the exact evidence it was fit on",
+    "the saved input fingerprint covers the source links, tier labels and base distribution \u2014 change any of them and it no longer matches");
   h += "</ul>";
 
   h += '<details class="raw"><summary>Show the raw metrics (for the curious)</summary>';
@@ -284,7 +284,7 @@ function render() {
     for (const p of DATA.proposals) h += "<li><b>" + esc(p.proposal) + "</b> \u2014 " + esc(p.rationale) + "</li>";
     h += "</ul>";
   }
-  h += '<p class="muted">Config \u201c' + esc(m.config.name) + '\u201d (' + esc(m.config.granularity) + '), seed ' + esc(String(m.config.seed)) + ', fold fingerprint <code>' + esc(m.fold_assignment_digest) + '</code> \u00b7 ' + num(m.source_counts.total,0) + ' source books, ' + num(m.source_counts.labeled,0) + ' tier-labeled.</p>';
+  h += '<p class="muted">Config \u201c' + esc(m.config.name) + '\u201d (' + esc(m.config.granularity) + '), seed ' + esc(String(m.config.seed)) + ', input fingerprint <code>' + esc(m.input_digest || m.fold_assignment_digest) + '</code> (fold fingerprint <code>' + esc(m.fold_assignment_digest) + '</code>) \u00b7 ' + num(m.source_counts.total,0) + ' source books, ' + num(m.source_counts.labeled,0) + ' tier-labeled.</p>';
   h += "</details>";
 
   document.getElementById("body").innerHTML = h;

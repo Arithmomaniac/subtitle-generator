@@ -17,6 +17,17 @@ picked, never *which* ranks first.
 Everything here is analysis-only and side-by-side: the served runtime artifact
 ``tier_slot_filler_distribution_v1.csv`` is never modified. Calibrated output goes
 to a ``*.calibrated.csv`` sidecar plus versioned, replayable metadata.
+
+**Calibration temperature is NOT sampling temperature.** The ``calibration_temperature``
+stored here (and in the sidecar/metadata) is a *fit-time shape correction*: it is
+baked once into the calibrated probabilities so their held-out fit is honest, and
+the sidecar rows already reflect it. Step 7's runtime *sampling temperature* is a
+separate, independent knob applied at generation time to trade diversity for
+determinism. Downstream code must treat the calibrated distribution as the
+finished shape and must NOT re-apply the calibration temperature as if it were a
+sampling temperature -- doing so would temperature-scale the same distribution
+twice. The two temperatures compose (a runtime sampler may still scale on top of
+the calibrated shape), but they are conceptually and numerically distinct.
 """
 
 from __future__ import annotations
@@ -40,6 +51,7 @@ from subtitle_generator.tier_slot_distribution import (
     DistributionInputs,
     _format_csv_value,
     _js_divergence,
+    _SourceLabel,
     _validate_rows,
     build_anchored_rows,
     load_distribution_inputs,
@@ -47,7 +59,7 @@ from subtitle_generator.tier_slot_distribution import (
 )
 
 TIERS = TIER_SLOT_FILLER_DISTRIBUTION_TIERS
-CALIBRATION_METADATA_SCHEMA_VERSION = 1
+CALIBRATION_METADATA_SCHEMA_VERSION = 2
 
 # Temperature search bounds. The upper bound is the distinctiveness guardrail:
 # temperatures above this are not allowed to flatten a tier so far that it loses
@@ -707,11 +719,60 @@ def _fold_digest(assignment: dict[int, int]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
+def _input_digest(
+    links: list[tuple[int, int]],
+    source_labels: dict[int, _SourceLabel],
+    base_rows: list[dict[str, object]],
+) -> str:
+    """Digest of the *actual* calibration inputs, not just the fold assignment.
+
+    A replay guarantee has to be tied to the evidence it was computed from.
+    ``fold_assignment_digest`` only records which source landed in which fold, so
+    two runs with identical folds but different DB evidence (new strict
+    source-filler links, relabeled/retiered sources, a rebuilt base distribution)
+    would share a fold digest yet produce different calibration results. This
+    digest covers, in a canonical order:
+
+    * every strict ``(slot_filler_id, subtitle_id)`` source link,
+    * each source's tier label and confidence, and
+    * the canonicalized base distribution rows the temperatures were fit against,
+
+    so a change in any of them changes the digest and the strong "replays
+    exactly" claim stays honest.
+    """
+
+    hasher = hashlib.sha256()
+    hasher.update(b"links\n")
+    for filler_id, subtitle_id in sorted(links):
+        hasher.update(f"{filler_id}:{subtitle_id}\n".encode())
+    hasher.update(b"labels\n")
+    for subtitle_id in sorted(source_labels):
+        label = source_labels[subtitle_id]
+        tier = label.tier if label.tier is not None else ""
+        confidence = "" if label.confidence is None else f"{label.confidence:.9g}"
+        hasher.update(f"{subtitle_id}:{tier}:{confidence}\n".encode())
+    hasher.update(b"base_rows\n")
+    canonical = sorted(
+        (
+            str(row["slot_type"]),
+            str(row["tier"]),
+            str(row["filler"]),
+            float(row["probability"]),
+        )
+        for row in base_rows
+    )
+    for slot, tier, filler, prob in canonical:
+        hasher.update(f"{slot}|{tier}|{filler}|{prob:.12g}\n".encode())
+    return hasher.hexdigest()[:16]
+
+
 def _build_metadata(
     config: CalibrationConfig,
     assignment: dict[int, int],
     inputs: DistributionInputs,
     metrics: _CalibrationMetrics,
+    *,
+    input_digest: str,
 ) -> dict[str, object]:
     labeled = sum(
         1
@@ -734,6 +795,12 @@ def _build_metadata(
             "temperature_max": config.temperature_max,
             "artifact_version": config.artifact_version,
         },
+        # ``fold_assignment_digest`` covers only which source landed in which
+        # fold; ``input_digest`` covers the actual evidence (links, tier
+        # labels/confidences, base rows) and is what the strong replay claim
+        # is tied to. Both are kept so a fold-only vs input change is
+        # distinguishable.
+        "input_digest": input_digest,
         "fold_assignment_digest": _fold_digest(assignment),
         "source_counts": {
             "total": len(assignment),
@@ -921,7 +988,8 @@ def _format_report(
     )
     lines.append(
         "- Calibration parameters versioned and replayable: **PASS** "
-        f"(`{metadata_path.name}`, fold digest "
+        f"(`{metadata_path.name}`, input digest "
+        f"`{metadata['input_digest']}`, fold digest "
         f"`{metadata['fold_assignment_digest']}`)."
     )
     lines.append("")
@@ -981,7 +1049,10 @@ def build_tier_slot_calibration(
     _write_calibrated(distribution_path, calibrated)
     _validate_rows(conn, calibrated)
 
-    metadata = _build_metadata(config, assignment, inputs, metrics)
+    input_digest = _input_digest(links, inputs.source_labels, full_rows)
+    metadata = _build_metadata(
+        config, assignment, inputs, metrics, input_digest=input_digest
+    )
     metadata_path = output_dir / "tier_slot_calibration_metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
@@ -1186,8 +1257,43 @@ def _next_calibration_proposals(
         return proposals
 
     safe = [row for row in candidates if row["tiers_kept_distinct"]]
-    pool = safe or candidates
-    best = max(pool, key=lambda row: row["nll_improvement"])
+
+    if not safe:
+        # No swept configuration kept the tiers distinct. Adopting *anything* here
+        # would flatten cross-tier vocabulary past the guardrail, so the correct
+        # move is to iterate with a tighter cap -- never adoption language.
+        worst_offender = max(
+            candidates, key=lambda row: float(row["distinctiveness_drop"])
+        )
+        proposals.append(
+            {
+                "priority": 1,
+                "proposal": "iterate:lower_temperature_cap",
+                "rationale": (
+                    "No swept configuration kept the tiers distinct -- every "
+                    "candidate flattened cross-tier vocabulary past the "
+                    f"distinctiveness guardrail (worst drop "
+                    f"{float(worst_offender['distinctiveness_drop']):.1%}). Do NOT "
+                    "adopt; tighten temperature_max and re-sweep before any adoption."
+                ),
+            }
+        )
+        best_unsafe = max(candidates, key=lambda row: row["nll_improvement"])
+        if best_unsafe["ece_calibrated"] >= best_unsafe["ece_baseline"] - 1e-6:
+            proposals.append(
+                {
+                    "priority": 2,
+                    "proposal": "consider_isotonic_or_platt",
+                    "rationale": (
+                        "Temperature left reliability (ECE) roughly unchanged; if a "
+                        "lower ECE is required, evaluate isotonic/Platt as the staged "
+                        "fallback (issue #39)."
+                    ),
+                }
+            )
+        return proposals
+
+    best = max(safe, key=lambda row: row["nll_improvement"])
 
     if best["nll_improvement"] <= 1e-6:
         proposals.append(

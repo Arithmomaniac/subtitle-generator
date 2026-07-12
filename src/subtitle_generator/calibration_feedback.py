@@ -14,6 +14,7 @@ This module is analysis-only and never touches the served distribution.
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,21 @@ from typing import Any
 VALID_OVERALL_DECISIONS = frozenset({"accept", "reject", "iterate"})
 
 DECISION_SCHEMA_VERSION = 1
+
+
+def _temperatures_match(
+    submitted: dict[str, float], authoritative: dict[str, float]
+) -> bool:
+    """Whether a submitted temperature map matches the reviewed metadata map."""
+
+    if submitted.keys() != authoritative.keys():
+        return False
+    return all(
+        math.isclose(
+            float(submitted[key]), float(authoritative[key]), rel_tol=1e-9, abs_tol=1e-12
+        )
+        for key in authoritative
+    )
 
 
 def build_decision_record(
@@ -104,6 +120,15 @@ def ingest_decision(
 
     Temperatures and metrics are read from the calibration metadata when a
     ``metadata_path`` is given, so the decision is tied to exactly what it judged.
+    The metadata temperatures are **authoritative**: a submission may omit
+    temperatures (they are then filled from metadata), but if it supplies
+    temperatures that disagree with the reviewed metadata the decision is
+    rejected -- a sign-off must not silently record a config other than the one
+    that produced the evidence.
+
+    The temperatures recorded here are *calibration* temperatures (the shape
+    correction baked into the sidecar distribution). They are NOT Step 7's
+    runtime *sampling* temperature; see ``tier_slot_calibration`` for the split.
     """
 
     overall = submission.get("overall") or {}
@@ -114,8 +139,19 @@ def ingest_decision(
 
     if metadata_path is not None and metadata_path.exists():
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        temperatures = temperatures or dict(metadata.get("temperatures", {}) or {})
-        metadata_digest = metadata.get("fold_assignment_digest")
+        metadata_temps = dict(metadata.get("temperatures", {}) or {})
+        submitted_temps = dict(submission.get("temperatures", {}) or {})
+        if submitted_temps and not _temperatures_match(submitted_temps, metadata_temps):
+            raise ValueError(
+                "submission temperatures "
+                f"{submitted_temps} do not match the reviewed calibration metadata "
+                f"temperatures {metadata_temps}; the metadata is authoritative -- omit "
+                "submission temperatures or correct them to sign off on the reviewed config"
+            )
+        temperatures = metadata_temps
+        metadata_digest = metadata.get("input_digest") or metadata.get(
+            "fold_assignment_digest"
+        )
         granularity = str(metadata.get("config", {}).get("granularity", granularity))
         metrics = {
             "heldout_nll": metadata.get("heldout_nll", {}),

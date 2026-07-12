@@ -79,3 +79,70 @@ def test_ingest_decision_reads_metadata(tmp_path: Path):
     assert record["metadata_digest"] == "abc123"
     assert record["granularity"] == "per_tier"
     assert record["metrics"]["heldout_nll"]["calibrated"] == 9.5
+
+
+def _write_metadata(tmp_path: Path, **overrides) -> Path:
+    metadata = {
+        "config": {"granularity": "per_tier"},
+        "temperatures": {"pop": 1.2, "mainstream": 1.0, "niche": 1.4},
+        "input_digest": "input123",
+        "fold_assignment_digest": "fold456",
+        "heldout_nll": {"baseline": 10.0, "calibrated": 9.5},
+        "reliability_ece": {"baseline": 0.2, "calibrated": 0.1},
+        "distinctiveness": {},
+        "ranking": {"top1_hit_rate": 1.0},
+    }
+    metadata.update(overrides)
+    path = tmp_path / "tier_slot_calibration_metadata.json"
+    path.write_text(json.dumps(metadata), encoding="utf-8")
+    return path
+
+
+def test_ingest_decision_rejects_temperature_mismatch(tmp_path: Path):
+    metadata_path = _write_metadata(tmp_path)
+    submission = {
+        "reviewer": "avi",
+        # These temperatures disagree with the reviewed metadata.
+        "temperatures": {"pop": 0.5, "mainstream": 1.0, "niche": 1.4},
+        "overall": {"decision": "accept", "summary": "Looks good."},
+    }
+    with pytest.raises(ValueError, match="do not match"):
+        ingest_decision(
+            submission,
+            decision_path=tmp_path / "decision.json",
+            metadata_path=metadata_path,
+        )
+
+
+def test_ingest_decision_allows_omitted_temperatures_from_metadata(tmp_path: Path):
+    metadata_path = _write_metadata(tmp_path)
+    decision_path = tmp_path / "decision.json"
+    submission = {
+        "reviewer": "avi",
+        # No temperatures supplied -> metadata is authoritative.
+        "overall": {"decision": "accept", "summary": "Ship the sidecar."},
+    }
+    ingest_decision(
+        submission, decision_path=decision_path, metadata_path=metadata_path
+    )
+    record = read_decision_record(decision_path)
+    assert record["temperatures"] == {"pop": 1.2, "mainstream": 1.0, "niche": 1.4}
+    # The full-input digest is the authoritative replay fingerprint.
+    assert record["metadata_digest"] == "input123"
+
+
+def test_ingest_decision_accepts_matching_temperatures(tmp_path: Path):
+    metadata_path = _write_metadata(tmp_path)
+    decision_path = tmp_path / "decision.json"
+    submission = {
+        "reviewer": "avi",
+        "temperatures": {"pop": 1.2, "mainstream": 1.0, "niche": 1.4},
+        "overall": {"decision": "accept", "summary": "Confirmed."},
+    }
+    status = ingest_decision(
+        submission, decision_path=decision_path, metadata_path=metadata_path
+    )
+    assert status["decision"] == "accept"
+    record = read_decision_record(decision_path)
+    assert record["temperatures"] == {"pop": 1.2, "mainstream": 1.0, "niche": 1.4}
+

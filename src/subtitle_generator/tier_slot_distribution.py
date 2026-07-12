@@ -362,6 +362,24 @@ def build_anchored_rows(
     ``None`` reproduces the full served build exactly).
     """
 
+    if include_subtitle_ids is None:
+        residual_priors = inputs.residual_priors
+    else:
+        # Fold-safe residual priors (#39): recompute the corpus tier-marginal
+        # prior from ONLY the train sources in this split. The residual prior is
+        # the direction the ``(1 - confidence)`` mass of a labeled source spills
+        # into the other tiers; if we reused the full-corpus prior here, a fold's
+        # train distribution would depend on the *held-out* sources' tier labels,
+        # leaking the validation target into training. Restricting to the train
+        # subset keeps each fold's train build a pure function of its train data.
+        residual_priors = _label_residual_priors(
+            [
+                label
+                for subtitle_id, label in inputs.source_labels.items()
+                if subtitle_id in include_subtitle_ids
+            ]
+        )
+
     cells = _build_evidence_cells(
         conn,
         fillers=inputs.fillers,
@@ -369,7 +387,7 @@ def build_anchored_rows(
         source_labels=inputs.source_labels,
         source_fallbacks=inputs.source_fallbacks,
         global_fallback=inputs.global_fallback,
-        residual_priors=inputs.residual_priors,
+        residual_priors=residual_priors,
         inferred_source_weight=inferred_source_weight,
         include_subtitle_ids=include_subtitle_ids,
     )
