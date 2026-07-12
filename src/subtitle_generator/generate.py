@@ -3,7 +3,6 @@
 import json
 import math
 import random
-import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
@@ -16,6 +15,10 @@ from subtitle_generator.config import load_tuning_config
 from subtitle_generator.remix_state import (
     RemixRuntimeContext,
     assert_remix_precompute_state,
+)
+from subtitle_generator.runtime_eligibility import (
+    filter_runtime_eligible_rows,
+    is_runtime_eligible_strict_filler,
 )
 from subtitle_generator.shadow_runtime import (
     GenerationRuntimeSelection,
@@ -30,8 +33,6 @@ MAX_TIER_FILTER_ATTEMPTS = 1000
 DEFAULT_GENERATION_TIER_ATTEMPTS = 25
 _DEFAULT_GENERATION_TIERS = ("pop", "mainstream", "niche")
 _MODEL_SCORE_INDEX = {"pop": 3, "mainstream": 4, "niche": 5}
-_BAD_ONE_WORD_OBJECTS = {"christian", "imf"}
-_BAD_STANDALONE_FILLERS = {"jr", "sr", "xcalibur"}
 
 
 class TierFilterError(RuntimeError):
@@ -596,6 +597,7 @@ def compose_compound(
         ),
         (chosen_mod_pos, mod_space_count),
     ).fetchall()
+    mod_rows = _filter_generation_rows("of_modifier", mod_rows)
     if not mod_rows:
         return None
     modifier = _sample_slot_rows(
@@ -613,6 +615,7 @@ def compose_compound(
             include_model_scores=_has_model_scores(conn),
         ),
     ).fetchall()
+    head_rows = _filter_generation_rows("of_head", head_rows)
     if not head_rows:
         return None
     head = _sample_slot_rows(
@@ -650,6 +653,7 @@ def compose_prepositional(
         ),
         (prep,),
     ).fetchall()
+    topic_rows = _filter_generation_rows("of_topic", topic_rows)
     if not topic_rows:
         return None
     topic = _sample_slot_rows(
@@ -668,6 +672,7 @@ def compose_prepositional(
         ),
         (prep,),
     ).fetchall()
+    comp_rows = _filter_generation_rows("of_complement", comp_rows)
     if not comp_rows:
         return None
     complement = _sample_slot_rows(
@@ -844,7 +849,7 @@ def _slot_sampling_select(where: str, *, include_model_scores: bool) -> str:
 
 
 def _filter_generation_rows(slot_type: str, rows: list[tuple]) -> list[tuple]:
-    return [row for row in rows if not _is_literal_bad_filler(slot_type, row[0])]
+    return filter_runtime_eligible_rows(slot_type, rows)
 
 
 def _has_model_scores(conn: sqlite3.Connection) -> bool:
@@ -855,19 +860,7 @@ def _has_model_scores(conn: sqlite3.Connection) -> bool:
 
 
 def _is_literal_bad_filler(slot_type: str, filler: str) -> bool:
-    lower = (filler or "").strip().lower()
-    if not lower:
-        return True
-    if lower in _BAD_STANDALONE_FILLERS:
-        return True
-    if re.search(r",\s*(?:jr|sr)\.?$", lower):
-        return True
-    if slot_type == "of_object" and lower in _BAD_ONE_WORD_OBJECTS:
-        return True
-    # Artifact like H.G.W.ells: run-together initials followed by a lowercase tail.
-    if re.search(r"(?:[a-z]\.){2,}[a-z]", lower):
-        return True
-    return False
+    return not is_runtime_eligible_strict_filler(slot_type, filler)
 
 
 def _has_enough_candidates(

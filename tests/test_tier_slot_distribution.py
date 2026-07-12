@@ -128,6 +128,36 @@ def test_build_tier_slot_distribution_normalizes_each_tier_slot(tmp_path: Path):
     assert all(abs(total - 1.0) < 0.000001 for total in groups.values())
 
 
+def test_build_tier_slot_distribution_excludes_runtime_ineligible_fillers(
+    tmp_path: Path,
+):
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    conn = _create_distribution_db()
+    conn.execute(
+        """
+        INSERT INTO slot_fillers VALUES
+            (5, 'list_item', 'Jr', 'strict', 20, 0.2)
+        """
+    )
+    conn.execute("INSERT INTO slot_filler_sources VALUES (5, 101)")
+    conn.execute(
+        """
+        INSERT INTO slot_filler_model_scores VALUES
+            (5, 0.5, 0.3, 0.2, 'pop', 1)
+        """
+    )
+    conn.commit()
+
+    result = build_tier_slot_distribution(conn, tmp_path, alpha=0.5)
+    rows = _read_distribution(result.distribution_path)
+
+    assert ("list_item", "pop", "jr") not in rows
+    assert ("list_item", "mainstream", "jr") not in rows
+    assert ("list_item", "niche", "jr") not in rows
+    assert result.row_count == 9
+
+
 def test_run_semantic_smoothing_ablation_writes_metrics_and_report(tmp_path: Path):
     import struct
 

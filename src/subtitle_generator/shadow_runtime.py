@@ -14,10 +14,10 @@ from subtitle_generator.schema_contracts import (
     TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
     validate_tier_slot_distribution,
 )
+from subtitle_generator.runtime_eligibility import filler_key as _filler_key
 from subtitle_generator.tier_slot_calibration import apply_temperature
 from subtitle_generator.tier_slot_distribution import (
     DISTRIBUTION_COLUMNS,
-    _filler_key,
     _format_csv_value,
     _validate_rows,
 )

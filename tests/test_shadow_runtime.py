@@ -219,6 +219,72 @@ def _prepare_shadow_runtime(
     return prepare_generation_runtime(conn, runtime)
 
 
+def _install_distribution_table(
+    conn: sqlite3.Connection,
+    rows: list[dict[str, object]],
+) -> None:
+    conn.execute(f"DROP TABLE IF EXISTS {TIER_SLOT_FILLER_DISTRIBUTION_TABLE}")
+    conn.execute(
+        f"""
+        CREATE TABLE {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} (
+            slot_type TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
+            probability REAL NOT NULL,
+            log_probability REAL NOT NULL,
+            soft_count REAL NOT NULL,
+            prior_count REAL NOT NULL,
+            evidence_count REAL NOT NULL,
+            source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
+            teacher_confidence_mean REAL,
+            frequency INTEGER NOT NULL,
+            popularity_score REAL,
+            semantic_smoothing_mass REAL NOT NULL,
+            calibration_temperature REAL NOT NULL,
+            artifact_version TEXT NOT NULL
+        )
+        """
+    )
+    conn.executemany(
+        f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            tuple(
+                row[column]
+                for column in (
+                    "slot_type",
+                    "tier",
+                    "filler",
+                    "display_filler",
+                    "probability",
+                    "log_probability",
+                    "soft_count",
+                    "prior_count",
+                    "evidence_count",
+                    "source_count",
+                    "anchored_source_count",
+                    "inferred_source_count",
+                    "anchored_soft_count",
+                    "inferred_soft_count",
+                    "teacher_confidence_mean",
+                    "frequency",
+                    "popularity_score",
+                    "semantic_smoothing_mass",
+                    "calibration_temperature",
+                    "artifact_version",
+                )
+            )
+            for row in rows
+        ],
+    )
+    conn.commit()
+
+
 def test_default_runtime_remains_equivalent_to_explicit_legacy(tmp_path):
     conn = _make_shadow_runtime_db()
     legacy_runtime = build_generation_runtime(mode="legacy")
@@ -337,7 +403,7 @@ def test_shadow_runtime_reports_invalid_distribution_coverage(tmp_path):
     )
     runtime = build_generation_runtime(mode="shadow", shadow_artifact=artifact)
 
-    with pytest.raises(RuntimeError, match="every \\(tier, slot_type\\) pair"):
+    with pytest.raises(RuntimeError, match="distribution support must match"):
         generate_subtitle_matching_tiers(
             conn,
             allowed_tiers={"niche"},
@@ -346,6 +412,71 @@ def test_shadow_runtime_reports_invalid_distribution_coverage(tmp_path):
             min_sim=0.0,
             runtime=runtime,
         )
+
+
+@pytest.mark.parametrize("source_kind", ["csv", "db"])
+def test_shadow_runtime_fails_on_ineligible_high_probability_support_without_renormalizing(
+    tmp_path,
+    source_kind: str,
+):
+    conn = _make_shadow_runtime_db()
+    conn.execute(
+        """
+        INSERT INTO slot_fillers (
+            slot_type, filler, mode, source_subtitle_id, freq, popularity_score,
+            popularity_level, popularity_confidence
+        )
+        VALUES ('list_item', 'Jr', 'strict', 99, 10, 1.0, 1, 1.0)
+        """
+    )
+    conn.commit()
+    rows = _distribution_rows()
+    pop_list_rows = [
+        row
+        for row in rows
+        if row["slot_type"] == "list_item" and row["tier"] == "pop"
+    ]
+    for row in pop_list_rows:
+        if row["display_filler"] == "Race":
+            row["probability"] = 0.02
+        elif row["display_filler"] == "Power":
+            row["probability"] = 0.01
+        else:
+            row["probability"] = 0.0
+        row["log_probability"] = 0.0 if row["probability"] == 0.0 else math.log(row["probability"])
+    rows.append(
+        {
+            "slot_type": "list_item",
+            "tier": "pop",
+            "filler": "jr",
+            "display_filler": "Jr",
+            "probability": 0.97,
+            "log_probability": math.log(0.97),
+            "soft_count": 1.0,
+            "prior_count": 0.0,
+            "evidence_count": 1.0,
+            "source_count": 1,
+            "anchored_source_count": 1,
+            "inferred_source_count": 0,
+            "anchored_soft_count": 1.0,
+            "inferred_soft_count": 0.0,
+            "teacher_confidence_mean": 1.0,
+            "frequency": 10,
+            "popularity_score": 1.0,
+            "semantic_smoothing_mass": 0.0,
+            "calibration_temperature": 0.73,
+            "artifact_version": "shadow-test-v1",
+        }
+    )
+    if source_kind == "csv":
+        artifact = _write_shadow_artifact(tmp_path / "invalid.csv", rows)
+        runtime = build_generation_runtime(mode="shadow", shadow_artifact=artifact)
+    else:
+        _install_distribution_table(conn, rows)
+        runtime = build_generation_runtime(mode="shadow")
+
+    with pytest.raises(RuntimeError, match="ineligible fillers"):
+        prepare_generation_runtime(conn, runtime)
 
 
 def test_shadow_runtime_sampling_temperature_is_explicit_and_identity_by_default(

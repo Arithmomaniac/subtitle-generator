@@ -13,6 +13,11 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
+from subtitle_generator.runtime_eligibility import (
+    filler_key as _filler_key,
+    is_runtime_eligible_strict_filler,
+    normalize_filler as _normalize_filler,
+)
 from subtitle_generator.schema_contracts import (
     TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
     TIER_SLOT_FILLER_DISTRIBUTION_TIERS,
@@ -987,6 +992,8 @@ def _load_fillers(conn: sqlite3.Connection) -> tuple[dict[str, _Filler], dict[in
         filler_id = int(row[0])
         slot_type = row[1]
         original_filler = row[2]
+        if not is_runtime_eligible_strict_filler(slot_type, original_filler):
+            continue
         frequency = int(row[3] or 0)
         weight = max(1, frequency)
         key = _filler_key(slot_type, original_filler)
@@ -3129,16 +3136,6 @@ def _normalize(values: dict[str, float]) -> dict[str, float]:
     if total <= 0:
         return {tier: 1.0 / len(TIERS) for tier in TIERS}
     return {tier: cleaned[tier] / total for tier in TIERS}
-
-
-def _normalize_filler(filler: str) -> str:
-    return " ".join(filler.split()).casefold()
-
-
-def _filler_key(slot_type: str, filler: str) -> str:
-    return f"{slot_type}\0{_normalize_filler(filler)}"
-
-
 def _clamp_confidence(value: object) -> float | None:
     if value is None:
         return None

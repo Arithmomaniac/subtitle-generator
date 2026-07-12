@@ -535,7 +535,7 @@ def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
 
     assert any(issue.column == "filler" for issue in issues)
     assert any(issue.column == "probability" for issue in issues)
-    assert any("every (tier, slot_type) pair" in issue.message for issue in issues)
+    assert any("distribution support must match" in issue.message for issue in issues)
 
 
 def test_tier_slot_distribution_contract_reports_count_identity_mismatch():

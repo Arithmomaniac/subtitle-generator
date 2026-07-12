@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
+
+from subtitle_generator.runtime_eligibility import (
+    filler_key,
+    is_runtime_eligible_strict_filler,
+    load_runtime_eligible_strict_filler_keys,
+)
 
 
 TIER_SLOT_FILLER_DISTRIBUTION_TABLE = "tier_slot_filler_distribution_v1"
@@ -306,60 +313,76 @@ def validate_tier_slot_distribution(
             ),
         ))
 
-    missing_fillers = conn.execute(
-        f"""
-        SELECT COUNT(*)
-        FROM {table} dist
-        LEFT JOIN slot_fillers sf
-          ON sf.slot_type = dist.slot_type
-         AND sf.filler = dist.display_filler
-         AND sf.mode = 'strict'
-        WHERE sf.id IS NULL
-        """
-    ).fetchone()[0]
-    if missing_fillers:
+    eligible_literals = {
+        (str(slot_type), str(filler))
+        for slot_type, filler in conn.execute(
+            """
+            SELECT slot_type, filler
+            FROM slot_fillers
+            WHERE mode = 'strict'
+            """
+        ).fetchall()
+        if is_runtime_eligible_strict_filler(str(slot_type), str(filler))
+    }
+    eligible_keys_by_slot = load_runtime_eligible_strict_filler_keys(conn)
+    artifact_keys_by_group: dict[tuple[str, str], set[str]] = defaultdict(set)
+    ineligible_rows: list[tuple[str, str, str]] = []
+    for slot_type_raw, tier_raw, display_filler_raw in conn.execute(
+        f"SELECT slot_type, tier, display_filler FROM {table}"
+    ).fetchall():
+        slot_type = str(slot_type_raw)
+        tier = str(tier_raw)
+        display_filler = str(display_filler_raw)
+        if (slot_type, display_filler) not in eligible_literals:
+            ineligible_rows.append((slot_type, tier, display_filler))
+        artifact_keys_by_group[(slot_type, tier)].add(
+            filler_key(slot_type, display_filler)
+        )
+    if ineligible_rows:
+        examples = ", ".join(
+            f"({tier}, {slot_type}, {display_filler})"
+            for slot_type, tier, display_filler in ineligible_rows[:3]
+        )
         issues.append(SchemaIssue(
             stage="tier_slot_distribution",
             table=table,
             column="filler",
             message=(
                 "tier_slot_distribution: distribution rows must reference "
-                "existing strict slot_fillers rows"
+                "existing runtime-eligible strict slot_fillers rows"
             ),
         ))
-
-    missing_groups = conn.execute(
-        f"""
-        WITH required AS (
-            SELECT DISTINCT sf.slot_type, tier
-            FROM slot_fillers sf
-            CROSS JOIN (
-                SELECT 'pop' AS tier
-                UNION ALL SELECT 'mainstream'
-                UNION ALL SELECT 'niche'
-            )
-            WHERE sf.mode = 'strict'
-        ),
-        present AS (
-            SELECT DISTINCT slot_type, tier
-            FROM {table}
-        )
-        SELECT COUNT(*)
-        FROM required
-        LEFT JOIN present
-          ON present.slot_type = required.slot_type
-         AND present.tier = required.tier
-        WHERE present.slot_type IS NULL
-        """
-    ).fetchone()[0]
-    if missing_groups:
         issues.append(SchemaIssue(
             stage="tier_slot_distribution",
             table=table,
-            column=None,
+            column="display_filler",
             message=(
-                "tier_slot_distribution: distribution must include every "
-                "(tier, slot_type) pair present in strict slot_fillers"
+                "tier_slot_distribution: runtime support mismatch includes "
+                f"ineligible fillers, e.g. {examples}"
+            ),
+        ))
+
+    support_mismatches: list[tuple[str, str, int, int]] = []
+    for slot_type, eligible_keys in eligible_keys_by_slot.items():
+        for tier in valid_tiers:
+            artifact_keys = artifact_keys_by_group.get((slot_type, tier), set())
+            missing = len(eligible_keys - artifact_keys)
+            extra = len(artifact_keys - eligible_keys)
+            if missing or extra:
+                support_mismatches.append((tier, slot_type, missing, extra))
+    if support_mismatches:
+        examples = ", ".join(
+            f"({tier}, {slot_type}: missing={missing}, extra={extra})"
+            for tier, slot_type, missing, extra in support_mismatches[:5]
+        )
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="filler",
+            message=(
+                "tier_slot_distribution: distribution support must match the "
+                "runtime-eligible strict filler set for every (tier, slot_type) "
+                f"group; mismatches: {examples}"
             ),
         ))
 
