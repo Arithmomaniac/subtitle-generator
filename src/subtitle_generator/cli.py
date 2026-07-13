@@ -32,11 +32,13 @@ from subtitle_generator.jacket import (
     generate_jacket,
 )
 from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
+from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
 from subtitle_generator.shadow_runtime import build_generation_runtime
 from subtitle_generator.shadow_runtime_compare import (
     DEFAULT_COMPARISON_SEEDS,
     build_shadow_runtime_comparison,
 )
+from subtitle_generator.step08_validation import run_step08_validation
 from subtitle_generator.slots import build_slots, ensure_slot_tables
 from subtitle_generator.tiering import compute_tier_evidence
 
@@ -603,6 +605,63 @@ def compare_shadow_runtime_cmd(
     click.echo(f"Shadow runtime comparison written to {result.report_path}")
     click.echo(f"Replay packet: {result.details_path}")
     click.echo(f"Comparisons: {result.comparison_count}")
+
+
+@cli.command("validate-artifact-runtime")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("test-results/step08-validation"),
+    show_default=True,
+)
+@click.option(
+    "--decision-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("feedback/step08-validation"),
+    show_default=True,
+)
+@click.option("--samples-per-scenario", type=click.IntRange(min=1), default=30)
+@click.option("--seed-base", type=int, default=41000, show_default=True)
+@click.option("--rater-model", default=DEFAULT_RATER_MODEL, show_default=True)
+@click.option("--skip-ratings", is_flag=True)
+def validate_artifact_runtime_cmd(
+    db_path: Path,
+    output_dir: Path,
+    decision_dir: Path,
+    samples_per_scenario: int,
+    seed_base: int,
+    rater_model: str,
+    skip_ratings: bool,
+):
+    """Run the bounded Step 8 artifact-runtime behavioral validation."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        result = run_step08_validation(
+            conn,
+            db_path,
+            output_dir,
+            decision_dir,
+            samples_per_scenario=samples_per_scenario,
+            seed_base=seed_base,
+            rater_model=rater_model,
+            rate_with_copilot=not skip_ratings,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Step 8 report: {result.report_path}")
+    click.echo(f"Replay packet: {result.replay_path}")
+    click.echo(f"Decision: {result.recommendation}")
+    click.echo(f"Samples: {result.sample_count}")
 
 
 @cli.command()

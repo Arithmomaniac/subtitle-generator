@@ -1,0 +1,652 @@
+{
+  "decision": "defer",
+  "digests": {
+    "accepted_decisions": {
+      "step05": "b900b0b6996747dbaaf3f9e68565a8926ddf8d0a0d84702076e9d84d5bfb4b42",
+      "step06": "becbea83b08198b7e0a6d9893458e9fc56b3f62d165cf50ce7c18effa09c451b"
+    },
+    "artifacts": {
+      "anchored_base": "7d5a00d9d38c8a3c100f4658ec758d0a93f8b8355c4a52d830539041583f3a28",
+      "calibrated": "b63ae661c0541b3548330e8f85ff808de2731a3fa63b92804f7dc3b1ddd7e91b",
+      "smoothed": "23136fe66a4d7f2558e68d01483281d62a7239134278a3db5c4aa34dd0e4125d"
+    },
+    "database": "53c7a8d83ae9758d5b8c927b1c144c2f53fbc00c12ace88e7442083096710782",
+    "evidence_ceiling": "4750e9a7d4bffae4ab914ab68aa72ca1875617a3a74efb662ec95de3250912bb",
+    "ratings": "ef31fec1b8eb74b1a2bcd073ee321fb5fa47609fc947a7de24a3575f0f905a9d",
+    "replay_input": "e3e831bbcecfb809f4be341af7567ad037b7ee738ad0213beba55eb0320ec807",
+    "samples": "7ad5319903696af65d414a11751b6da38e9f0c1df0dd0264f298b7008cbd7714",
+    "smoothing_review": "8896448e1d5f14fc823f25af3a20219904f4862e0177c7e7c45b6b6a97d3e0e1"
+  },
+  "evidence_ceiling": {
+    "conclusion": "Evidence scarcity/teacher imbalance is limiting recoverable pop/mainstream vocabulary.",
+    "groups": [
+      {
+        "anchored_vocabulary": 99,
+        "effective_n": 4051.332775653256,
+        "slot_type": "list_item",
+        "smoothed_changed_vocabulary": 4941,
+        "smoothed_effective_n": 4117.317595353565,
+        "smoothed_top10_mass": 0.03391846746104,
+        "support": 4941,
+        "tier": "pop",
+        "top10_mass": 0.03474434159792
+      },
+      {
+        "anchored_vocabulary": 32,
+        "effective_n": 488.84291865719194,
+        "slot_type": "action_noun",
+        "smoothed_changed_vocabulary": 1011,
+        "smoothed_effective_n": 504.3464184138359,
+        "smoothed_top10_mass": 0.19053242789652,
+        "support": 1011,
+        "tier": "pop",
+        "top10_mass": 0.19345836720615
+      },
+      {
+        "anchored_vocabulary": 51,
+        "effective_n": 2886.413643612178,
+        "slot_type": "of_object",
+        "smoothed_changed_vocabulary": 3200,
+        "smoothed_effective_n": 2920.0801701163823,
+        "smoothed_top10_mass": 0.02281959044435,
+        "support": 3200,
+        "tier": "pop",
+        "top10_mass": 0.02434106931678
+      },
+      {
+        "anchored_vocabulary": 379,
+        "effective_n": 3150.713026516392,
+        "slot_type": "list_item",
+        "smoothed_changed_vocabulary": 4941,
+        "smoothed_effective_n": 3218.2780176513484,
+        "smoothed_top10_mass": 0.06474421578228,
+        "support": 4941,
+        "tier": "mainstream",
+        "top10_mass": 0.06492682458907
+      },
+      {
+        "anchored_vocabulary": 104,
+        "effective_n": 260.3524160399978,
+        "slot_type": "action_noun",
+        "smoothed_changed_vocabulary": 1011,
+        "smoothed_effective_n": 272.1967233881907,
+        "smoothed_top10_mass": 0.3225794872584,
+        "support": 1011,
+        "tier": "mainstream",
+        "top10_mass": 0.3279328397581
+      },
+      {
+        "anchored_vocabulary": 213,
+        "effective_n": 2524.276021755308,
+        "slot_type": "of_object",
+        "smoothed_changed_vocabulary": 3200,
+        "smoothed_effective_n": 2566.0206636548355,
+        "smoothed_top10_mass": 0.04360188857566,
+        "support": 3200,
+        "tier": "mainstream",
+        "top10_mass": 0.04442509155823
+      }
+    ],
+    "limiting": true
+  },
+  "gate_policy": {
+    "coherence_mean_delta_min": -0.5,
+    "intentional_shift_js_min": 0.001,
+    "mainstream_pairwise_js_absolute_min": 0.01,
+    "mainstream_pairwise_js_ratio_min": 0.8,
+    "minimum_samples_per_scenario": 30,
+    "niche_tail_exposure_ratio_min": 0.8,
+    "pop_effective_n_ratio_min": 0.8,
+    "pop_top_filler_mass_absolute_max": 0.15,
+    "pop_top_filler_mass_ratio_max": 1.25,
+    "quality_mean_delta_min": -0.5,
+    "requested_tier_compliance_min": 0.75,
+    "tone_separation_ratio_min": 0.8
+  },
+  "gates": {
+    "anchored_base": [
+      {
+        "evidence": {
+          "candidate_effective_n": 129.06594532159488,
+          "candidate_top_mass": 0.022222222222222223,
+          "legacy_effective_n": 4.0,
+          "legacy_top_mass": 0.25
+        },
+        "name": "no_pop_collapse",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6563805797615194,
+          "floor": 0.5545177444465164,
+          "legacy": 0.6931471805581454
+        },
+        "name": "mainstream_distinct",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.08759124087591241,
+          "legacy": 0.07971014492753623
+        },
+        "name": "niche_tail_retained",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "coherence": 6.391666666666667,
+            "evocativeness": 5.016666666666667,
+            "overall": 5.722222222222222,
+            "surprise": 5.758333333333334
+          },
+          "legacy": {
+            "coherence": 5.425,
+            "evocativeness": 5.075,
+            "overall": 5.633333333333334,
+            "surprise": 6.4
+          }
+        },
+        "name": "quality_non_inferiority",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6543214132513114,
+          "legacy": 0.6931471805580385
+        },
+        "name": "tone_separation_non_regression",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5888888888888889
+        },
+        "name": "compatible_requested_tier_evidence",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "mean_js_from_legacy": 0.052899121544875555,
+          "rationale": "Replace sqrt(freq)*P(tier|filler) with explicit P(filler|tier,slot); calibration and smoothing are separately attributable."
+        },
+        "name": "intentional_shift",
+        "status": "pass"
+      }
+    ],
+    "calibrated": [
+      {
+        "evidence": {
+          "candidate_effective_n": 106.1606898605631,
+          "candidate_top_mass": 0.046511627906976744,
+          "legacy_effective_n": 4.0,
+          "legacy_top_mass": 0.25
+        },
+        "name": "no_pop_collapse",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5946769835738621,
+          "floor": 0.5545177444465164,
+          "legacy": 0.6931471805581454
+        },
+        "name": "mainstream_distinct",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.05263157894736842,
+          "legacy": 0.07971014492753623
+        },
+        "name": "niche_tail_retained",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "coherence": 7.058333333333334,
+            "evocativeness": 5.075,
+            "overall": 5.908333333333333,
+            "surprise": 5.591666666666667
+          },
+          "legacy": {
+            "coherence": 5.425,
+            "evocativeness": 5.075,
+            "overall": 5.633333333333334,
+            "surprise": 6.4
+          }
+        },
+        "name": "quality_non_inferiority",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6045027636166894,
+          "legacy": 0.6931471805580385
+        },
+        "name": "tone_separation_non_regression",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5666666666666667
+        },
+        "name": "compatible_requested_tier_evidence",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "mean_js_from_legacy": 0.08539054533821375,
+          "rationale": "Replace sqrt(freq)*P(tier|filler) with explicit P(filler|tier,slot); calibration and smoothing are separately attributable."
+        },
+        "name": "intentional_shift",
+        "status": "pass"
+      }
+    ],
+    "smoothed": [
+      {
+        "evidence": {
+          "candidate_effective_n": 128.3993249743397,
+          "candidate_top_mass": 0.022556390977443608,
+          "legacy_effective_n": 4.0,
+          "legacy_top_mass": 0.25
+        },
+        "name": "no_pop_collapse",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.659826770381247,
+          "floor": 0.5545177444465164,
+          "legacy": 0.6931471805581454
+        },
+        "name": "mainstream_distinct",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.10606060606060606,
+          "legacy": 0.07971014492753623
+        },
+        "name": "niche_tail_retained",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "coherence": 6.758333333333334,
+            "evocativeness": 5.15,
+            "overall": 5.794444444444444,
+            "surprise": 5.475
+          },
+          "legacy": {
+            "coherence": 5.425,
+            "evocativeness": 5.075,
+            "overall": 5.633333333333334,
+            "surprise": 6.4
+          }
+        },
+        "name": "quality_non_inferiority",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6573236755174956,
+          "legacy": 0.6931471805580385
+        },
+        "name": "tone_separation_non_regression",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5444444444444444
+        },
+        "name": "compatible_requested_tier_evidence",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "mean_js_from_legacy": 0.052750711732806564,
+          "rationale": "Replace sqrt(freq)*P(tier|filler) with explicit P(filler|tier,slot); calibration and smoothing are separately attributable."
+        },
+        "name": "intentional_shift",
+        "status": "pass"
+      }
+    ]
+  },
+  "metrics": {
+    "anchored_base": {
+      "mainstream": {
+        "compatible_requested_tier_compliance": 0.6333333333333333,
+        "effective_filler_n": 120.36612332796985,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.790538125575509,
+        "legacy_requested_tier_compliance": 0.06666666666666667,
+        "mean_evidence_count": 10.193381983894245,
+        "mean_source_count": 29.763358778625953,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.12213740458015267,
+        "top_filler_mass": 0.015267175572519083,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9389312977099237,
+        "unique_subtitle_rate": 1.0
+      },
+      "mainstream_distinctiveness": 0.6563805797615194,
+      "mean_js_from_legacy": 0.052899121544875555,
+      "niche": {
+        "compatible_requested_tier_compliance": 0.5666666666666667,
+        "effective_filler_n": 130.24095581682784,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.869386241115721,
+        "legacy_requested_tier_compliance": 1,
+        "mean_evidence_count": 17.844018514269415,
+        "mean_source_count": 30.116788321167885,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.08759124087591241,
+        "top_filler_mass": 0.014598540145985401,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9635036496350365,
+        "unique_subtitle_rate": 1.0
+      },
+      "pop": {
+        "compatible_requested_tier_compliance": 0.5666666666666667,
+        "effective_filler_n": 129.06594532159488,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.86032347778477,
+        "legacy_requested_tier_compliance": 0,
+        "mean_evidence_count": 3.595770540363089,
+        "mean_source_count": 27.711111111111112,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.1037037037037037,
+        "top_filler_mass": 0.022222222222222223,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9703703703703703,
+        "unique_subtitle_rate": 1.0
+      },
+      "quality": {
+        "coherence": 6.391666666666667,
+        "evocativeness": 5.016666666666667,
+        "overall": 5.722222222222222,
+        "surprise": 5.758333333333334
+      },
+      "tone_separation": 0.6543214132513114
+    },
+    "calibrated": {
+      "mainstream": {
+        "compatible_requested_tier_compliance": 0.36666666666666664,
+        "effective_filler_n": 115.77330887691826,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.7516340452803725,
+        "legacy_requested_tier_compliance": 0.06666666666666667,
+        "mean_evidence_count": 18.275174079203357,
+        "mean_source_count": 50.45522388059702,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.05223880597014925,
+        "top_filler_mass": 0.04477611940298507,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.917910447761194,
+        "unique_subtitle_rate": 1.0
+      },
+      "mainstream_distinctiveness": 0.5946769835738621,
+      "mean_js_from_legacy": 0.08539054533821375,
+      "niche": {
+        "compatible_requested_tier_compliance": 0.6333333333333333,
+        "effective_filler_n": 126.24605231270651,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.838232798856344,
+        "legacy_requested_tier_compliance": 0.9666666666666667,
+        "mean_evidence_count": 17.55073362401621,
+        "mean_source_count": 29.571428571428573,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.05263157894736842,
+        "top_filler_mass": 0.015037593984962405,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9624060150375939,
+        "unique_subtitle_rate": 1.0
+      },
+      "pop": {
+        "compatible_requested_tier_compliance": 0.7,
+        "effective_filler_n": 106.1606898605631,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.6649538883125885,
+        "legacy_requested_tier_compliance": 0,
+        "mean_evidence_count": 7.429952150651302,
+        "mean_source_count": 58.007751937984494,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.046511627906976744,
+        "top_filler_mass": 0.046511627906976744,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.8914728682170543,
+        "unique_subtitle_rate": 1.0
+      },
+      "quality": {
+        "coherence": 7.058333333333334,
+        "evocativeness": 5.075,
+        "overall": 5.908333333333333,
+        "surprise": 5.591666666666667
+      },
+      "tone_separation": 0.6045027636166894
+    },
+    "legacy": {
+      "mainstream": {
+        "compatible_requested_tier_compliance": 0.9333333333333333,
+        "effective_filler_n": 37.59734069198729,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 3.626933321617694,
+        "legacy_requested_tier_compliance": 1,
+        "mean_evidence_count": 4.999550511506702,
+        "mean_source_count": 11.120967741935484,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.03225806451612903,
+        "top_filler_mass": 0.056451612903225805,
+        "top_subtitle_mass": 0.23333333333333334,
+        "unique_filler_rate": 0.3790322580645161,
+        "unique_subtitle_rate": 0.36666666666666664
+      },
+      "mainstream_distinctiveness": 0.6931471805581454,
+      "mean_js_from_legacy": 0.052899121544875555,
+      "niche": {
+        "compatible_requested_tier_compliance": 0.6333333333333333,
+        "effective_filler_n": 132.5647545868213,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.887071239907353,
+        "legacy_requested_tier_compliance": 1,
+        "mean_evidence_count": 4.621865926786869,
+        "mean_source_count": 5.731884057971015,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.07971014492753623,
+        "top_filler_mass": 0.014492753623188406,
+        "top_subtitle_mass": 0.06666666666666667,
+        "unique_filler_rate": 0.9710144927536232,
+        "unique_subtitle_rate": 0.9666666666666667
+      },
+      "pop": {
+        "compatible_requested_tier_compliance": 1,
+        "effective_filler_n": 4.0,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 1.3862943611198906,
+        "legacy_requested_tier_compliance": 1,
+        "mean_evidence_count": 2.407672332268,
+        "mean_source_count": 6.75,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.25,
+        "top_filler_mass": 0.25,
+        "top_subtitle_mass": 1.0,
+        "unique_filler_rate": 0.03333333333333333,
+        "unique_subtitle_rate": 0.03333333333333333
+      },
+      "quality": {
+        "coherence": 5.425,
+        "evocativeness": 5.075,
+        "overall": 5.633333333333334,
+        "surprise": 6.4
+      },
+      "tone_separation": 0.6931471805580385
+    },
+    "smoothed": {
+      "mainstream": {
+        "compatible_requested_tier_compliance": 0.6333333333333333,
+        "effective_filler_n": 122.8754352405962,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.811171120602227,
+        "legacy_requested_tier_compliance": 0.1,
+        "mean_evidence_count": 10.103290536067641,
+        "mean_source_count": 28.582089552238806,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.1044776119402985,
+        "top_filler_mass": 0.022388059701492536,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9402985074626866,
+        "unique_subtitle_rate": 1.0
+      },
+      "mainstream_distinctiveness": 0.659826770381247,
+      "mean_js_from_legacy": 0.052750711732806564,
+      "niche": {
+        "compatible_requested_tier_compliance": 0.5666666666666667,
+        "effective_filler_n": 126.56968202467357,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.840793002552434,
+        "legacy_requested_tier_compliance": 0.9666666666666667,
+        "mean_evidence_count": 17.801422898126766,
+        "mean_source_count": 30.15909090909091,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.10606060606060606,
+        "top_filler_mass": 0.015151515151515152,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9696969696969697,
+        "unique_subtitle_rate": 1.0
+      },
+      "pop": {
+        "compatible_requested_tier_compliance": 0.43333333333333335,
+        "effective_filler_n": 128.3993249743397,
+        "evidence_coverage": 1.0,
+        "filler_entropy": 4.855145134032849,
+        "legacy_requested_tier_compliance": 0,
+        "mean_evidence_count": 3.520933962378654,
+        "mean_source_count": 27.172932330827066,
+        "sample_count": 30,
+        "source_coverage": 1.0,
+        "tail_exposure": 0.09774436090225563,
+        "top_filler_mass": 0.022556390977443608,
+        "top_subtitle_mass": 0.03333333333333333,
+        "unique_filler_rate": 0.9774436090225563,
+        "unique_subtitle_rate": 1.0
+      },
+      "quality": {
+        "coherence": 6.758333333333334,
+        "evocativeness": 5.15,
+        "overall": 5.794444444444444,
+        "surprise": 5.475
+      },
+      "tone_separation": 0.6573236755174956
+    }
+  },
+  "quality": {
+    "anchored_base": {
+      "coherence": 6.391666666666667,
+      "evocativeness": 5.016666666666667,
+      "overall": 5.722222222222222,
+      "surprise": 5.758333333333334
+    },
+    "calibrated": {
+      "coherence": 7.058333333333334,
+      "evocativeness": 5.075,
+      "overall": 5.908333333333333,
+      "surprise": 5.591666666666667
+    },
+    "legacy": {
+      "coherence": 5.425,
+      "evocativeness": 5.075,
+      "overall": 5.633333333333334,
+      "surprise": 6.4
+    },
+    "model": "github_copilot/gpt-5.4-mini",
+    "smoothed": {
+      "coherence": 6.758333333333334,
+      "evocativeness": 5.15,
+      "overall": 5.794444444444444,
+      "surprise": 5.475
+    },
+    "status": "available"
+  },
+  "rationale": "The recommendation is automated from gates frozen before the results. Blocked gates cannot pass.",
+  "representative_smoothing_failures": [
+    {
+      "base_probability": 0.000534993140937,
+      "compound": true,
+      "contexts": [
+        "Memory, Power, and the Fall and Rise of Modern Life",
+        "Memory, Power, and the Fall and Rise of the State",
+        "Memory, Power, and the Fall and Rise of Everyday Life"
+      ],
+      "delta": 0.000387126956456,
+      "filler": "Fall and Rise",
+      "slot_type": "action_noun",
+      "smoothed_probability": 0.000922120097393,
+      "source_count": 2,
+      "tier": "pop"
+    },
+    {
+      "base_probability": 0.000404217927727,
+      "compound": true,
+      "contexts": [
+        "Richard Nixon, Half-Truths, and the Astonishing Rise of the Restoration",
+        "Memory, Power, and the Astonishing Rise of Modern Life",
+        "Memory, Power, and the Astonishing Rise of the State"
+      ],
+      "delta": 0.000383592742659,
+      "filler": "Astonishing Rise",
+      "slot_type": "action_noun",
+      "smoothed_probability": 0.000787810670386,
+      "source_count": 2,
+      "tier": "pop"
+    },
+    {
+      "base_probability": 0.000569802160445,
+      "compound": true,
+      "contexts": [
+        "Memory, Power, and the international division of Modern Life",
+        "Memory, Power, and the international division of the State",
+        "Memory, Power, and the international division of Everyday Life"
+      ],
+      "delta": 0.000360872849841,
+      "filler": "international division",
+      "slot_type": "action_noun",
+      "smoothed_probability": 0.000930675010286,
+      "source_count": 2,
+      "tier": "pop"
+    },
+    {
+      "base_probability": 0.000411992401987,
+      "compound": true,
+      "contexts": [
+        "Memory, Power, and the international division of Modern Life",
+        "Memory, Power, and the international division of the State",
+        "Memory, Power, and the international division of Everyday Life"
+      ],
+      "delta": 0.0005336055511039999,
+      "filler": "international division",
+      "slot_type": "action_noun",
+      "smoothed_probability": 0.000945597953091,
+      "source_count": 2,
+      "tier": "niche"
+    }
+  ],
+  "rollback_implications": "No default changed. Rollback is to omit shadow runtime selection and continue using legacy generation.",
+  "schema_version": 1,
+  "selected_variant": null,
+  "step9_recommendation": "Do not switch defaults in Step 9; resolve failed or blocked gates.",
+  "summary": "Step 8 recommends defer. No bounded variant cleared every frozen gate."
+}

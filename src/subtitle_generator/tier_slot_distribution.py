@@ -968,6 +968,71 @@ def default_smoothing_experiments() -> tuple[SmoothingExperimentConfig, ...]:
     )
 
 
+def resolve_smoothing_experiment(
+    variant_name: str,
+    *,
+    configs: tuple[SmoothingExperimentConfig, ...] | None = None,
+) -> SmoothingExperimentConfig:
+    """Return one named smoothing experiment config or raise."""
+
+    configs = configs or default_smoothing_experiments()
+    config = next((candidate for candidate in configs if candidate.name == variant_name), None)
+    if config is None:
+        raise RuntimeError(
+            f"Unknown smoothing variant {variant_name!r}; available: "
+            f"{', '.join(candidate.name for candidate in configs)}"
+        )
+    return config
+
+
+def build_smoothed_distribution_rows(
+    conn: sqlite3.Connection,
+    output_dir: Path,
+    *,
+    variant_name: str,
+    alpha: float = 0.5,
+    inferred_source_weight: float = 1.0,
+    artifact_version: str = "tier_slot_filler_distribution_v1",
+    vector_source: str = "offline_spacy",
+    configs: tuple[SmoothingExperimentConfig, ...] | None = None,
+) -> list[dict[str, object]]:
+    """Build one named semantic-smoothing sidecar distribution in memory."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config = resolve_smoothing_experiment(variant_name, configs=configs)
+    if config.variant == "none":
+        raise RuntimeError("variant 'none' has no smoothing moves to build")
+
+    fillers, filler_id_to_key = _load_fillers(conn)
+    source_labels = _load_source_labels(conn)
+    source_fallbacks = _load_source_fallback_vectors(conn)
+    residual_priors = _label_residual_priors(source_labels.values())
+    cells = _build_evidence_cells(
+        conn,
+        fillers=fillers,
+        filler_id_to_key=filler_id_to_key,
+        source_labels=source_labels,
+        source_fallbacks=source_fallbacks,
+        global_fallback=_global_fallback_vector(fillers.values()),
+        residual_priors=residual_priors,
+        inferred_source_weight=inferred_source_weight,
+    )
+    base_rows = _distribution_rows(
+        fillers=fillers,
+        cells=cells,
+        alpha=alpha,
+        artifact_version=artifact_version,
+    )
+    vectors, _vector_source_counts = _load_smoothing_vectors(
+        conn,
+        fillers,
+        output_dir / "tier_slot_embedding_cache.csv",
+        vector_source=vector_source,
+    )
+    transformed_vectors = _transform_vectors(vectors, config.vector_transform)
+    return _apply_smoothing(base_rows, fillers, transformed_vectors, config)
+
+
 def _load_fillers(conn: sqlite3.Connection) -> tuple[dict[str, _Filler], dict[int, str]]:
     rows = conn.execute(
         """
