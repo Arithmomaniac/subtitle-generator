@@ -62,7 +62,7 @@ SCENARIOS: tuple[tuple[str, set[str] | None], ...] = (
 )
 SLOT_TYPES = ("list_item", "action_noun", "of_object")
 SPARSE_OF_SLOT_TYPES = ("of_modifier", "of_head", "of_topic", "of_complement")
-BOUND_SOURCE_FILES = (
+EVALUATION_SOURCE_FILES = (
     Path("src/subtitle_generator/step08_validation.py"),
     Path("src/subtitle_generator/generate.py"),
     Path("src/subtitle_generator/shadow_runtime.py"),
@@ -96,6 +96,8 @@ GATE_POLICY = {
     "tone_separation_ratio_min": 0.80,
     "first_draw_requested_tier_ratio_min": 0.80,
     "first_draw_requested_tier_absolute_min": 0.50,
+    "public_contract_requested_tier_ratio_min": 0.80,
+    "public_contract_requested_tier_absolute_min": 0.50,
     "intentional_shift_js_min": 0.001,
 }
 RATING_CHUNK_SIZE = 25
@@ -174,26 +176,21 @@ def _git_head(repo_root: Path) -> str:
 def compute_code_binding(
     *,
     repo_root: Path | None = None,
-    source_files: tuple[Path, ...] = BOUND_SOURCE_FILES,
-    repo_head: str | None = None,
+    source_files: tuple[Path, ...] = EVALUATION_SOURCE_FILES,
+    base_revision: str | None = None,
 ) -> dict[str, object]:
     root = step08_repo_root() if repo_root is None else repo_root.resolve()
-    head = repo_head or _git_head(root)
+    revision = base_revision or _git_head(root)
     per_file = {
         str(path): sha256_file(resolve_step08_repo_path(path, repo_root=root))
         for path in source_files
     }
-    aggregate = stable_digest(
-        {
-            "repo_head": head,
-            "source_files": per_file,
-        }
-    )
+    aggregate = stable_digest(per_file)
     return {
         "repo_root": str(root),
-        "repo_head": head,
-        "source_files": per_file,
-        "aggregate": aggregate,
+        "base_revision": revision,
+        "evaluation_source_files": per_file,
+        "evaluation_source_digest": aggregate,
     }
 
 
@@ -213,7 +210,8 @@ def compute_replay_binding_digest(
             "database": database_digest,
             "artifacts": artifact_digests,
             "accepted_decisions": accepted_decision_digests,
-            "code_binding": code_binding,
+            "evaluation_source_files": code_binding["evaluation_source_files"],
+            "evaluation_source_digest": code_binding["evaluation_source_digest"],
         }
     )
 
@@ -295,6 +293,7 @@ def score_compatible_tier(
 def evaluate_gates(
     metrics: dict[str, dict[str, object]],
     quality: dict[str, object],
+    public_contract: dict[str, object],
 ) -> dict[str, list[dict[str, object]]]:
     """Evaluate the frozen gate policy for every non-legacy variant."""
 
@@ -308,6 +307,7 @@ def evaluate_gates(
         GATE_POLICY["first_draw_requested_tier_absolute_min"],
         GATE_POLICY["first_draw_requested_tier_ratio_min"] * legacy_requested_compliance,
     )
+    public_contract_legacy = public_contract["legacy_public_retry"]
     for variant in PRIMARY_VARIANT_NAMES[1:]:
         current = metrics[variant]
         gates: list[dict[str, object]] = []
@@ -433,6 +433,40 @@ def evaluate_gates(
                 ),
             },
         )
+        public_contract_floor = {
+            tier: max(
+                GATE_POLICY["public_contract_requested_tier_absolute_min"],
+                GATE_POLICY["public_contract_requested_tier_ratio_min"]
+                * float(
+                    public_contract_legacy[tier][
+                        "first_draw_compatible_requested_tier_compliance"
+                    ]
+                ),
+            )
+            for tier in TIER_NAMES
+        }
+        _add_gate(
+            gates,
+            "public_contract_requested_tier_continuity",
+            all(
+                float(current[tier]["first_draw_compatible_requested_tier_compliance"])
+                >= public_contract_floor[tier]
+                for tier in TIER_NAMES
+            ),
+            {
+                "candidate": {
+                    tier: current[tier]["first_draw_compatible_requested_tier_compliance"]
+                    for tier in TIER_NAMES
+                },
+                "legacy_public_retry": {
+                    tier: public_contract_legacy[tier][
+                        "first_draw_compatible_requested_tier_compliance"
+                    ]
+                    for tier in TIER_NAMES
+                },
+                "floor": public_contract_floor,
+            },
+        )
         results[variant] = gates
     return results
 
@@ -483,19 +517,45 @@ def run_step08_validation(
         samples_per_scenario=samples_per_scenario,
         seed_base=seed_base,
     )
+
+    samples_path = output_dir / "samples.json"
+    ratings_path = output_dir / "ratings.json"
+    smoothing_path = output_dir / "smoothing_review.json"
+    ceiling_path = output_dir / "evidence_ceiling.json"
+    replay_path = output_dir / "replay.json"
+    report_path = output_dir / "report.md"
+    decision_path = decision_dir / "decision.json"
+    readme_path = decision_dir / "README.md"
+
+    sample_payload = {
+        "schema_version": STEP08_SCHEMA_VERSION,
+        "first_draw_samples": first_draw_samples,
+        "public_contract_samples": public_contract_samples,
+    }
     quality, ratings, rating_chunks = _rate_samples(
         first_draw_samples,
         model=rater_model,
         enabled=rate_with_copilot,
+        ratings_path=ratings_path,
+        existing_samples_path=samples_path,
     )
+    _write_json(samples_path, sample_payload)
     metrics = _matrix_metrics(
         first_draw_samples,
         indexes,
         legacy_distributions,
         quality,
     )
-    gates = evaluate_gates(metrics, quality)
-    recommendation, selected_variant = _recommend(gates)
+    public_contract = _public_contract_comparison(
+        public_contract_samples,
+        metrics,
+        legacy_reference,
+    )
+    gates = evaluate_gates(metrics, quality, public_contract)
+    recommendation, recommended_variant, best_experimental_variant = _recommend(
+        gates,
+        metrics,
+    )
     smoothing_review = _smoothing_review(
         indexes["anchored_base"],
         indexes["smoothed"],
@@ -506,31 +566,16 @@ def run_step08_validation(
         indexes["smoothed"],
         metrics,
     )
-    public_contract = _public_contract_comparison(
-        public_contract_samples,
-        metrics,
-        legacy_reference,
-    )
-
-    sample_payload = {
-        "schema_version": STEP08_SCHEMA_VERSION,
-        "first_draw_samples": first_draw_samples,
-        "public_contract_samples": public_contract_samples,
-    }
-    samples_path = output_dir / "samples.json"
-    _write_json(samples_path, sample_payload)
-    ratings_path = output_dir / "ratings.json"
     _write_json(ratings_path, {
         "schema_version": STEP08_SCHEMA_VERSION,
         "model": rater_model,
         "prompt_template": RATING_PROMPT,
         "quality": quality,
+        "first_draw_samples_digest": stable_digest(first_draw_samples),
         "chunks": rating_chunks,
         "ratings": ratings,
     })
-    smoothing_path = output_dir / "smoothing_review.json"
     _write_json(smoothing_path, smoothing_review)
-    ceiling_path = output_dir / "evidence_ceiling.json"
     _write_json(ceiling_path, evidence_ceiling)
 
     replay = {
@@ -568,29 +613,26 @@ def run_step08_validation(
         "gates": gates,
         "quality": quality,
         "recommendation": recommendation,
-        "selected_variant": selected_variant,
+        "recommended_variant": recommended_variant,
+        "best_experimental_variant": best_experimental_variant,
         "public_contract_comparison": public_contract,
         "smoothing_review": smoothing_review,
         "evidence_ceiling": evidence_ceiling,
     }
-    replay["code_binding"] = compute_code_binding(repo_root=repo_root)
+    replay["evaluation_source_binding"] = compute_code_binding(repo_root=repo_root)
     replay["digests"]["replay_input"] = compute_replay_binding_digest(
         config=replay["config"],
         gate_policy=GATE_POLICY,
         database_digest=str(replay["digests"]["database"]),
         artifact_digests=dict(replay["digests"]["artifacts"]),
         accepted_decision_digests=dict(replay["digests"]["accepted_decisions"]),
-        code_binding=replay["code_binding"],
+        code_binding=replay["evaluation_source_binding"],
     )
-    replay_path = output_dir / "replay.json"
     _write_json(replay_path, replay)
 
     decision = _decision_payload(replay)
-    decision_path = decision_dir / "decision.json"
     _write_json(decision_path, decision)
-    readme_path = decision_dir / "README.md"
     readme_path.write_text(_format_durable_readme(decision), encoding="utf-8")
-    report_path = output_dir / "report.md"
     report_path.write_text(_format_report(replay), encoding="utf-8")
     return Step08ValidationResult(
         report_path=report_path,
@@ -818,12 +860,23 @@ def _rate_samples(
     *,
     model: str,
     enabled: bool,
+    ratings_path: Path | None = None,
+    existing_samples_path: Path | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]]:
     if not enabled:
         return {
             "status": "blocked",
             "blocker": "Copilot rating disabled by --skip-ratings.",
         }, [], []
+    if ratings_path is not None and existing_samples_path is not None:
+        cached = _reuse_cached_ratings(
+            samples,
+            model=model,
+            ratings_path=ratings_path,
+            existing_samples_path=existing_samples_path,
+        )
+        if cached is not None:
+            return cached
     ratings: list[dict[str, object]] = []
     chunks: list[dict[str, object]] = []
     for start in range(0, len(samples), RATING_CHUNK_SIZE):
@@ -884,6 +937,36 @@ def _rate_samples(
                 for row in variant_ratings
             ),
         }
+    return quality, ratings, chunks
+
+
+def _reuse_cached_ratings(
+    samples: list[dict[str, object]],
+    *,
+    model: str,
+    ratings_path: Path,
+    existing_samples_path: Path,
+) -> tuple[dict[str, object], list[dict[str, object]], list[dict[str, object]]] | None:
+    if not ratings_path.exists() or not existing_samples_path.exists():
+        return None
+    try:
+        cached_samples = json.loads(existing_samples_path.read_text(encoding="utf-8"))
+        cached_ratings = json.loads(ratings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if cached_samples.get("schema_version") != STEP08_SCHEMA_VERSION:
+        return None
+    if cached_samples.get("first_draw_samples") != samples:
+        return None
+    if cached_ratings.get("model") != model:
+        return None
+    if cached_ratings.get("prompt_template") != RATING_PROMPT:
+        return None
+    quality = cached_ratings.get("quality")
+    ratings = cached_ratings.get("ratings")
+    chunks = cached_ratings.get("chunks", [])
+    if not isinstance(quality, dict) or not isinstance(ratings, list) or not isinstance(chunks, list):
+        return None
     return quality, ratings, chunks
 
 
@@ -1303,32 +1386,51 @@ def _evidence_ceiling(
 
 def _recommend(
     gates: dict[str, list[dict[str, object]]],
-) -> tuple[str, str | None]:
+    metrics: dict[str, dict[str, object]],
+) -> tuple[str, str | None, str | None]:
     for variant in ("calibrated", "smoothed", "anchored_base"):
         if all(gate["status"] == "pass" for gate in gates[variant]):
-            return "promote", variant
-    return "defer", None
+            return "promote", variant, variant
+    best_experimental = max(
+        ("anchored_base", "calibrated", "smoothed"),
+        key=lambda variant: (
+            sum(gate["status"] == "pass" for gate in gates[variant]),
+            mean(
+                float(metrics[variant][tier]["first_draw_compatible_requested_tier_compliance"])
+                for tier in TIER_NAMES
+            ),
+            float(metrics[variant]["quality"]["overall"])
+            if isinstance(metrics[variant].get("quality"), dict)
+            else float("-inf"),
+        ),
+    )
+    return "defer", None, best_experimental
 
 
 def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
     recommendation = str(replay["recommendation"])
-    selected = replay["selected_variant"]
+    recommended_variant = replay["recommended_variant"]
+    best_experimental_variant = replay["best_experimental_variant"]
     payload = {
         "schema_version": STEP08_SCHEMA_VERSION,
         "decision": recommendation,
-        "selected_variant": selected,
+        "recommended_variant": recommended_variant,
+        "best_experimental_variant": best_experimental_variant,
         "summary": (
             f"Step 8 recommends {recommendation}. "
             + (
-                f"The bounded winner is {selected}."
-                if selected
-                else "No bounded variant cleared every frozen gate."
+                f"The bounded rollout winner is {recommended_variant}."
+                if recommended_variant
+                else (
+                    "No direct-draw variant cleared the complete rollout gate; "
+                    f"{best_experimental_variant} is the best shadow candidate."
+                )
             )
         ),
         "gate_policy": replay["gate_policy"],
         "gates": replay["gates"],
         "digests": replay["digests"],
-        "code_binding": replay["code_binding"],
+        "evaluation_source_binding": replay["evaluation_source_binding"],
         "metrics": {
             variant: {
                 "pop": values["pop"],
@@ -1360,7 +1462,12 @@ def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
         "step9_recommendation": (
             "Proceed to the default switch only for the selected variant."
             if recommendation == "promote"
-            else "Do not switch defaults in Step 9; resolve failed or blocked gates."
+            else (
+                "Do not switch defaults in Step 9. Minimum future work: improve "
+                "tier-conditioned evidence/distributions enough to meet the "
+                "public-contract continuity gate, or explicitly design and validate "
+                "a compatible retry/policy as a new rollout candidate."
+            )
         ),
     }
     payload["decision_digest"] = stable_digest(payload)
@@ -1387,7 +1494,8 @@ def _format_durable_readme(decision: dict[str, object]) -> str:
         "",
         str(decision["summary"]),
         "",
-        f"Code binding: `{decision['code_binding']['repo_head']}` / `{decision['code_binding']['aggregate']}`",
+        f"Evaluation source digest: `{decision['evaluation_source_binding']['evaluation_source_digest']}`",
+        f"(base revision provenance: `{decision['evaluation_source_binding']['base_revision']}`)",
         "",
         "The command does not change runtime defaults.",
         "",
@@ -1447,6 +1555,11 @@ def _format_report(replay: dict[str, object]) -> str:
         "",
         "## Current user-contract comparison",
         "",
+        "Legacy retry still protects the requested-tier contract better than any "
+        "direct-draw variant, but it also collapses pop diversity (30/30 identical "
+        "pop subtitles in this replay). Anchored direct avoids that collapse while "
+        "still missing the continuity bar.",
+        "",
         "| Runtime | Tier | compatible agreement | legacy-scorer agreement | unique subtitles | top filler mass | effective N |",
         "|---|---|---:|---:|---:|---:|---:|",
     ])
@@ -1484,8 +1597,8 @@ def _format_report(replay: dict[str, object]) -> str:
         "",
         "## Code binding",
         "",
-        f"- Repo HEAD: `{replay['code_binding']['repo_head']}`",
-        f"- Bound source aggregate: `{replay['code_binding']['aggregate']}`",
+        f"- Evaluation source digest: `{replay['evaluation_source_binding']['evaluation_source_digest']}`",
+        f"- Base revision (provenance only): `{replay['evaluation_source_binding']['base_revision']}`",
         f"- Replay input digest: `{replay['digests']['replay_input']}`",
         "",
         "## Evidence ceiling",
@@ -1532,8 +1645,16 @@ def _format_report(replay: dict[str, object]) -> str:
         (
             "Proceed only with the selected variant."
             if replay["recommendation"] == "promote"
-            else f"Do not switch defaults; the recommendation is "
-            f"{replay['recommendation']}."
+            else (
+                "Do not switch defaults; the recommendation is "
+                f"{replay['recommendation']}."
+            )
+        ),
+        "",
+        (
+            f"Best shadow candidate: `{replay['best_experimental_variant']}`."
+            if replay["best_experimental_variant"]
+            else "No shadow candidate identified."
         ),
         "",
     ])

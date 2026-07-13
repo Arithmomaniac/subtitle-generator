@@ -11,11 +11,12 @@ uv run subtitle-gen validate-artifact-runtime `
   --db C:\_SRC\subtitle-generator\data\db\subtitles.db
 ```
 
-**Decision:** `promote`
-**Decision digest:** `669c34635203cf7407fb1e81da16d87ffab7bf68c3a606b017a7dda6294cab80`
+**Decision:** `defer`
+**Decision digest:** `aaa5abf6e2de890779ddc079dc82f08212eeec60c2634b471957112592e60635`
 
-Step 8 recommends promote. The bounded winner is anchored_base.
+Step 8 recommends defer. No direct-draw variant cleared the complete rollout gate; anchored_base is the best shadow candidate.
 
-Code binding: `3781f1976cb623c5bc558b5c5ea0e7ec819b4c04` / `59aafe997fa5710d4eaf5f628522bb2f72a5702bc27a8e72c49d23dddc81435b`
+Evaluation source digest: `282e1fc9aacb8d7ccf34f324b1a5bac59805d67cdd5010584ce95eacc842c822`
+(base revision provenance: `3d9846c5c5fa6a1a6185f88ffe15928827ec1c7b`)
 
 The command does not change runtime defaults.

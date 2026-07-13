@@ -1,17 +1,7 @@
 {
-  "code_binding": {
-    "aggregate": "59aafe997fa5710d4eaf5f628522bb2f72a5702bc27a8e72c49d23dddc81435b",
-    "repo_head": "3781f1976cb623c5bc558b5c5ea0e7ec819b4c04",
-    "repo_root": "C:\\_SRC\\copilot-worktrees\\subtitle-generator\\arithmomaniac-congenial-potato",
-    "source_files": {
-      "src\\subtitle_generator\\eval_harness.py": "4e94a8d4fb8b00a1e6d37a17a0159a8eb5e4fba9780f8295d208a593def9b354",
-      "src\\subtitle_generator\\generate.py": "4d9734dbb788d99dd79c16286e40ec04718401c42a78aabc0bbaaf8f848984e0",
-      "src\\subtitle_generator\\shadow_runtime.py": "9bb1949ced6289b9b7389adba845f24122bcd34de90705fe2548bfab6b3181bf",
-      "src\\subtitle_generator\\step08_validation.py": "7a20b8c7cd4875fc01d93f1491cbcf30af2d9a1c09a7c4c909ff7071cd127480"
-    }
-  },
-  "decision": "promote",
-  "decision_digest": "669c34635203cf7407fb1e81da16d87ffab7bf68c3a606b017a7dda6294cab80",
+  "best_experimental_variant": "anchored_base",
+  "decision": "defer",
+  "decision_digest": "aaa5abf6e2de890779ddc079dc82f08212eeec60c2634b471957112592e60635",
   "digests": {
     "accepted_decisions": {
       "step05": "b900b0b6996747dbaaf3f9e68565a8926ddf8d0a0d84702076e9d84d5bfb4b42",
@@ -22,12 +12,23 @@
       "calibrated": "b63ae661c0541b3548330e8f85ff808de2731a3fa63b92804f7dc3b1ddd7e91b",
       "smoothed": "23136fe66a4d7f2558e68d01483281d62a7239134278a3db5c4aa34dd0e4125d"
     },
-    "database": "ba71bcd576f98cb7d0d1e892de2b4f3be5b9a36c3be029e5df724a697480c7dd",
+    "database": "965ed5304944203da320c9d1d63096a4f6774d403b065dc28c698e37a718479e",
     "evidence_ceiling": "6c0452d1972fcc90e5ed98ac3e0d5dd2dbf8af4daffea666d640d19b749b2bab",
-    "ratings": "211d2262a8f8bcb2d0aaa3b0c3bcc59cecf81890ec581f7fd3f2c248cf1e92c9",
-    "replay_input": "5b8a84f5a4c46131324c672b0ef6ba8400be2b41df83b53e3c449f43e9735aa9",
+    "ratings": "71295e24f831b37826fdf42beb1cf851da54dfe0bdd9fc775a336f4f669f9db9",
+    "replay_input": "7c09b6d7db993cca1e0c4f6fce82f7a6424907fcd7d8c7cde21b5face70c4635",
     "samples": "1095bc43883efea49e7825d1fecea873290220f9b9fb98d6894e1af52af2e10c",
     "smoothing_review": "69b098369bfafaf0b869e3bc97ec935b87739dec18270a09954558591f86c3ff"
+  },
+  "evaluation_source_binding": {
+    "base_revision": "3d9846c5c5fa6a1a6185f88ffe15928827ec1c7b",
+    "evaluation_source_digest": "282e1fc9aacb8d7ccf34f324b1a5bac59805d67cdd5010584ce95eacc842c822",
+    "evaluation_source_files": {
+      "src\\subtitle_generator\\eval_harness.py": "4e94a8d4fb8b00a1e6d37a17a0159a8eb5e4fba9780f8295d208a593def9b354",
+      "src\\subtitle_generator\\generate.py": "4d9734dbb788d99dd79c16286e40ec04718401c42a78aabc0bbaaf8f848984e0",
+      "src\\subtitle_generator\\shadow_runtime.py": "9bb1949ced6289b9b7389adba845f24122bcd34de90705fe2548bfab6b3181bf",
+      "src\\subtitle_generator\\step08_validation.py": "d9f5ceaa4d3b23931987ae9f2f5a3cd988aad00e251c6e6604af99a7b8e9c427"
+    },
+    "repo_root": "C:\\_SRC\\copilot-worktrees\\subtitle-generator\\arithmomaniac-congenial-potato"
   },
   "evidence_ceiling": {
     "best_pop_mainstream_first_draw_compliance": 0.6,
@@ -133,6 +134,8 @@
     "pop_effective_n_ratio_min": 0.8,
     "pop_top_filler_mass_absolute_max": 0.15,
     "pop_top_filler_mass_ratio_max": 1.25,
+    "public_contract_requested_tier_absolute_min": 0.5,
+    "public_contract_requested_tier_ratio_min": 0.8,
     "quality_mean_delta_min": -0.5,
     "tone_separation_ratio_min": 0.8
   },
@@ -168,16 +171,16 @@
       {
         "evidence": {
           "candidate": {
-            "coherence": 6.291666666666667,
-            "evocativeness": 4.783333333333333,
-            "overall": 5.555555555555555,
-            "surprise": 5.591666666666667
+            "coherence": 6.366666666666666,
+            "evocativeness": 4.516666666666667,
+            "overall": 5.583333333333333,
+            "surprise": 5.866666666666666
           },
           "legacy": {
-            "coherence": 6.283333333333333,
-            "evocativeness": 4.941666666666666,
-            "overall": 5.572222222222222,
-            "surprise": 5.491666666666666
+            "coherence": 6.841666666666667,
+            "evocativeness": 5.416666666666667,
+            "overall": 6.008333333333334,
+            "surprise": 5.766666666666667
           }
         },
         "name": "quality_non_inferiority",
@@ -212,6 +215,27 @@
         },
         "name": "intentional_shift",
         "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "mainstream": 0.6333333333333333,
+            "niche": 0.5666666666666667,
+            "pop": 0.5666666666666667
+          },
+          "floor": {
+            "mainstream": 0.7466666666666667,
+            "niche": 0.5066666666666667,
+            "pop": 0.8
+          },
+          "legacy_public_retry": {
+            "mainstream": 0.9333333333333333,
+            "niche": 0.6333333333333333,
+            "pop": 1
+          }
+        },
+        "name": "public_contract_requested_tier_continuity",
+        "status": "fail"
       }
     ],
     "calibrated": [
@@ -245,16 +269,16 @@
       {
         "evidence": {
           "candidate": {
-            "coherence": 6.566666666666666,
-            "evocativeness": 5.133333333333334,
-            "overall": 5.677777777777778,
-            "surprise": 5.333333333333333
+            "coherence": 6.908333333333333,
+            "evocativeness": 5.008333333333334,
+            "overall": 5.747222222222222,
+            "surprise": 5.325
           },
           "legacy": {
-            "coherence": 6.283333333333333,
-            "evocativeness": 4.941666666666666,
-            "overall": 5.572222222222222,
-            "surprise": 5.491666666666666
+            "coherence": 6.841666666666667,
+            "evocativeness": 5.416666666666667,
+            "overall": 6.008333333333334,
+            "surprise": 5.766666666666667
           }
         },
         "name": "quality_non_inferiority",
@@ -289,6 +313,27 @@
         },
         "name": "intentional_shift",
         "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "mainstream": 0.36666666666666664,
+            "niche": 0.6333333333333333,
+            "pop": 0.7
+          },
+          "floor": {
+            "mainstream": 0.7466666666666667,
+            "niche": 0.5066666666666667,
+            "pop": 0.8
+          },
+          "legacy_public_retry": {
+            "mainstream": 0.9333333333333333,
+            "niche": 0.6333333333333333,
+            "pop": 1
+          }
+        },
+        "name": "public_contract_requested_tier_continuity",
+        "status": "fail"
       }
     ],
     "smoothed": [
@@ -322,16 +367,16 @@
       {
         "evidence": {
           "candidate": {
-            "coherence": 6.758333333333334,
-            "evocativeness": 5.166666666666667,
-            "overall": 5.894444444444445,
-            "surprise": 5.758333333333334
+            "coherence": 6.783333333333333,
+            "evocativeness": 5.108333333333333,
+            "overall": 5.833333333333333,
+            "surprise": 5.608333333333333
           },
           "legacy": {
-            "coherence": 6.283333333333333,
-            "evocativeness": 4.941666666666666,
-            "overall": 5.572222222222222,
-            "surprise": 5.491666666666666
+            "coherence": 6.841666666666667,
+            "evocativeness": 5.416666666666667,
+            "overall": 6.008333333333334,
+            "surprise": 5.766666666666667
           }
         },
         "name": "quality_non_inferiority",
@@ -366,6 +411,27 @@
         },
         "name": "intentional_shift",
         "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "mainstream": 0.6333333333333333,
+            "niche": 0.5666666666666667,
+            "pop": 0.43333333333333335
+          },
+          "floor": {
+            "mainstream": 0.7466666666666667,
+            "niche": 0.5066666666666667,
+            "pop": 0.8
+          },
+          "legacy_public_retry": {
+            "mainstream": 0.9333333333333333,
+            "niche": 0.6333333333333333,
+            "pop": 1
+          }
+        },
+        "name": "public_contract_requested_tier_continuity",
+        "status": "fail"
       }
     ]
   },
@@ -422,10 +488,10 @@
         "unique_subtitle_rate": 1.0
       },
       "quality": {
-        "coherence": 6.291666666666667,
-        "evocativeness": 4.783333333333333,
-        "overall": 5.555555555555555,
-        "surprise": 5.591666666666667
+        "coherence": 6.366666666666666,
+        "evocativeness": 4.516666666666667,
+        "overall": 5.583333333333333,
+        "surprise": 5.866666666666666
       },
       "tone_separation": 0.6543214132513114
     },
@@ -481,10 +547,10 @@
         "unique_subtitle_rate": 1.0
       },
       "quality": {
-        "coherence": 6.566666666666666,
-        "evocativeness": 5.133333333333334,
-        "overall": 5.677777777777778,
-        "surprise": 5.333333333333333
+        "coherence": 6.908333333333333,
+        "evocativeness": 5.008333333333334,
+        "overall": 5.747222222222222,
+        "surprise": 5.325
       },
       "tone_separation": 0.6045027636166894
     },
@@ -540,10 +606,10 @@
         "unique_subtitle_rate": 1.0
       },
       "quality": {
-        "coherence": 6.283333333333333,
-        "evocativeness": 4.941666666666666,
-        "overall": 5.572222222222222,
-        "surprise": 5.491666666666666
+        "coherence": 6.841666666666667,
+        "evocativeness": 5.416666666666667,
+        "overall": 6.008333333333334,
+        "surprise": 5.766666666666667
       },
       "tone_separation": 0.6758640994046129
     },
@@ -599,10 +665,10 @@
         "unique_subtitle_rate": 1.0
       },
       "quality": {
-        "coherence": 6.758333333333334,
-        "evocativeness": 5.166666666666667,
-        "overall": 5.894444444444445,
-        "surprise": 5.758333333333334
+        "coherence": 6.783333333333333,
+        "evocativeness": 5.108333333333333,
+        "overall": 5.833333333333333,
+        "surprise": 5.608333333333333
       },
       "tone_separation": 0.6573236755174956
     }
@@ -943,33 +1009,34 @@
   },
   "quality": {
     "anchored_base": {
-      "coherence": 6.291666666666667,
-      "evocativeness": 4.783333333333333,
-      "overall": 5.555555555555555,
-      "surprise": 5.591666666666667
+      "coherence": 6.366666666666666,
+      "evocativeness": 4.516666666666667,
+      "overall": 5.583333333333333,
+      "surprise": 5.866666666666666
     },
     "calibrated": {
-      "coherence": 6.566666666666666,
-      "evocativeness": 5.133333333333334,
-      "overall": 5.677777777777778,
-      "surprise": 5.333333333333333
+      "coherence": 6.908333333333333,
+      "evocativeness": 5.008333333333334,
+      "overall": 5.747222222222222,
+      "surprise": 5.325
     },
     "legacy": {
-      "coherence": 6.283333333333333,
-      "evocativeness": 4.941666666666666,
-      "overall": 5.572222222222222,
-      "surprise": 5.491666666666666
+      "coherence": 6.841666666666667,
+      "evocativeness": 5.416666666666667,
+      "overall": 6.008333333333334,
+      "surprise": 5.766666666666667
     },
     "model": "github_copilot/gpt-5.4-mini",
     "smoothed": {
-      "coherence": 6.758333333333334,
-      "evocativeness": 5.166666666666667,
-      "overall": 5.894444444444445,
-      "surprise": 5.758333333333334
+      "coherence": 6.783333333333333,
+      "evocativeness": 5.108333333333333,
+      "overall": 5.833333333333333,
+      "surprise": 5.608333333333333
     },
     "status": "available"
   },
   "rationale": "The recommendation is automated from gates frozen before the results; code and accepted-input digests are bound into the record.",
+  "recommended_variant": null,
   "representative_smoothing_failures": [
     {
       "base_probability": 0.000534993140937,
@@ -1034,7 +1101,6 @@
   ],
   "rollback_implications": "No default changed. Rollback is to omit shadow runtime selection and continue using legacy generation.",
   "schema_version": 1,
-  "selected_variant": "anchored_base",
-  "step9_recommendation": "Proceed to the default switch only for the selected variant.",
-  "summary": "Step 8 recommends promote. The bounded winner is anchored_base."
+  "step9_recommendation": "Do not switch defaults in Step 9. Minimum future work: improve tier-conditioned evidence/distributions enough to meet the public-contract continuity gate, or explicitly design and validate a compatible retry/policy as a new rollout candidate.",
+  "summary": "Step 8 recommends defer. No direct-draw variant cleared the complete rollout gate; anchored_base is the best shadow candidate."
 }

@@ -17,6 +17,7 @@ from subtitle_generator.generate import (
 from subtitle_generator.step08_validation import (
     DISTRIBUTION_COLUMNS,
     GATE_POLICY,
+    _recommend,
     _evidence_ceiling,
     _legacy_distributions,
     _public_contract_comparison,
@@ -104,6 +105,21 @@ def _metrics(
         "anchored_base": values,
         "calibrated": values,
         "smoothed": values,
+    }
+
+
+def _public_contract(
+    *,
+    pop: float = 1.0,
+    mainstream: float = 0.9,
+    niche: float = 0.6,
+) -> dict[str, object]:
+    return {
+        "legacy_public_retry": {
+            "pop": {"first_draw_compatible_requested_tier_compliance": pop},
+            "mainstream": {"first_draw_compatible_requested_tier_compliance": mainstream},
+            "niche": {"first_draw_compatible_requested_tier_compliance": niche},
+        }
     }
 
 
@@ -251,7 +267,7 @@ def test_gate_evaluation_passes_complete_noninferior_evidence():
         for variant in ("legacy", "anchored_base", "calibrated", "smoothed")
     }
 
-    gates = evaluate_gates(_metrics(), quality)
+    gates = evaluate_gates(_metrics(), quality, _public_contract(pop=0.9, mainstream=0.9, niche=0.9))
 
     assert all(
         gate["status"] == "pass"
@@ -264,6 +280,7 @@ def test_gate_evaluation_blocks_quality_without_fabricating_scores():
     gates = evaluate_gates(
         _metrics(),
         {"status": "blocked", "blocker": "Copilot unavailable"},
+        _public_contract(),
     )
 
     quality_gate = next(
@@ -276,6 +293,37 @@ def test_gate_evaluation_blocks_quality_without_fabricating_scores():
         "status": "blocked",
         "evidence": {"blocker": "Copilot unavailable"},
     }
+
+
+def test_public_contract_gate_blocks_variant_that_passes_first_draw_gates():
+    metrics = _metrics(compliance=0.55)
+    quality = {
+        variant: {
+            "overall": 7.0,
+            "coherence": 7.0,
+            "evocativeness": 7.0,
+            "surprise": 7.0,
+        }
+        for variant in ("legacy", "anchored_base", "calibrated", "smoothed")
+    }
+
+    gates = evaluate_gates(metrics, quality, _public_contract(pop=1.0, mainstream=0.9, niche=0.6))
+
+    first_draw_gate = next(
+        gate for gate in gates["anchored_base"] if gate["name"] == "first_draw_requested_tier_compliance"
+    )
+    public_gate = next(
+        gate
+        for gate in gates["anchored_base"]
+        if gate["name"] == "public_contract_requested_tier_continuity"
+    )
+    assert first_draw_gate["status"] == "pass"
+    assert public_gate["status"] == "fail"
+
+    recommendation, recommended_variant, best_experimental = _recommend(gates, metrics)
+    assert recommendation == "defer"
+    assert recommended_variant is None
+    assert best_experimental == "anchored_base"
 
 
 def test_public_contract_metrics_are_grouped_by_scenario(tmp_path):
@@ -360,7 +408,7 @@ def test_source_digest_change_changes_replay_binding(tmp_path):
     before = compute_code_binding(
         repo_root=repo_root,
         source_files=source_files,
-        repo_head="abc123",
+        base_revision="abc123",
     )
     digest_before = compute_replay_binding_digest(
         config={"samples_per_scenario": 30},
@@ -375,7 +423,7 @@ def test_source_digest_change_changes_replay_binding(tmp_path):
     after = compute_code_binding(
         repo_root=repo_root,
         source_files=source_files,
-        repo_head="abc123",
+        base_revision="abc123",
     )
     digest_after = compute_replay_binding_digest(
         config={"samples_per_scenario": 30},
@@ -386,8 +434,44 @@ def test_source_digest_change_changes_replay_binding(tmp_path):
         code_binding=after,
     )
 
-    assert before["aggregate"] != after["aggregate"]
+    assert before["evaluation_source_digest"] != after["evaluation_source_digest"]
     assert digest_before != digest_after
+
+
+def test_base_revision_is_provenance_not_binding(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    (repo_root / "a.py").write_text("print('same')\n", encoding="utf-8")
+    binding_a = compute_code_binding(
+        repo_root=repo_root,
+        source_files=(Path("a.py"),),
+        base_revision="rev-a",
+    )
+    binding_b = compute_code_binding(
+        repo_root=repo_root,
+        source_files=(Path("a.py"),),
+        base_revision="rev-b",
+    )
+
+    digest_a = compute_replay_binding_digest(
+        config={"samples_per_scenario": 30},
+        gate_policy={"x": 1},
+        database_digest="db",
+        artifact_digests={"a": "1"},
+        accepted_decision_digests={"step05": "2", "step06": "3"},
+        code_binding=binding_a,
+    )
+    digest_b = compute_replay_binding_digest(
+        config={"samples_per_scenario": 30},
+        gate_policy={"x": 1},
+        database_digest="db",
+        artifact_digests={"a": "1"},
+        accepted_decision_digests={"step05": "2", "step06": "3"},
+        code_binding=binding_b,
+    )
+
+    assert binding_a["evaluation_source_digest"] == binding_b["evaluation_source_digest"]
+    assert digest_a == digest_b
 
 
 def test_explicit_repo_root_resolution_ignores_cwd(tmp_path, monkeypatch):
