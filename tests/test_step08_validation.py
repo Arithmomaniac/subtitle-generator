@@ -17,6 +17,7 @@ from subtitle_generator.generate import (
 from subtitle_generator.step08_validation import (
     DISTRIBUTION_COLUMNS,
     GATE_POLICY,
+    _durable_source_binding,
     _recommend,
     _evidence_ceiling,
     _legacy_distributions,
@@ -472,6 +473,20 @@ def test_base_revision_is_provenance_not_binding(tmp_path):
 
     assert binding_a["evaluation_source_digest"] == binding_b["evaluation_source_digest"]
     assert digest_a == digest_b
+
+
+def test_durable_source_binding_excludes_checkout_provenance():
+    durable = _durable_source_binding({
+        "repo_root": r"C:\one\checkout",
+        "base_revision": "rev-a",
+        "evaluation_source_files": {"a.py": "digest-a"},
+        "evaluation_source_digest": "aggregate",
+    })
+
+    assert durable == {
+        "evaluation_source_files": {"a.py": "digest-a"},
+        "evaluation_source_digest": "aggregate",
+    }
 
 
 def test_explicit_repo_root_resolution_ignores_cwd(tmp_path, monkeypatch):

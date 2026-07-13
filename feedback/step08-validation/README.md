@@ -12,11 +12,10 @@ uv run subtitle-gen validate-artifact-runtime `
 ```
 
 **Decision:** `defer`
-**Decision digest:** `aaa5abf6e2de890779ddc079dc82f08212eeec60c2634b471957112592e60635`
+**Decision digest:** `6b42d566e4ad5ed06f8e7d2597d6b4520bf82493d78794ef3f53a3bd1f910fd4`
 
 Step 8 recommends defer. No direct-draw variant cleared the complete rollout gate; anchored_base is the best shadow candidate.
 
-Evaluation source digest: `282e1fc9aacb8d7ccf34f324b1a5bac59805d67cdd5010584ce95eacc842c822`
-(base revision provenance: `3d9846c5c5fa6a1a6185f88ffe15928827ec1c7b`)
+Evaluation source digest: `2315c8cd5439c778ca6ad922d416603795c47b51d407a250accd16a142e9d583`
 
 The command does not change runtime defaults.

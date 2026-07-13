@@ -216,6 +216,13 @@ def compute_replay_binding_digest(
     )
 
 
+def _durable_source_binding(code_binding: dict[str, object]) -> dict[str, object]:
+    return {
+        "evaluation_source_files": code_binding["evaluation_source_files"],
+        "evaluation_source_digest": code_binding["evaluation_source_digest"],
+    }
+
+
 def _runtime_policy(conn: sqlite3.Connection) -> dict[str, float]:
     remix_prob_row = conn.execute(
         "SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'"
@@ -1430,7 +1437,9 @@ def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
         "gate_policy": replay["gate_policy"],
         "gates": replay["gates"],
         "digests": replay["digests"],
-        "evaluation_source_binding": replay["evaluation_source_binding"],
+        "evaluation_source_binding": _durable_source_binding(
+            replay["evaluation_source_binding"]
+        ),
         "metrics": {
             variant: {
                 "pop": values["pop"],
@@ -1495,7 +1504,6 @@ def _format_durable_readme(decision: dict[str, object]) -> str:
         str(decision["summary"]),
         "",
         f"Evaluation source digest: `{decision['evaluation_source_binding']['evaluation_source_digest']}`",
-        f"(base revision provenance: `{decision['evaluation_source_binding']['base_revision']}`)",
         "",
         "The command does not change runtime defaults.",
         "",

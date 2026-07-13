@@ -1,7 +1,7 @@
 {
   "best_experimental_variant": "anchored_base",
   "decision": "defer",
-  "decision_digest": "aaa5abf6e2de890779ddc079dc82f08212eeec60c2634b471957112592e60635",
+  "decision_digest": "6b42d566e4ad5ed06f8e7d2597d6b4520bf82493d78794ef3f53a3bd1f910fd4",
   "digests": {
     "accepted_decisions": {
       "step05": "b900b0b6996747dbaaf3f9e68565a8926ddf8d0a0d84702076e9d84d5bfb4b42",
@@ -15,20 +15,18 @@
     "database": "965ed5304944203da320c9d1d63096a4f6774d403b065dc28c698e37a718479e",
     "evidence_ceiling": "6c0452d1972fcc90e5ed98ac3e0d5dd2dbf8af4daffea666d640d19b749b2bab",
     "ratings": "71295e24f831b37826fdf42beb1cf851da54dfe0bdd9fc775a336f4f669f9db9",
-    "replay_input": "7c09b6d7db993cca1e0c4f6fce82f7a6424907fcd7d8c7cde21b5face70c4635",
+    "replay_input": "716410d623ffa3a7541f4f22887e8e7d84b61a8450c4b0d89269f1a1f985f45c",
     "samples": "1095bc43883efea49e7825d1fecea873290220f9b9fb98d6894e1af52af2e10c",
     "smoothing_review": "69b098369bfafaf0b869e3bc97ec935b87739dec18270a09954558591f86c3ff"
   },
   "evaluation_source_binding": {
-    "base_revision": "3d9846c5c5fa6a1a6185f88ffe15928827ec1c7b",
-    "evaluation_source_digest": "282e1fc9aacb8d7ccf34f324b1a5bac59805d67cdd5010584ce95eacc842c822",
+    "evaluation_source_digest": "2315c8cd5439c778ca6ad922d416603795c47b51d407a250accd16a142e9d583",
     "evaluation_source_files": {
       "src\\subtitle_generator\\eval_harness.py": "4e94a8d4fb8b00a1e6d37a17a0159a8eb5e4fba9780f8295d208a593def9b354",
       "src\\subtitle_generator\\generate.py": "4d9734dbb788d99dd79c16286e40ec04718401c42a78aabc0bbaaf8f848984e0",
       "src\\subtitle_generator\\shadow_runtime.py": "9bb1949ced6289b9b7389adba845f24122bcd34de90705fe2548bfab6b3181bf",
-      "src\\subtitle_generator\\step08_validation.py": "d9f5ceaa4d3b23931987ae9f2f5a3cd988aad00e251c6e6604af99a7b8e9c427"
-    },
-    "repo_root": "C:\\_SRC\\copilot-worktrees\\subtitle-generator\\arithmomaniac-congenial-potato"
+      "src\\subtitle_generator\\step08_validation.py": "8d7874d95f10c7f42c308667251d8e59659cf392109d789ed2368a4064427ef1"
+    }
   },
   "evidence_ceiling": {
     "best_pop_mainstream_first_draw_compliance": 0.6,
