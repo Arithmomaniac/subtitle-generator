@@ -6,8 +6,10 @@ import csv
 import hashlib
 import json
 import math
+import os
 import shutil
 import sqlite3
+import subprocess
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -24,6 +26,7 @@ from subtitle_generator.eval_harness import (
 from subtitle_generator.generate import (
     GeneratedSubtitle,
     _load_generation_candidates,
+    generate_subtitle_first_draw_for_tier,
     generate_subtitle_matching_tiers,
 )
 from subtitle_generator.parameter_state import get_generation_tier_ratios
@@ -49,7 +52,8 @@ from subtitle_generator.tier_slot_distribution import (
 from subtitle_generator.tiering import TIER_NAMES, compute_tier_evidence
 
 STEP08_SCHEMA_VERSION = 1
-VARIANT_NAMES = ("legacy", "anchored_base", "calibrated", "smoothed")
+PRIMARY_VARIANT_NAMES = ("legacy", "anchored_base", "calibrated", "smoothed")
+PUBLIC_CONTRACT_VARIANT_NAME = "legacy_public_retry"
 SCENARIOS: tuple[tuple[str, set[str] | None], ...] = (
     ("pop", {"pop"}),
     ("mainstream", {"mainstream"}),
@@ -58,6 +62,14 @@ SCENARIOS: tuple[tuple[str, set[str] | None], ...] = (
 )
 SLOT_TYPES = ("list_item", "action_noun", "of_object")
 SPARSE_OF_SLOT_TYPES = ("of_modifier", "of_head", "of_topic", "of_complement")
+BOUND_SOURCE_FILES = (
+    Path("src/subtitle_generator/step08_validation.py"),
+    Path("src/subtitle_generator/generate.py"),
+    Path("src/subtitle_generator/shadow_runtime.py"),
+    Path("src/subtitle_generator/eval_harness.py"),
+)
+STEP05_DECISION_RELATIVE_PATH = Path("feedback/step05-smoothing/decision.json")
+STEP06_DECISION_RELATIVE_PATH = Path("feedback/step06-calibration/decision.json")
 ACCEPTED_SMOOTHING = SmoothingExperimentConfig(
     name="pc1_removed_minsrc2_knn10_m0_5_cap0_10",
     variant="generic_embedding_kNN",
@@ -82,7 +94,8 @@ GATE_POLICY = {
     "quality_mean_delta_min": -0.50,
     "coherence_mean_delta_min": -0.50,
     "tone_separation_ratio_min": 0.80,
-    "requested_tier_compliance_min": 0.75,
+    "first_draw_requested_tier_ratio_min": 0.80,
+    "first_draw_requested_tier_absolute_min": 0.50,
     "intentional_shift_js_min": 0.001,
 }
 RATING_CHUNK_SIZE = 25
@@ -129,6 +142,80 @@ def stable_digest(value: object) -> str:
         ensure_ascii=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def step08_repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def resolve_step08_repo_path(relative_path: Path, *, repo_root: Path | None = None) -> Path:
+    root = step08_repo_root() if repo_root is None else repo_root.resolve()
+    return (root / relative_path).resolve()
+
+
+def accepted_decision_paths(*, repo_root: Path | None = None) -> dict[str, Path]:
+    return {
+        "step05": resolve_step08_repo_path(STEP05_DECISION_RELATIVE_PATH, repo_root=repo_root),
+        "step06": resolve_step08_repo_path(STEP06_DECISION_RELATIVE_PATH, repo_root=repo_root),
+    }
+
+
+def _git_head(repo_root: Path) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def compute_code_binding(
+    *,
+    repo_root: Path | None = None,
+    source_files: tuple[Path, ...] = BOUND_SOURCE_FILES,
+    repo_head: str | None = None,
+) -> dict[str, object]:
+    root = step08_repo_root() if repo_root is None else repo_root.resolve()
+    head = repo_head or _git_head(root)
+    per_file = {
+        str(path): sha256_file(resolve_step08_repo_path(path, repo_root=root))
+        for path in source_files
+    }
+    aggregate = stable_digest(
+        {
+            "repo_head": head,
+            "source_files": per_file,
+        }
+    )
+    return {
+        "repo_root": str(root),
+        "repo_head": head,
+        "source_files": per_file,
+        "aggregate": aggregate,
+    }
+
+
+def compute_replay_binding_digest(
+    *,
+    config: dict[str, object],
+    gate_policy: dict[str, object],
+    database_digest: str,
+    artifact_digests: dict[str, str],
+    accepted_decision_digests: dict[str, str],
+    code_binding: dict[str, object],
+) -> str:
+    return stable_digest(
+        {
+            "config": config,
+            "gate_policy": gate_policy,
+            "database": database_digest,
+            "artifacts": artifact_digests,
+            "accepted_decisions": accepted_decision_digests,
+            "code_binding": code_binding,
+        }
+    )
 
 
 def _runtime_policy(conn: sqlite3.Connection) -> dict[str, float]:
@@ -213,7 +300,15 @@ def evaluate_gates(
 
     legacy = metrics["legacy"]
     results: dict[str, list[dict[str, object]]] = {}
-    for variant in VARIANT_NAMES[1:]:
+    legacy_requested_compliance = mean(
+        float(legacy[tier]["first_draw_compatible_requested_tier_compliance"])
+        for tier in TIER_NAMES
+    )
+    compliance_floor = max(
+        GATE_POLICY["first_draw_requested_tier_absolute_min"],
+        GATE_POLICY["first_draw_requested_tier_ratio_min"] * legacy_requested_compliance,
+    )
+    for variant in PRIMARY_VARIANT_NAMES[1:]:
         current = metrics[variant]
         gates: list[dict[str, object]] = []
         _add_gate(
@@ -298,15 +393,31 @@ def evaluate_gates(
             },
         )
         requested_compliance = mean(
-            float(current[tier]["compatible_requested_tier_compliance"])
+            float(current[tier]["first_draw_compatible_requested_tier_compliance"])
             for tier in TIER_NAMES
         )
         _add_gate(
             gates,
-            "compatible_requested_tier_evidence",
-            requested_compliance
-            >= GATE_POLICY["requested_tier_compliance_min"],
-            {"candidate": requested_compliance},
+            "first_draw_requested_tier_compliance",
+            requested_compliance >= compliance_floor
+            and all(
+                float(current[tier]["first_draw_compatible_requested_tier_compliance"])
+                >= max(
+                    GATE_POLICY["first_draw_requested_tier_absolute_min"],
+                    GATE_POLICY["first_draw_requested_tier_ratio_min"]
+                    * float(legacy[tier]["first_draw_compatible_requested_tier_compliance"]),
+                )
+                for tier in TIER_NAMES
+            ),
+            {
+                "candidate": requested_compliance,
+                "legacy": legacy_requested_compliance,
+                "floor": compliance_floor,
+                "per_tier": {
+                    tier: current[tier]["first_draw_compatible_requested_tier_compliance"]
+                    for tier in TIER_NAMES
+                },
+            },
         )
         _add_gate(
             gates,
@@ -344,8 +455,10 @@ def run_step08_validation(
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     decision_dir.mkdir(parents=True, exist_ok=True)
-    artifact_dir = output_dir / "artifacts"
+    artifact_dir = output_dir / f"artifacts-{os.getpid()}"
     artifact_dir.mkdir(parents=True, exist_ok=True)
+    repo_root = step08_repo_root()
+    decision_paths = accepted_decision_paths(repo_root=repo_root)
 
     artifacts = _build_artifacts(conn, artifact_dir)
     indexes = {name: load_artifact(path) for name, path in artifacts.items()}
@@ -357,20 +470,26 @@ def run_step08_validation(
     legacy_reference = indexes["anchored_base"]
     legacy_distributions = _legacy_distributions(conn)
     runtime_policy = _runtime_policy(conn)
-    samples = _generate_matrix(
+    first_draw_samples = _generate_matrix(
         conn,
         runtime_artifacts,
         legacy_reference,
         samples_per_scenario=samples_per_scenario,
         seed_base=seed_base,
     )
+    public_contract_samples = _generate_legacy_public_contract_samples(
+        conn,
+        legacy_reference,
+        samples_per_scenario=samples_per_scenario,
+        seed_base=seed_base,
+    )
     quality, ratings, rating_chunks = _rate_samples(
-        samples,
+        first_draw_samples,
         model=rater_model,
         enabled=rate_with_copilot,
     )
     metrics = _matrix_metrics(
-        samples,
+        first_draw_samples,
         indexes,
         legacy_distributions,
         quality,
@@ -380,16 +499,23 @@ def run_step08_validation(
     smoothing_review = _smoothing_review(
         indexes["anchored_base"],
         indexes["smoothed"],
-        samples,
+        first_draw_samples,
     )
     evidence_ceiling = _evidence_ceiling(
         indexes["anchored_base"],
         indexes["smoothed"],
+        metrics,
+    )
+    public_contract = _public_contract_comparison(
+        public_contract_samples,
+        metrics,
+        legacy_reference,
     )
 
     sample_payload = {
         "schema_version": STEP08_SCHEMA_VERSION,
-        "samples": samples,
+        "first_draw_samples": first_draw_samples,
+        "public_contract_samples": public_contract_samples,
     }
     samples_path = output_dir / "samples.json"
     _write_json(samples_path, sample_payload)
@@ -421,6 +547,8 @@ def run_step08_validation(
             "rater_model": rater_model,
             "rate_with_copilot": rate_with_copilot,
             "runtime_policy": runtime_policy,
+            "primary_matrix_draw_semantics": "first_draw_for_target_tier",
+            "public_contract_semantics": "legacy_retry_enforced_vs_direct_first_draw",
             "accepted_smoothing": asdict(ACCEPTED_SMOOTHING),
             "calibration": {"granularity": "per_tier", "seed": 20260612},
         },
@@ -428,8 +556,8 @@ def run_step08_validation(
             "database": sha256_file(db_path),
             "artifacts": {name: index.digest for name, index in indexes.items()},
             "accepted_decisions": {
-                "step05": sha256_file(Path("feedback/step05-smoothing/decision.json")),
-                "step06": sha256_file(Path("feedback/step06-calibration/decision.json")),
+                "step05": sha256_file(decision_paths["step05"]),
+                "step06": sha256_file(decision_paths["step06"]),
             },
             "samples": sha256_file(samples_path),
             "ratings": sha256_file(ratings_path),
@@ -441,15 +569,19 @@ def run_step08_validation(
         "quality": quality,
         "recommendation": recommendation,
         "selected_variant": selected_variant,
+        "public_contract_comparison": public_contract,
         "smoothing_review": smoothing_review,
         "evidence_ceiling": evidence_ceiling,
     }
-    replay["digests"]["replay_input"] = stable_digest({
-        "config": replay["config"],
-        "gate_policy": GATE_POLICY,
-        "database": replay["digests"]["database"],
-        "artifacts": replay["digests"]["artifacts"],
-    })
+    replay["code_binding"] = compute_code_binding(repo_root=repo_root)
+    replay["digests"]["replay_input"] = compute_replay_binding_digest(
+        config=replay["config"],
+        gate_policy=GATE_POLICY,
+        database_digest=str(replay["digests"]["database"]),
+        artifact_digests=dict(replay["digests"]["artifacts"]),
+        accepted_decision_digests=dict(replay["digests"]["accepted_decisions"]),
+        code_binding=replay["code_binding"],
+    )
     replay_path = output_dir / "replay.json"
     _write_json(replay_path, replay)
 
@@ -465,7 +597,7 @@ def run_step08_validation(
         replay_path=replay_path,
         decision_path=decision_path,
         readme_path=readme_path,
-        sample_count=len(samples),
+        sample_count=len(first_draw_samples),
         recommendation=recommendation,
     )
 
@@ -474,15 +606,14 @@ def _build_artifacts(
     conn: sqlite3.Connection,
     artifact_dir: Path,
 ) -> dict[str, Path]:
+    decision_paths = accepted_decision_paths()
     if artifact_dir.exists():
         shutil.rmtree(artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     base_result = build_tier_slot_distribution(conn, artifact_dir, alpha=0.5)
     base_path = base_result.distribution_path
 
-    calibration_decision = read_calibration_decision_record(
-        Path("feedback/step06-calibration/decision.json")
-    )
+    calibration_decision = read_calibration_decision_record(decision_paths["step06"])
     if calibration_decision["decision"] != "accept":
         raise RuntimeError(
             "Step 8 requires an accepted Step 6 calibration decision"
@@ -510,9 +641,7 @@ def _build_artifacts(
             "Rebuilt calibrated artifact does not match the accepted Step 6 temperatures"
         )
 
-    smoothing_decision = read_smoothing_decision_record(
-        Path("feedback/step05-smoothing/decision.json")
-    )
+    smoothing_decision = read_smoothing_decision_record(decision_paths["step05"])
     if smoothing_decision["decision"] != "accept":
         raise RuntimeError("Step 8 requires an accepted Step 5 smoothing decision")
     accepted_variant = str(smoothing_decision["variant"])
@@ -557,18 +686,16 @@ def _generate_matrix(
         },
     }
     result: list[dict[str, object]] = []
-    for variant_index, variant in enumerate(VARIANT_NAMES):
+    for variant_index, variant in enumerate(PRIMARY_VARIANT_NAMES):
         scorer = legacy_reference if variant == "legacy" else artifacts[variant]
         for scenario_index, (scenario, allowed_tiers) in enumerate(SCENARIOS):
             for sample_index in range(samples_per_scenario):
-                seed = (
-                    sample_seed(
-                        seed_base,
-                        scenario_index=scenario_index,
-                        sample_index=sample_index,
-                    )
+                seed = sample_seed(
+                    seed_base,
+                    scenario_index=scenario_index,
+                    sample_index=sample_index,
                 )
-                subtitle = generate_subtitle_matching_tiers(
+                draw = generate_subtitle_first_draw_for_tier(
                     conn,
                     allowed_tiers=allowed_tiers,
                     seed=seed,
@@ -576,6 +703,7 @@ def _generate_matrix(
                     min_sim=runtime_policy["min_sim"],
                     runtime=runtimes[variant],
                 )
+                subtitle = draw.subtitle
                 fillers = _subtitle_fillers(subtitle)
                 compatible = score_compatible_tier(scorer, fillers)
                 legacy = compute_tier_evidence(
@@ -590,6 +718,7 @@ def _generate_matrix(
                     "requested_tier": (
                         next(iter(allowed_tiers)) if allowed_tiers else None
                     ),
+                    "target_tier": draw.target_tier,
                     "seed": seed,
                     "text": subtitle.text,
                     "fillers": [
@@ -605,9 +734,71 @@ def _generate_matrix(
                     "legacy_demand_confidence": legacy.demand_confidence,
                     "artifact_digest": scorer.digest,
                     "variant_order": variant_index,
+                    "draw_mode": "first_draw",
+                    "draw_attempts": 1,
                     "remixed": subtitle.remixed,
                     "remix_parts": dict(subtitle.remix_parts),
                 })
+    return result
+
+
+def _generate_legacy_public_contract_samples(
+    conn: sqlite3.Connection,
+    legacy_reference: ArtifactIndex,
+    *,
+    samples_per_scenario: int,
+    seed_base: int,
+) -> list[dict[str, object]]:
+    runtime_policy = _runtime_policy(conn)
+    runtime = build_generation_runtime(mode="legacy")
+    result: list[dict[str, object]] = []
+    for scenario_index, (scenario, allowed_tiers) in enumerate(SCENARIOS):
+        for sample_index in range(samples_per_scenario):
+            seed = sample_seed(
+                seed_base,
+                scenario_index=scenario_index,
+                sample_index=sample_index,
+            )
+            subtitle = generate_subtitle_matching_tiers(
+                conn,
+                allowed_tiers=allowed_tiers,
+                seed=seed,
+                remix_prob=runtime_policy["remix_prob"],
+                min_sim=runtime_policy["min_sim"],
+                runtime=runtime,
+            )
+            fillers = _subtitle_fillers(subtitle)
+            compatible = score_compatible_tier(legacy_reference, fillers)
+            legacy = compute_tier_evidence(
+                subtitle.text,
+                conn,
+                remix_parts=subtitle.remix_parts if subtitle.remixed else None,
+            )
+            result.append({
+                "id": f"{PUBLIC_CONTRACT_VARIANT_NAME}:{scenario}:{sample_index:03d}",
+                "variant": PUBLIC_CONTRACT_VARIANT_NAME,
+                "scenario": scenario,
+                "requested_tier": next(iter(allowed_tiers)) if allowed_tiers else None,
+                "target_tier": next(iter(allowed_tiers)) if allowed_tiers else None,
+                "seed": seed,
+                "text": subtitle.text,
+                "fillers": [
+                    {"slot_type": slot_type, "filler": filler}
+                    for slot_type, filler in fillers
+                ],
+                "compatible_tier": compatible.tier,
+                "compatible_probabilities": compatible.probabilities,
+                "compatible_log_probabilities": compatible.mean_log_probabilities,
+                "legacy_tier": legacy.tier,
+                "legacy_accessibility_score": legacy.accessibility_score,
+                "legacy_lower_tail_score": legacy.lower_tail_score,
+                "legacy_demand_confidence": legacy.demand_confidence,
+                "artifact_digest": legacy_reference.digest,
+                "draw_mode": "public_legacy_retry",
+                "draw_attempts": None,
+                "remixed": subtitle.remixed,
+                "remix_parts": dict(subtitle.remix_parts),
+            })
     return result
 
 
@@ -703,7 +894,7 @@ def _matrix_metrics(
     quality: dict[str, object],
 ) -> dict[str, dict[str, object]]:
     metrics: dict[str, dict[str, object]] = {}
-    for variant in VARIANT_NAMES:
+    for variant in PRIMARY_VARIANT_NAMES:
         rows = [sample for sample in samples if sample["variant"] == variant]
         scorer = artifacts["anchored_base"] if variant == "legacy" else artifacts[variant]
         variant_metrics: dict[str, object] = {}
@@ -737,6 +928,35 @@ def _matrix_metrics(
             variant_metrics["quality"] = quality[variant]
         metrics[variant] = variant_metrics
     return metrics
+
+
+def _public_contract_comparison(
+    public_contract_samples: list[dict[str, object]],
+    primary_metrics: dict[str, dict[str, object]],
+    legacy_reference: ArtifactIndex,
+) -> dict[str, object]:
+    legacy_public_metrics = {}
+    for scenario, _allowed_tiers in SCENARIOS:
+        scenario_samples = [
+            sample
+            for sample in public_contract_samples
+            if sample["scenario"] == scenario
+        ]
+        scenario_metrics, _distribution = _sample_metrics(
+            scenario_samples,
+            legacy_reference,
+        )
+        legacy_public_metrics[scenario] = scenario_metrics
+    return {
+        "legacy_public_retry": legacy_public_metrics,
+        "direct_first_draw": {
+            variant: {
+                tier: primary_metrics[variant][tier]
+                for tier in (*TIER_NAMES, "default")
+            }
+            for variant in PRIMARY_VARIANT_NAMES
+        },
+    }
 
 
 def _sample_metrics(
@@ -798,16 +1018,16 @@ def _sample_metrics(
         "evidence_coverage": evidence_covered / total_fillers,
         "mean_source_count": mean(source_counts),
         "mean_evidence_count": mean(evidence_counts),
-        "compatible_requested_tier_compliance": (
+        "first_draw_compatible_requested_tier_compliance": (
             mean(
-                row["compatible_tier"] == row["requested_tier"]
+                row["compatible_tier"] == row["target_tier"]
                 for row in requested
             )
             if requested
             else None
         ),
-        "legacy_requested_tier_compliance": (
-            mean(row["legacy_tier"] == row["requested_tier"] for row in requested)
+        "first_draw_legacy_requested_tier_agreement": (
+            mean(row["legacy_tier"] == row["target_tier"] for row in requested)
             if requested
             else None
         ),
@@ -824,6 +1044,15 @@ def _legacy_distributions(
         "of_object": candidates.obj_rows,
     }
     score_index = {"pop": 3, "mainstream": 4, "niche": 5}
+    if any(
+        len(row) <= max(score_index.values())
+        for rows in rows_by_slot.values()
+        for row in rows
+    ):
+        raise RuntimeError(
+            "Step 8 legacy distribution comparison requires "
+            "slot_filler_model_scores for every runtime candidate"
+        )
     result: dict[tuple[str, str], dict[str, float]] = {}
     for slot_type, rows in rows_by_slot.items():
         for tier in TIER_NAMES:
@@ -988,6 +1217,7 @@ def _review_contexts(slot_type: str, filler: str) -> tuple[str, str, str]:
 def _evidence_ceiling(
     base: ArtifactIndex,
     smoothed: ArtifactIndex,
+    metrics: dict[str, dict[str, object]],
 ) -> dict[str, object]:
     groups: list[dict[str, object]] = []
     for tier in ("pop", "mainstream"):
@@ -1000,9 +1230,19 @@ def _evidence_ceiling(
             smoothed_probabilities = {
                 key: float(row["probability"]) for key, row in smooth_group.items()
             }
+            artifact_vocab = len(probabilities)
+            observed_vocab = sum(
+                int(float(row["source_count"])) > 0 or float(row["soft_count"]) > 0
+                for row in base_group.values()
+            )
             anchored_vocab = sum(
                 float(row["anchored_soft_count"]) > 0 for row in base_group.values()
             )
+            inferred_only_vocab = sum(
+                float(row["soft_count"]) > 0 and float(row["anchored_soft_count"]) <= 0
+                for row in base_group.values()
+            )
+            prior_only_vocab = sum(float(row["soft_count"]) <= 0 for row in base_group.values())
             changed_vocab = sum(
                 abs(smoothed_probabilities[key] - probability) > 1e-15
                 for key, probability in probabilities.items()
@@ -1010,8 +1250,11 @@ def _evidence_ceiling(
             groups.append({
                 "tier": tier,
                 "slot_type": slot_type,
-                "support": len(probabilities),
+                "artifact_vocabulary": artifact_vocab,
+                "observed_vocabulary": observed_vocab,
                 "anchored_vocabulary": anchored_vocab,
+                "inferred_only_vocabulary": inferred_only_vocab,
+                "prior_only_vocabulary": prior_only_vocab,
                 "smoothed_changed_vocabulary": changed_vocab,
                 "effective_n": math.exp(_entropy(probabilities.values())),
                 "top10_mass": sum(
@@ -1024,20 +1267,37 @@ def _evidence_ceiling(
                     sorted(smoothed_probabilities.values(), reverse=True)[:10]
                 ),
             })
-    limiting = any(
-        row["anchored_vocabulary"] < 0.25 * row["support"]
-        or row["top10_mass"] > 0.50
+    scarcity = any(
+        row["observed_vocabulary"] > 0
+        and (
+            row["anchored_vocabulary"] < 0.35 * row["observed_vocabulary"]
+            or row["top10_mass"] > 0.25
+        )
         for row in groups
+    )
+    best_pop_mainstream = max(
+        mean(
+            float(metrics[variant][tier]["first_draw_compatible_requested_tier_compliance"])
+            for tier in ("pop", "mainstream")
+        )
+        for variant in ("anchored_base", "calibrated", "smoothed")
     )
     return {
         "groups": groups,
         "conclusion": (
-            "Evidence scarcity/teacher imbalance is limiting recoverable pop/"
-            "mainstream vocabulary."
-            if limiting
-            else "The measured support does not show a binding evidence ceiling."
+            "Evidence scarcity/teacher imbalance is likely limiting recoverable "
+            "pop/mainstream vocabulary."
+            if scarcity and best_pop_mainstream < 0.65
+            else (
+                "Observed evidence is sparse/concentrated, but Step 8 alone does "
+                "not prove it is the limiting factor."
+                if scarcity
+                else "The corrected evidence metrics do not show a binding ceiling."
+            )
         ),
-        "limiting": limiting,
+        "limiting": scarcity and best_pop_mainstream < 0.65,
+        "scarcity_signals_present": scarcity,
+        "best_pop_mainstream_first_draw_compliance": best_pop_mainstream,
     }
 
 
@@ -1053,7 +1313,7 @@ def _recommend(
 def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
     recommendation = str(replay["recommendation"])
     selected = replay["selected_variant"]
-    return {
+    payload = {
         "schema_version": STEP08_SCHEMA_VERSION,
         "decision": recommendation,
         "selected_variant": selected,
@@ -1068,6 +1328,7 @@ def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
         "gate_policy": replay["gate_policy"],
         "gates": replay["gates"],
         "digests": replay["digests"],
+        "code_binding": replay["code_binding"],
         "metrics": {
             variant: {
                 "pop": values["pop"],
@@ -1081,6 +1342,7 @@ def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
             for variant, values in replay["metrics"].items()
         },
         "quality": replay["quality"],
+        "public_contract_comparison": replay["public_contract_comparison"],
         "evidence_ceiling": replay["evidence_ceiling"],
         "representative_smoothing_failures": [
             row
@@ -1089,7 +1351,7 @@ def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
         ][:5],
         "rationale": (
             "The recommendation is automated from gates frozen before the "
-            "results. Blocked gates cannot pass."
+            "results; code and accepted-input digests are bound into the record."
         ),
         "rollback_implications": (
             "No default changed. Rollback is to omit shadow runtime selection "
@@ -1101,6 +1363,8 @@ def _decision_payload(replay: dict[str, object]) -> dict[str, object]:
             else "Do not switch defaults in Step 9; resolve failed or blocked gates."
         ),
     }
+    payload["decision_digest"] = stable_digest(payload)
+    return payload
 
 
 def _format_durable_readme(decision: dict[str, object]) -> str:
@@ -1119,8 +1383,11 @@ def _format_durable_readme(decision: dict[str, object]) -> str:
         "```",
         "",
         f"**Decision:** `{decision['decision']}`",
+        f"**Decision digest:** `{decision['decision_digest']}`",
         "",
         str(decision["summary"]),
+        "",
+        f"Code binding: `{decision['code_binding']['repo_head']}` / `{decision['code_binding']['aggregate']}`",
         "",
         "The command does not change runtime defaults.",
         "",
@@ -1132,6 +1399,9 @@ def _format_report(replay: dict[str, object]) -> str:
         "# Step 8 behavioral validation",
         "",
         f"**Automated decision:** `{replay['recommendation']}`",
+        "",
+        "Primary matrix semantics: **first draw for a chosen target tier** (no classifier retry) for legacy and every shadow variant.",
+        "Current public-contract behavior is reported separately below.",
         "",
         "## Frozen gates",
         "",
@@ -1145,18 +1415,19 @@ def _format_report(replay: dict[str, object]) -> str:
         "",
         "## Behavioral metrics",
         "",
-        "| Variant | Tier | compatible compliance | legacy compliance | "
+        "| Variant | Tier | first-draw compatible compliance | legacy-scorer agreement | "
         "unique subtitles | unique fillers | top filler mass | tail exposure | "
         "effective N |",
         "|---|---|---:|---:|---:|---:|---:|---:|---:|",
     ])
-    for variant, variant_metrics in replay["metrics"].items():
+    for variant in PRIMARY_VARIANT_NAMES:
+        variant_metrics = replay["metrics"][variant]
         for tier in TIER_NAMES:
             values = variant_metrics[tier]
             lines.append(
                 f"| {variant} | {tier} | "
-                f"{values['compatible_requested_tier_compliance']:.3f} | "
-                f"{values['legacy_requested_tier_compliance']:.3f} | "
+                f"{values['first_draw_compatible_requested_tier_compliance']:.3f} | "
+                f"{values['first_draw_legacy_requested_tier_agreement']:.3f} | "
                 f"{values['unique_subtitle_rate']:.3f} | "
                 f"{values['unique_filler_rate']:.3f} | "
                 f"{values['top_filler_mass']:.3f} | "
@@ -1174,11 +1445,29 @@ def _format_report(replay: dict[str, object]) -> str:
         )
     lines.extend([
         "",
+        "## Current user-contract comparison",
+        "",
+        "| Runtime | Tier | compatible agreement | legacy-scorer agreement | unique subtitles | top filler mass | effective N |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ])
+    for tier in TIER_NAMES:
+        values = replay["public_contract_comparison"]["legacy_public_retry"][tier]
+        lines.append(
+            f"| {PUBLIC_CONTRACT_VARIANT_NAME} | {tier} | "
+            f"{values['first_draw_compatible_requested_tier_compliance']:.3f} | "
+            f"{values['first_draw_legacy_requested_tier_agreement']:.3f} | "
+            f"{values['unique_subtitle_rate']:.3f} | "
+            f"{values['top_filler_mass']:.3f} | "
+            f"{values['effective_filler_n']:.1f} |"
+        )
+    lines.extend([
+        "",
         "| Variant | tone separation | mainstream distinctiveness | "
         "mean JS from legacy | mean KL to legacy | mean top-20 overlap |",
         "|---|---:|---:|---:|---:|---:|",
     ])
-    for variant, variant_metrics in replay["metrics"].items():
+    for variant in PRIMARY_VARIANT_NAMES:
+        variant_metrics = replay["metrics"][variant]
         comparisons = variant_metrics["distribution_comparisons"]
         lines.append(
             f"| {variant} | {variant_metrics['tone_separation']:.3f} | "
@@ -1193,18 +1482,25 @@ def _format_report(replay: dict[str, object]) -> str:
         "",
         f"```json\n{json.dumps(replay['quality'], indent=2)}\n```",
         "",
+        "## Code binding",
+        "",
+        f"- Repo HEAD: `{replay['code_binding']['repo_head']}`",
+        f"- Bound source aggregate: `{replay['code_binding']['aggregate']}`",
+        f"- Replay input digest: `{replay['digests']['replay_input']}`",
+        "",
         "## Evidence ceiling",
         "",
         str(replay["evidence_ceiling"]["conclusion"]),
         "",
-        "| Tier | Slot | anchored vocabulary | support | effective N | top-10 mass | "
-        "smoothed effective N | smoothed top-10 mass |",
-        "|---|---|---:|---:|---:|---:|---:|---:|",
+        "| Tier | Slot | artifact vocab | observed vocab | anchored vocab | inferred-only | prior-only | effective N | top-10 mass | smoothed effective N | smoothed top-10 mass |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
     for group in replay["evidence_ceiling"]["groups"]:
         lines.append(
             f"| {group['tier']} | {group['slot_type']} | "
-            f"{group['anchored_vocabulary']} | {group['support']} | "
+            f"{group['artifact_vocabulary']} | {group['observed_vocabulary']} | "
+            f"{group['anchored_vocabulary']} | {group['inferred_only_vocabulary']} | "
+            f"{group['prior_only_vocabulary']} | "
             f"{group['effective_n']:.1f} | {group['top10_mass']:.3f} | "
             f"{group['smoothed_effective_n']:.1f} | "
             f"{group['smoothed_top10_mass']:.3f} |"

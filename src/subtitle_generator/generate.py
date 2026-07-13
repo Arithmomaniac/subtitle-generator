@@ -68,6 +68,14 @@ class GeneratedSubtitle:
 
 
 @dataclass(frozen=True)
+class TargetTierDraw:
+    """One deterministic first draw for an explicitly chosen target tier."""
+
+    subtitle: GeneratedSubtitle
+    target_tier: str
+
+
+@dataclass(frozen=True)
 class GenerationCandidates:
     list_rows: list[tuple]
     action_rows: list[tuple]
@@ -1215,6 +1223,52 @@ def _choose_generation_tier(
         allowed_tiers=allowed_tiers,
         seed=seed,
     )[0]
+
+
+def generate_subtitle_first_draw_for_tier(
+    conn: sqlite3.Connection,
+    *,
+    allowed_tiers: set[str] | None,
+    seed: int | None = None,
+    remix_prob: float = 0.0,
+    min_sim: float = 0.0,
+    runtime: GenerationRuntimeSelection | PreparedGenerationRuntime | None = None,
+) -> TargetTierDraw:
+    """Generate exactly one draw for one chosen target tier, with no classifier retry.
+
+    This is explicit evaluation tooling so legacy and shadow runtimes can be
+    compared under the same "choose a target tier, then take one draw" semantics.
+    It preserves the public/default generation behavior because callers must opt
+    into it directly instead of going through ``generate_subtitle_matching_tiers``.
+    """
+
+    prepared_runtime = prepare_generation_runtime(conn, runtime)
+    if not allowed_tiers:
+        target_tier = _choose_generation_tier(
+            conn,
+            allowed_tiers=set(_DEFAULT_GENERATION_TIERS),
+            seed=seed,
+        )
+    elif len(allowed_tiers) > 1:
+        target_tier = _choose_generation_tier(
+            conn,
+            allowed_tiers=allowed_tiers,
+            seed=seed,
+        )
+    else:
+        target_tier = next(iter(allowed_tiers))
+
+    candidates = _load_generation_candidates(conn)
+    subtitle = _generate_subtitle_from_candidates(
+        conn,
+        candidates,
+        seed=seed,
+        remix_prob=remix_prob,
+        min_sim=min_sim,
+        model_tier=target_tier if _has_model_scores(conn) else None,
+        runtime=prepared_runtime,
+    )
+    return TargetTierDraw(subtitle=subtitle, target_tier=target_tier)
 
 
 def generate_subtitle_matching_tiers(
