@@ -1249,7 +1249,7 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
     assert observed["allowed_tiers"] is None
     assert observed["remix_prob"] == 0.33
     assert observed["min_sim"] == 0.44
-    assert observed["runtime"].mode.value == "legacy"
+    assert observed["runtime"].mode.value == "configured"
     assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim", "runtime"}
 
 
@@ -1709,6 +1709,15 @@ def test_pipeline_validation_passes_for_minimal_ready_db(tmp_path):
 
     assert report.ok
     assert report.issues == ()
+
+    conn.execute(
+        "INSERT INTO config VALUES ('generation_runtime_mode', 'artifact')"
+    )
+    configured_report = validate_pipeline(conn)
+    assert any(
+        issue.check == "tier_slot_distribution"
+        for issue in configured_report.issues
+    )
 
 
 def test_pipeline_validation_reports_readiness_failures_without_generation():

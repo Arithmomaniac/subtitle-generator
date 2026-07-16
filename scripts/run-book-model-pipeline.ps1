@@ -6,6 +6,7 @@ param(
     [string]$MiniDb = "api\data\subtitles.mini.db",
     [string]$ExportDir = "api\data",
     [string]$BookModelDir = "generated-artifacts\book-model",
+    [string]$TierSlotDir = "generated-artifacts\tier-slot-distribution",
     [string]$MetadataCsv = "",
     [int]$Samples = 12,
     [int]$RandomSeed = 20260505,
@@ -31,6 +32,8 @@ $validSteps = @(
     "Shadow",
     "CategorizationGate",
     "InstallScores",
+    "TierSlotDistribution",
+    "InstallTierSlotRuntime",
     "ExportData",
     "BuildDb",
     "Validate"
@@ -53,6 +56,8 @@ if ($Steps -contains "All") {
         "CalibrateRuntimeTierModel",
         "CategorizationGate",
         "InstallScores",
+        "TierSlotDistribution",
+        "InstallTierSlotRuntime",
         "ExportData",
         "BuildDb",
         "Validate"
@@ -215,6 +220,22 @@ if (Has-Step "InstallScores") {
     Invoke-Step "InstallScores" "uv" @(
         "run", "subtitle-gen", "install-book-model-scores",
         "--input", $slotRollups
+    )
+}
+
+if (Has-Step "TierSlotDistribution") {
+    Invoke-Step "TierSlotDistribution" "uv" @(
+        "run", "subtitle-gen", "build-tier-slot-distribution",
+        "--db", $FullDb,
+        "--output-dir", $TierSlotDir
+    )
+}
+
+if (Has-Step "InstallTierSlotRuntime") {
+    Invoke-Step "InstallTierSlotRuntime" "uv" @(
+        "run", "subtitle-gen", "install-tier-slot-runtime",
+        "--db", $FullDb,
+        "--artifact", (Join-Path $TierSlotDir "tier_slot_filler_distribution_v1.csv")
     )
 }
 

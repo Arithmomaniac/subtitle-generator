@@ -133,6 +133,9 @@ Mini DB builds reject partial model-score coverage when `slot_filler_model_score
 After rebuilding slots, popularity, remix vectors, or model scores, regenerate the tracked runtime data:
 
 ```powershell
+uv run subtitle-gen build-tier-slot-distribution
+uv run subtitle-gen install-tier-slot-runtime `
+  --artifact generated-artifacts\tier-slot-distribution\tier_slot_filler_distribution_v1.csv
 uv run subtitle-gen export-data -o api\data
 uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
 ```
@@ -142,7 +145,8 @@ Tracked deployment inputs:
 | Path | Purpose |
 |---|---|
 | `api\data\slot_fillers.csv` | Validated strict filler universe and runtime scalar state. |
-| `api\data\slot_filler_model_scores.csv` | Learned tier probabilities used by generation and classification. |
+| `api\data\tier_slot_filler_distribution_v1.csv` | Default anchored tier-slot generation probabilities. |
+| `api\data\slot_filler_model_scores.csv` | Learned tier probabilities retained for artifact builds and legacy rollback. |
 | `api\data\sources.csv` | Source-book attribution for generated slots. |
 | `api\data\config.csv` | Runtime tuning/config values. |
 | `api\data\source_tier_labels.csv` | Offline source-label evidence for training/evaluation continuity. |
@@ -153,6 +157,10 @@ Ignored build outputs:
 |---|---|
 | `api\data\subtitles.mini.db` | Built SQLite artifact used by local serving and Azure Functions; CI rebuilds it from CSVs. |
 | `generated-artifacts\` | Local reports, model features, predictions, rollups, and gate outputs. |
+
+The configured default runtime is `artifact`. Use `--runtime legacy`,
+`SUBTITLE_GEN_RUNTIME_MODE=legacy`, or
+`subtitle-gen set-runtime-default --mode legacy` to roll back.
 
 ## Local verification
 

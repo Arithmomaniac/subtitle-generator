@@ -102,10 +102,16 @@ def build_sources(conn: sqlite3.Connection, sub: GeneratedSubtitle) -> dict:
 
 
 def _parse_runtime_selection(body: dict):
+    runtime_mode = body.get("runtime_mode") or os.environ.get(
+        "SUBTITLE_GEN_RUNTIME_MODE"
+    )
     return build_generation_runtime(
-        mode=body.get("runtime_mode"),
-        shadow_artifact=body.get("shadow_artifact"),
-        shadow_sampling_temperature=body.get("shadow_sampling_temperature", 1.0),
+        mode=runtime_mode,
+        shadow_artifact=body.get("artifact") or body.get("shadow_artifact"),
+        shadow_sampling_temperature=body.get(
+            "sampling_temperature",
+            body.get("shadow_sampling_temperature", 1.0),
+        ),
     )
 
 

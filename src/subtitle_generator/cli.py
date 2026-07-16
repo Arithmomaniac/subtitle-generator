@@ -13,6 +13,9 @@ import click
 from subtitle_generator import __version__
 from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
+from subtitle_generator.diversity_first_reevaluation import (
+    run_diversity_first_reevaluation,
+)
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
 from subtitle_generator.extract_openlibrary import (
     download_ol_dump,
@@ -33,7 +36,13 @@ from subtitle_generator.jacket import (
 )
 from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
 from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
-from subtitle_generator.shadow_runtime import build_generation_runtime
+from subtitle_generator.shadow_runtime import (
+    build_generation_runtime,
+    install_tier_slot_distribution,
+    prepare_generation_runtime,
+    set_configured_runtime_mode,
+    shadow_runtime_provenance,
+)
 from subtitle_generator.shadow_runtime_compare import (
     DEFAULT_COMPARISON_SEEDS,
     build_shadow_runtime_comparison,
@@ -392,23 +401,31 @@ def precompute_vectors_cmd():
 @click.option(
     "--runtime",
     "runtime_mode",
-    type=click.Choice(["legacy", "shadow"]),
-    default="legacy",
+    type=click.Choice(["configured", "artifact", "legacy", "shadow"]),
+    default="configured",
     show_default=True,
-    help="Runtime selection. 'shadow' uses tier-slot distribution artifacts without changing the default serving path.",
+    help=(
+        "Runtime selection. 'configured' reads generation_runtime_mode; "
+        "'legacy' is the rollback path."
+    ),
 )
 @click.option(
+    "--artifact",
     "--shadow-artifact",
+    "shadow_artifact",
     type=click.Path(exists=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Optional tier_slot_filler_distribution_v1 CSV to use with --runtime shadow. Defaults to the DB table when omitted.",
+    help=(
+        "Optional tier_slot_filler_distribution_v1 CSV for artifact/shadow mode. "
+        "Defaults to the DB table."
+    ),
 )
 @click.option(
     "--shadow-sampling-temperature",
     type=click.FloatRange(min=0.000001),
     default=1.0,
     show_default=True,
-    help="Explicit runtime sampling temperature for --runtime shadow.",
+    help="Explicit runtime sampling temperature for artifact/shadow mode.",
 )
 def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool, runtime_mode: str, shadow_artifact: Path | None, shadow_sampling_temperature: float):
     """Generate random subtitles in the "X, Y, and [the/a/an] Z of W" pattern.
@@ -436,6 +453,7 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
         count = 1 if jacket else 10
 
     conn = get_db()
+    runtime = prepare_generation_runtime(conn, runtime)
     stats = slot_stats(conn)
     if not stats:
         raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
@@ -451,12 +469,16 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
         click.echo(f"Tier filter: {', '.join(sorted(tone_set))}")
-    if runtime_mode == "shadow":
-        source_label = str(shadow_artifact) if shadow_artifact is not None else "db:tier_slot_filler_distribution_v1"
+    runtime_details = shadow_runtime_provenance(runtime)
+    click.echo(f"Runtime: {runtime_details['mode']}")
+    if runtime_details["mode"] != "legacy":
         click.echo(
-            "Shadow runtime: "
-            f"artifact={source_label}, sampling_temperature={shadow_sampling_temperature:.3f}"
+            "  artifact="
+            f"{runtime_details['artifact_source']}, "
+            f"sampling_temperature={runtime_details['sampling_temperature']:.3f}"
         )
+    elif runtime_details.get("fallback_reason"):
+        click.echo(f"  fallback={runtime_details['fallback_reason']}")
     if effective_remix_prob > 0:
         click.echo(f"Remix: prob={effective_remix_prob:.1f}, min_sim={min_sim:.2f}")
     click.echo()
@@ -662,6 +684,100 @@ def validate_artifact_runtime_cmd(
     click.echo(f"Replay packet: {result.replay_path}")
     click.echo(f"Decision: {result.recommendation}")
     click.echo(f"Samples: {result.sample_count}")
+
+
+@cli.command("reevaluate-diversity-first")
+@click.option(
+    "--step08-decision",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Frozen Step 8 decision. Defaults to the repository decision record.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Output directory. Defaults to the repository feedback directory.",
+)
+def reevaluate_diversity_first_cmd(
+    step08_decision: Path | None,
+    output_dir: Path | None,
+):
+    """Reevaluate frozen Step 8 evidence under the diversity-first policy."""
+
+    try:
+        result = run_diversity_first_reevaluation(
+            frozen_decision_path=step08_decision,
+            output_dir=output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Diversity-first decision: {result.decision}")
+    click.echo(f"Recommended variant: {result.recommended_variant or 'none'}")
+    click.echo(f"Decision record: {result.decision_path}")
+
+
+@cli.command("install-tier-slot-runtime")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
+@click.option(
+    "--artifact",
+    "artifact_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+)
+@click.option("--activate/--no-activate", default=True, show_default=True)
+def install_tier_slot_runtime_cmd(
+    db_path: Path,
+    artifact_path: Path,
+    activate: bool,
+):
+    """Install a validated tier-slot artifact into a runtime database."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row_count = install_tier_slot_distribution(
+            conn,
+            artifact_path,
+            activate=activate,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Installed {row_count:,} tier-slot distribution rows.")
+    click.echo(f"Configured runtime: {'artifact' if activate else 'unchanged'}")
+
+
+@cli.command("set-runtime-default")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["artifact", "legacy"]),
+    required=True,
+)
+def set_runtime_default_cmd(db_path: Path, mode: str):
+    """Set the configured runtime default; use legacy for rollback."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        configured_mode = set_configured_runtime_mode(conn, mode)
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Configured runtime: {configured_mode.value}")
 
 
 @cli.command()

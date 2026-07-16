@@ -29,6 +29,7 @@ _RUNTIME_CONFIG_KEYS = frozenset(ALL_TUNABLE_PARAMS) | frozenset(
         "centroid_norm",
         "embedding_centroid",
         "embedding_version",
+        "generation_runtime_mode",
         "remix_calibrated_min_sim",
         "remix_calibrated_remix_prob",
         "remix_head_pos",
@@ -150,6 +151,22 @@ def export_data(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     stats: dict[str, int] = {}
+    configured_runtime = source_conn.execute(
+        "SELECT value FROM config WHERE key = 'generation_runtime_mode'"
+    ).fetchone()
+    if (
+        configured_runtime
+        and configured_runtime[0] == "artifact"
+        and shadow_distribution_source is None
+        and not _table_exists(
+            source_conn,
+            TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+        )
+    ):
+        raise RuntimeError(
+            "generation_runtime_mode is 'artifact' but no installed or explicit "
+            "tier-slot distribution is available for export"
+        )
 
     # -- slot_fillers (with scalar decomposition and remix columns) --
     exportable_cte = _exportable_slot_fillers_cte(source_conn)
@@ -500,6 +517,18 @@ def _populate_mini_db(conn: sqlite3.Connection, data_dir: Path) -> dict:
             )
     else:
         stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] = 0
+    configured_runtime = conn.execute(
+        "SELECT value FROM config WHERE key = 'generation_runtime_mode'"
+    ).fetchone()
+    if (
+        configured_runtime
+        and configured_runtime[0] == "artifact"
+        and not stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE]
+    ):
+        raise RuntimeError(
+            "generation_runtime_mode is 'artifact' but "
+            "tier_slot_filler_distribution_v1.csv is missing"
+        )
 
     # -- indexes --
     conn.execute("CREATE INDEX idx_sf_slot_type ON slot_fillers(slot_type)")

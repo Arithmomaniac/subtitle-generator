@@ -23,9 +23,10 @@ from subtitle_generator.runtime_eligibility import (
 from subtitle_generator.shadow_runtime import (
     GenerationRuntimeSelection,
     PreparedGenerationRuntime,
-    RuntimeSelectionMode,
+    RuntimeSelectionMode as RuntimeSelectionMode,
     prepare_generation_runtime,
     sample_shadow_candidates,
+    uses_tier_slot_distribution,
 )
 
 _inflect_engine = inflect.engine()
@@ -137,7 +138,7 @@ def _sample_slot_rows(
     model_tier: str | None,
     runtime: PreparedGenerationRuntime | None,
 ) -> list[str]:
-    if runtime is not None and runtime.mode == RuntimeSelectionMode.SHADOW:
+    if runtime is not None and uses_tier_slot_distribution(runtime.mode):
         if model_tier is None:
             raise RuntimeError(
                 f"Shadow runtime requires an explicit tier for slot_type {slot_type!r}"
@@ -865,7 +866,7 @@ def _filter_shadow_generation_rows(
     rows: list[tuple],
     runtime: PreparedGenerationRuntime | None,
 ) -> list[tuple]:
-    if runtime is not None and runtime.mode == RuntimeSelectionMode.SHADOW:
+    if runtime is not None and uses_tier_slot_distribution(runtime.mode):
         return _filter_generation_rows(slot_type, rows)
     return rows
 
@@ -1108,7 +1109,7 @@ def generate_subtitle(
 
     prepared_runtime = prepare_generation_runtime(conn, runtime)
     model_tier = None
-    if prepared_runtime.mode == RuntimeSelectionMode.SHADOW:
+    if uses_tier_slot_distribution(prepared_runtime.mode):
         model_tier = _choose_default_generation_tier(conn, seed)
 
     return _generate_subtitle_from_candidates(
@@ -1150,7 +1151,7 @@ def generate_subtitles(
                     conn,
                     seed_base + i if seed_base is not None else None,
                 )
-                if prepared_runtime.mode == RuntimeSelectionMode.SHADOW
+                if uses_tier_slot_distribution(prepared_runtime.mode)
                 else None
             ),
             runtime=prepared_runtime,
@@ -1284,7 +1285,7 @@ def generate_subtitle_matching_tiers(
     """Generate a subtitle whose evidence tier satisfies the requested filter."""
 
     prepared_runtime = prepare_generation_runtime(conn, runtime)
-    if prepared_runtime.mode == RuntimeSelectionMode.SHADOW:
+    if uses_tier_slot_distribution(prepared_runtime.mode):
         if not allowed_tiers:
             chosen_tier = _choose_generation_tier(
                 conn,
@@ -1413,7 +1414,7 @@ def generate_subtitles_by_tier(
             for tier in requested_tiers
         }
     prepared_runtime = prepare_generation_runtime(conn, runtime)
-    if prepared_runtime.mode == RuntimeSelectionMode.SHADOW:
+    if uses_tier_slot_distribution(prepared_runtime.mode):
         for tier in requested_tiers:
             for index in range(samples_per_tier):
                 buckets[tier].append(

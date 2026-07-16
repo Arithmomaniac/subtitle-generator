@@ -16,9 +16,13 @@ from subtitle_generator.generate import compose_compound, generate_subtitle_matc
 from subtitle_generator.schema_contracts import TIER_SLOT_FILLER_DISTRIBUTION_TABLE
 from subtitle_generator.shadow_runtime import (
     PreparedGenerationRuntime,
+    RuntimeSelectionMode,
     build_generation_runtime,
+    install_tier_slot_distribution,
     prepare_generation_runtime,
     sample_shadow_candidates,
+    set_configured_runtime_mode,
+    shadow_runtime_provenance,
     write_shadow_distribution_csv,
 )
 from subtitle_generator.shadow_runtime_compare import build_shadow_runtime_comparison
@@ -430,6 +434,81 @@ def test_default_runtime_remains_equivalent_to_explicit_legacy(tmp_path):
             runtime=legacy_runtime,
         )
         assert implicit == explicit
+
+
+def test_configured_artifact_is_default_and_legacy_is_persistent_rollback(
+    tmp_path,
+):
+    conn = _make_shadow_runtime_db()
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        _distribution_rows(),
+    )
+    install_tier_slot_distribution(conn, artifact, activate=True)
+
+    configured = prepare_generation_runtime(conn, None)
+    assert configured.mode == RuntimeSelectionMode.ARTIFACT
+    assert configured.shadow_distribution is not None
+
+    implicit = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers={"pop"},
+        seed=101,
+        remix_prob=0.0,
+        min_sim=0.0,
+    )
+    explicit_artifact = generate_subtitle_matching_tiers(
+        conn,
+        allowed_tiers={"pop"},
+        seed=101,
+        remix_prob=0.0,
+        min_sim=0.0,
+        runtime=build_generation_runtime(mode="artifact"),
+    )
+    assert implicit == explicit_artifact
+
+    set_configured_runtime_mode(conn, "legacy")
+    rolled_back = prepare_generation_runtime(conn, None)
+    assert rolled_back.mode == RuntimeSelectionMode.LEGACY
+
+
+def test_configured_runtime_falls_back_to_legacy_when_artifact_is_missing():
+    conn = _make_shadow_runtime_db()
+    conn.execute(
+        "INSERT INTO config VALUES ('generation_runtime_mode', 'artifact')"
+    )
+    conn.commit()
+
+    prepared = prepare_generation_runtime(conn, None)
+
+    assert prepared.mode == RuntimeSelectionMode.LEGACY
+    assert "missing" in prepared.fallback_reason
+    assert shadow_runtime_provenance(prepared)["fallback_reason"]
+
+
+def test_explicit_artifact_runtime_fails_when_table_is_missing():
+    conn = _make_shadow_runtime_db()
+
+    with pytest.raises(RuntimeError, match="missing required table"):
+        prepare_generation_runtime(
+            conn,
+            build_generation_runtime(mode="artifact"),
+        )
+
+
+def test_artifact_mode_requires_valid_installed_distribution(tmp_path):
+    conn = _make_shadow_runtime_db()
+
+    with pytest.raises(RuntimeError):
+        set_configured_runtime_mode(conn, "artifact")
+
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        _distribution_rows(),
+    )
+    row_count = install_tier_slot_distribution(conn, artifact, activate=False)
+    assert row_count == len(_distribution_rows())
+    assert set_configured_runtime_mode(conn, "artifact") == RuntimeSelectionMode.ARTIFACT
 
 
 def test_shadow_runtime_generation_is_deterministic_for_fixed_seed(tmp_path):
@@ -891,4 +970,25 @@ def test_build_mini_db_replaces_existing_output_atomically_on_success(tmp_path):
     assert mini_db_path.read_bytes() != b"stale-mini-db"
     assert build_stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] == len(shadow_rows)
     assert shadow_count == len(shadow_rows)
+
+
+def test_build_mini_db_rejects_artifact_default_without_distribution(tmp_path):
+    conn = _make_shadow_runtime_db(tmp_path / "runtime.db")
+    conn.execute(
+        "INSERT INTO config VALUES ('generation_runtime_mode', 'artifact')"
+    )
+    conn.commit()
+    data_dir = tmp_path / "data"
+    export_data(
+        conn,
+        data_dir,
+        shadow_distribution_source=_write_shadow_artifact(
+            tmp_path / "artifact.csv",
+            _distribution_rows(),
+        ),
+    )
+    (data_dir / f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}.csv").unlink()
+
+    with pytest.raises(RuntimeError, match="generation_runtime_mode"):
+        build_mini_db(data_dir, tmp_path / "mini.db")
     assert list(tmp_path.glob("mini-*.tmp.db")) == []

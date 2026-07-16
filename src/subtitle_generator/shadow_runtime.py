@@ -26,6 +26,8 @@ GroupKey = tuple[str, str]  # (slot_type, tier)
 
 
 class RuntimeSelectionMode(StrEnum):
+    CONFIGURED = "configured"
+    ARTIFACT = "artifact"
     LEGACY = "legacy"
     SHADOW = "shadow"
 
@@ -71,7 +73,7 @@ class ShadowArtifactSource:
 
 @dataclass(frozen=True)
 class GenerationRuntimeSelection:
-    mode: RuntimeSelectionMode = RuntimeSelectionMode.LEGACY
+    mode: RuntimeSelectionMode = RuntimeSelectionMode.CONFIGURED
     artifact_source: ShadowArtifactSource | None = None
     sampling_policy: ShadowSamplingPolicy = ShadowSamplingPolicy()
 
@@ -102,6 +104,7 @@ class LoadedShadowDistribution:
 class PreparedGenerationRuntime:
     selection: GenerationRuntimeSelection
     shadow_distribution: LoadedShadowDistribution | None = None
+    fallback_reason: str | None = None
 
     @property
     def mode(self) -> RuntimeSelectionMode:
@@ -116,14 +119,17 @@ def build_generation_runtime(
 ) -> GenerationRuntimeSelection:
     """Build an explicit runtime selection object."""
 
-    parsed_mode = RuntimeSelectionMode(mode or RuntimeSelectionMode.LEGACY)
+    parsed_mode = RuntimeSelectionMode(mode or RuntimeSelectionMode.CONFIGURED)
     policy = ShadowSamplingPolicy(float(shadow_sampling_temperature))
     policy.validate()
-    if parsed_mode == RuntimeSelectionMode.LEGACY:
+    if parsed_mode in {
+        RuntimeSelectionMode.CONFIGURED,
+        RuntimeSelectionMode.LEGACY,
+    }:
         if shadow_artifact is not None or shadow_sampling_temperature != 1.0:
             raise ValueError(
                 "shadow_artifact and shadow_sampling_temperature require "
-                "runtime mode 'shadow'"
+                "runtime mode 'artifact' or 'shadow'"
             )
         return GenerationRuntimeSelection(mode=parsed_mode, sampling_policy=policy)
     artifact_source = (
@@ -148,6 +154,33 @@ def prepare_generation_runtime(
         return runtime
     selection = runtime or GenerationRuntimeSelection()
     selection.sampling_policy.validate()
+    configured_request = selection.mode == RuntimeSelectionMode.CONFIGURED
+    if configured_request:
+        configured_mode = _configured_runtime_mode(conn)
+        if configured_mode == RuntimeSelectionMode.LEGACY:
+            return PreparedGenerationRuntime(
+                selection=GenerationRuntimeSelection(
+                    mode=RuntimeSelectionMode.LEGACY,
+                ),
+                fallback_reason=(
+                    "config generation_runtime_mode is absent or set to legacy"
+                ),
+            )
+        if not _table_exists(conn, TIER_SLOT_FILLER_DISTRIBUTION_TABLE):
+            return PreparedGenerationRuntime(
+                selection=GenerationRuntimeSelection(
+                    mode=RuntimeSelectionMode.LEGACY,
+                ),
+                fallback_reason=(
+                    "configured artifact table tier_slot_filler_distribution_v1 "
+                    "is missing"
+                ),
+            )
+        selection = GenerationRuntimeSelection(
+            mode=configured_mode,
+            artifact_source=ShadowArtifactSource.db_table(),
+            sampling_policy=selection.sampling_policy,
+        )
     if selection.mode == RuntimeSelectionMode.LEGACY:
         return PreparedGenerationRuntime(selection=selection)
     if selection.artifact_source is None:
@@ -222,6 +255,65 @@ def write_shadow_distribution_csv(path: Path, rows: list[dict[str, object]]) -> 
             })
 
 
+def install_tier_slot_distribution(
+    conn: sqlite3.Connection,
+    artifact_path: Path,
+    *,
+    activate: bool = True,
+) -> int:
+    """Atomically replace the DB runtime artifact from a validated CSV."""
+
+    loaded = load_shadow_distribution_source(
+        conn,
+        ShadowArtifactSource.csv_path(artifact_path),
+    )
+    staging_table = f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}__install"
+    conn.execute("SAVEPOINT install_tier_slot_distribution")
+    try:
+        conn.execute(f"DROP TABLE IF EXISTS {staging_table}")
+        _create_distribution_table(conn, staging_table)
+        _insert_distribution_rows(conn, staging_table, loaded.rows)
+        issues = validate_tier_slot_distribution(conn, table=staging_table)
+        if issues:
+            raise RuntimeError("\n".join(issue.message for issue in issues))
+        conn.execute(f"DROP TABLE IF EXISTS {TIER_SLOT_FILLER_DISTRIBUTION_TABLE}")
+        conn.execute(
+            f"ALTER TABLE {staging_table} RENAME TO "
+            f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}"
+        )
+        conn.execute(
+            "CREATE INDEX idx_tier_slot_dist_group ON "
+            f"{TIER_SLOT_FILLER_DISTRIBUTION_TABLE}(slot_type, tier)"
+        )
+        if activate:
+            _write_configured_runtime_mode(conn, RuntimeSelectionMode.ARTIFACT)
+        conn.execute("RELEASE SAVEPOINT install_tier_slot_distribution")
+    except Exception:
+        conn.execute("ROLLBACK TO SAVEPOINT install_tier_slot_distribution")
+        conn.execute("RELEASE SAVEPOINT install_tier_slot_distribution")
+        raise
+    return len(loaded.rows)
+
+
+def set_configured_runtime_mode(
+    conn: sqlite3.Connection,
+    mode: str | RuntimeSelectionMode,
+) -> RuntimeSelectionMode:
+    parsed_mode = RuntimeSelectionMode(mode)
+    if parsed_mode not in {
+        RuntimeSelectionMode.ARTIFACT,
+        RuntimeSelectionMode.LEGACY,
+    }:
+        raise ValueError("configured runtime mode must be 'artifact' or 'legacy'")
+    if parsed_mode == RuntimeSelectionMode.ARTIFACT:
+        issues = validate_tier_slot_distribution(conn)
+        if issues:
+            raise RuntimeError("\n".join(issue.message for issue in issues))
+    with conn:
+        _write_configured_runtime_mode(conn, parsed_mode)
+    return parsed_mode
+
+
 def sample_shadow_candidates(
     runtime: PreparedGenerationRuntime,
     *,
@@ -233,8 +325,10 @@ def sample_shadow_candidates(
 ) -> list[str]:
     """Sample strict fillers from the loaded shadow distribution."""
 
-    if runtime.mode != RuntimeSelectionMode.SHADOW:
-        raise RuntimeError("sample_shadow_candidates requires shadow runtime mode")
+    if not uses_tier_slot_distribution(runtime.mode):
+        raise RuntimeError(
+            "sample_shadow_candidates requires artifact or shadow runtime mode"
+        )
     if runtime.shadow_distribution is None:
         raise RuntimeError("Shadow runtime is missing a loaded distribution")
     group = runtime.shadow_distribution.groups.get((slot_type, tier))
@@ -289,7 +383,10 @@ def shadow_runtime_provenance(runtime: PreparedGenerationRuntime) -> dict[str, o
     """Return stable provenance for a prepared shadow runtime."""
 
     if runtime.mode == RuntimeSelectionMode.LEGACY:
-        return {"mode": RuntimeSelectionMode.LEGACY.value}
+        result: dict[str, object] = {"mode": RuntimeSelectionMode.LEGACY.value}
+        if runtime.fallback_reason:
+            result["fallback_reason"] = runtime.fallback_reason
+        return result
     if runtime.shadow_distribution is None:
         raise RuntimeError("Shadow runtime provenance requires a loaded distribution")
     return {
@@ -299,6 +396,131 @@ def shadow_runtime_provenance(runtime: PreparedGenerationRuntime) -> dict[str, o
         "artifact_version": runtime.shadow_distribution.source.artifact_version,
         "sampling_temperature": runtime.selection.sampling_policy.sampling_temperature,
     }
+
+
+def uses_tier_slot_distribution(mode: RuntimeSelectionMode) -> bool:
+    return mode in {
+        RuntimeSelectionMode.ARTIFACT,
+        RuntimeSelectionMode.SHADOW,
+    }
+
+
+def _configured_runtime_mode(conn: sqlite3.Connection) -> RuntimeSelectionMode:
+    if not _table_exists(conn, "config"):
+        return RuntimeSelectionMode.LEGACY
+    row = conn.execute(
+        "SELECT value FROM config WHERE key = 'generation_runtime_mode'"
+    ).fetchone()
+    if row is None:
+        return RuntimeSelectionMode.LEGACY
+    try:
+        mode = RuntimeSelectionMode(str(row[0]))
+    except ValueError as exc:
+        raise RuntimeError(
+            "config generation_runtime_mode must be 'artifact' or 'legacy'"
+        ) from exc
+    if mode not in {
+        RuntimeSelectionMode.ARTIFACT,
+        RuntimeSelectionMode.LEGACY,
+    }:
+        raise RuntimeError(
+            "config generation_runtime_mode must be 'artifact' or 'legacy'"
+        )
+    return mode
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone() is not None
+
+
+def _write_configured_runtime_mode(
+    conn: sqlite3.Connection,
+    mode: RuntimeSelectionMode,
+) -> None:
+    if not _table_exists(conn, "config"):
+        raise RuntimeError("configured runtime requires a config table")
+    conn.execute(
+        """
+        INSERT INTO config (key, value)
+        VALUES ('generation_runtime_mode', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (mode.value,),
+    )
+
+
+def _create_distribution_table(conn: sqlite3.Connection, table: str) -> None:
+    conn.execute(f"""
+        CREATE TABLE {table} (
+            slot_type TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
+            probability REAL NOT NULL,
+            log_probability REAL NOT NULL,
+            soft_count REAL NOT NULL,
+            prior_count REAL NOT NULL,
+            evidence_count REAL NOT NULL,
+            source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
+            teacher_confidence_mean REAL,
+            frequency INTEGER NOT NULL,
+            popularity_score REAL,
+            semantic_smoothing_mass REAL NOT NULL,
+            calibration_temperature REAL NOT NULL,
+            artifact_version TEXT NOT NULL
+        )
+    """)
+
+
+def _insert_distribution_rows(
+    conn: sqlite3.Connection,
+    table: str,
+    rows: tuple[dict[str, object], ...],
+) -> None:
+    conn.executemany(
+        f"INSERT INTO {table} VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                row["slot_type"],
+                row["tier"],
+                row["filler"],
+                row["display_filler"],
+                float(row["probability"]),
+                float(row["log_probability"]),
+                float(row["soft_count"]),
+                float(row["prior_count"]),
+                float(row["evidence_count"]),
+                int(row["source_count"]),
+                int(row["anchored_source_count"]),
+                int(row["inferred_source_count"]),
+                float(row["anchored_soft_count"]),
+                float(row["inferred_soft_count"]),
+                (
+                    float(row["teacher_confidence_mean"])
+                    if row.get("teacher_confidence_mean") not in {None, ""}
+                    else None
+                ),
+                int(row["frequency"]),
+                (
+                    float(row["popularity_score"])
+                    if row.get("popularity_score") not in {None, ""}
+                    else None
+                ),
+                float(row["semantic_smoothing_mass"]),
+                float(row["calibration_temperature"]),
+                row["artifact_version"],
+            )
+            for row in rows
+        ],
+    )
 
 
 def _read_distribution_table(

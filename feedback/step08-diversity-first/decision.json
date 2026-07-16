@@ -1,0 +1,465 @@
+{
+  "decision": "promote",
+  "decision_digest": "596734449ff2c0e83ec169534909b23adb04d33d3c99e7524c351be115ac2a02",
+  "gates": {
+    "anchored_base": [
+      {
+        "evidence": {
+          "default": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "mainstream": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "maximum_top_subtitle_mass": 0.2,
+          "minimum_unique_subtitle_rate": 0.8,
+          "niche": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "pop": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          }
+        },
+        "name": "no_catastrophic_subtitle_repetition",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate_effective_n": 129.06594532159488,
+          "candidate_top_mass": 0.022222222222222223,
+          "legacy_effective_n": 127.9059505549666,
+          "legacy_top_mass": 0.015151515151515152
+        },
+        "name": "no_pop_collapse",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6563805797615194,
+          "floor": 0.53788615129234,
+          "legacy": 0.6723576891154249
+        },
+        "name": "mainstream_distinct",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.08759124087591241,
+          "legacy": 0.08695652173913043
+        },
+        "name": "niche_tail_retained",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "coherence": 6.366666666666666,
+            "evocativeness": 4.516666666666667,
+            "overall": 5.583333333333333,
+            "surprise": 5.866666666666666
+          },
+          "legacy": {
+            "coherence": 6.841666666666667,
+            "evocativeness": 5.416666666666667,
+            "overall": 6.008333333333334,
+            "surprise": 5.766666666666667
+          }
+        },
+        "name": "quality_non_inferiority",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6543214132513114,
+          "legacy": 0.6758640994046129
+        },
+        "name": "tone_separation_non_regression",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5888888888888889,
+          "floor": 0.5066666666666667,
+          "legacy": 0.6333333333333333,
+          "per_tier": {
+            "mainstream": 0.6333333333333333,
+            "niche": 0.5666666666666667,
+            "pop": 0.5666666666666667
+          }
+        },
+        "name": "first_draw_requested_tier_compliance",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "mean_js_from_legacy": 0.052899121544875555,
+          "rationale": "Replace sqrt(freq)*P(tier|filler) with explicit P(filler|tier,slot); calibration and smoothing are separately attributable."
+        },
+        "name": "intentional_shift",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "mainstream": 0.6333333333333333,
+            "niche": 0.5666666666666667,
+            "pop": 0.5666666666666667
+          },
+          "floor": {
+            "mainstream": 0.7466666666666667,
+            "niche": 0.5066666666666667,
+            "pop": 0.8
+          },
+          "legacy_public_retry": {
+            "mainstream": 0.9333333333333333,
+            "niche": 0.6333333333333333,
+            "pop": 1
+          }
+        },
+        "name": "public_contract_requested_tier_continuity",
+        "status": "diagnostic"
+      }
+    ],
+    "calibrated": [
+      {
+        "evidence": {
+          "default": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "mainstream": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "maximum_top_subtitle_mass": 0.2,
+          "minimum_unique_subtitle_rate": 0.8,
+          "niche": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "pop": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          }
+        },
+        "name": "no_catastrophic_subtitle_repetition",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate_effective_n": 106.1606898605631,
+          "candidate_top_mass": 0.046511627906976744,
+          "legacy_effective_n": 127.9059505549666,
+          "legacy_top_mass": 0.015151515151515152
+        },
+        "name": "no_pop_collapse",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5946769835738621,
+          "floor": 0.53788615129234,
+          "legacy": 0.6723576891154249
+        },
+        "name": "mainstream_distinct",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.05263157894736842,
+          "legacy": 0.08695652173913043
+        },
+        "name": "niche_tail_retained",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "coherence": 6.908333333333333,
+            "evocativeness": 5.008333333333334,
+            "overall": 5.747222222222222,
+            "surprise": 5.325
+          },
+          "legacy": {
+            "coherence": 6.841666666666667,
+            "evocativeness": 5.416666666666667,
+            "overall": 6.008333333333334,
+            "surprise": 5.766666666666667
+          }
+        },
+        "name": "quality_non_inferiority",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6045027636166894,
+          "legacy": 0.6758640994046129
+        },
+        "name": "tone_separation_non_regression",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5666666666666667,
+          "floor": 0.5066666666666667,
+          "legacy": 0.6333333333333333,
+          "per_tier": {
+            "mainstream": 0.36666666666666664,
+            "niche": 0.6333333333333333,
+            "pop": 0.7
+          }
+        },
+        "name": "first_draw_requested_tier_compliance",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "mean_js_from_legacy": 0.08539054533821375,
+          "rationale": "Replace sqrt(freq)*P(tier|filler) with explicit P(filler|tier,slot); calibration and smoothing are separately attributable."
+        },
+        "name": "intentional_shift",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "mainstream": 0.36666666666666664,
+            "niche": 0.6333333333333333,
+            "pop": 0.7
+          },
+          "floor": {
+            "mainstream": 0.7466666666666667,
+            "niche": 0.5066666666666667,
+            "pop": 0.8
+          },
+          "legacy_public_retry": {
+            "mainstream": 0.9333333333333333,
+            "niche": 0.6333333333333333,
+            "pop": 1
+          }
+        },
+        "name": "public_contract_requested_tier_continuity",
+        "status": "diagnostic"
+      }
+    ],
+    "smoothed": [
+      {
+        "evidence": {
+          "default": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "mainstream": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "maximum_top_subtitle_mass": 0.2,
+          "minimum_unique_subtitle_rate": 0.8,
+          "niche": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          },
+          "pop": {
+            "sample_count": 30,
+            "status": "pass",
+            "top_subtitle_mass": 0.03333333333333333,
+            "unique_subtitle_rate": 1.0
+          }
+        },
+        "name": "no_catastrophic_subtitle_repetition",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate_effective_n": 128.3993249743397,
+          "candidate_top_mass": 0.022556390977443608,
+          "legacy_effective_n": 127.9059505549666,
+          "legacy_top_mass": 0.015151515151515152
+        },
+        "name": "no_pop_collapse",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.659826770381247,
+          "floor": 0.53788615129234,
+          "legacy": 0.6723576891154249
+        },
+        "name": "mainstream_distinct",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.10606060606060606,
+          "legacy": 0.08695652173913043
+        },
+        "name": "niche_tail_retained",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "coherence": 6.783333333333333,
+            "evocativeness": 5.108333333333333,
+            "overall": 5.833333333333333,
+            "surprise": 5.608333333333333
+          },
+          "legacy": {
+            "coherence": 6.841666666666667,
+            "evocativeness": 5.416666666666667,
+            "overall": 6.008333333333334,
+            "surprise": 5.766666666666667
+          }
+        },
+        "name": "quality_non_inferiority",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.6573236755174956,
+          "legacy": 0.6758640994046129
+        },
+        "name": "tone_separation_non_regression",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": 0.5444444444444444,
+          "floor": 0.5066666666666667,
+          "legacy": 0.6333333333333333,
+          "per_tier": {
+            "mainstream": 0.6333333333333333,
+            "niche": 0.5666666666666667,
+            "pop": 0.43333333333333335
+          }
+        },
+        "name": "first_draw_requested_tier_compliance",
+        "status": "fail"
+      },
+      {
+        "evidence": {
+          "mean_js_from_legacy": 0.052750711732806564,
+          "rationale": "Replace sqrt(freq)*P(tier|filler) with explicit P(filler|tier,slot); calibration and smoothing are separately attributable."
+        },
+        "name": "intentional_shift",
+        "status": "pass"
+      },
+      {
+        "evidence": {
+          "candidate": {
+            "mainstream": 0.6333333333333333,
+            "niche": 0.5666666666666667,
+            "pop": 0.43333333333333335
+          },
+          "floor": {
+            "mainstream": 0.7466666666666667,
+            "niche": 0.5066666666666667,
+            "pop": 0.8
+          },
+          "legacy_public_retry": {
+            "mainstream": 0.9333333333333333,
+            "niche": 0.6333333333333333,
+            "pop": 1
+          }
+        },
+        "name": "public_contract_requested_tier_continuity",
+        "status": "diagnostic"
+      }
+    ]
+  },
+  "legacy_public_retry_gate": {
+    "evidence": {
+      "default": {
+        "sample_count": 30,
+        "status": "pass",
+        "top_subtitle_mass": 0.06666666666666667,
+        "unique_subtitle_rate": 0.8666666666666667
+      },
+      "interpretation": "Current retry behavior preserves requested-tier continuity but is not eligible under the diversity-first policy when repetition is catastrophic.",
+      "mainstream": {
+        "sample_count": 30,
+        "status": "fail",
+        "top_subtitle_mass": 0.23333333333333334,
+        "unique_subtitle_rate": 0.36666666666666664
+      },
+      "maximum_top_subtitle_mass": 0.2,
+      "minimum_unique_subtitle_rate": 0.8,
+      "niche": {
+        "sample_count": 30,
+        "status": "pass",
+        "top_subtitle_mass": 0.06666666666666667,
+        "unique_subtitle_rate": 0.9666666666666667
+      },
+      "pop": {
+        "sample_count": 30,
+        "status": "fail",
+        "top_subtitle_mass": 1.0,
+        "unique_subtitle_rate": 0.03333333333333333
+      }
+    },
+    "name": "no_catastrophic_subtitle_repetition",
+    "status": "fail"
+  },
+  "policy": {
+    "catastrophic_repetition_scenarios": [
+      "pop",
+      "mainstream",
+      "niche",
+      "default"
+    ],
+    "maximum_top_subtitle_mass": 0.2,
+    "minimum_samples_per_scenario": 30,
+    "minimum_unique_subtitle_rate": 0.8,
+    "public_contract_requested_tier_continuity": "diagnostic",
+    "required_step08_first_draw_gates": [
+      "no_pop_collapse",
+      "mainstream_distinct",
+      "niche_tail_retained",
+      "quality_non_inferiority",
+      "tone_separation_non_regression",
+      "first_draw_requested_tier_compliance",
+      "intentional_shift"
+    ]
+  },
+  "policy_name": "diversity_first",
+  "public_contract_continuity": {
+    "rationale": "Per-subtitle retry-era continuity remains visible as a diagnostic. The policy accepts lower agreement because distributional tone separation is non-inferior and catastrophic repetition is forbidden.",
+    "status": "accepted_tradeoff"
+  },
+  "recommended_variant": "anchored_base",
+  "reevaluation_input_digest": "967bc6ce4cc0034900b62ecaab5c153de10f36d8a78e9c9ca422e594dac755aa",
+  "rollback_implications": "Keep the legacy runtime available as the explicit rollback path. The frozen Step 8 defer record remains unchanged.",
+  "schema_version": 1,
+  "source_binding": {
+    "frozen_step08_decision_digest": "a168f33f758cab041d7b46b224c0f2031be5ed4ea9bfc4419051e90bbc3da0ff",
+    "frozen_step08_decision_sha256": "7a5a7e95fd9528b5d9efe76de8212b26703eda2bb082406c8f50a5bd68551e11",
+    "reevaluation_source_sha256": "d22e1dbfd7bef05ad2e0126d02561cad4a7a0cdc00d997d182b4a251bf259c9d"
+  },
+  "summary": "Diversity-first reevaluation recommends anchored_base for rollout. It passes every first-draw quality, tone, tier-signal, and diversity gate, while legacy public retry fails the catastrophic-repetition gate."
+}

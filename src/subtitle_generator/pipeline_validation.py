@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from subtitle_generator.config import ALL_TUNABLE_PARAMS
 from subtitle_generator.parameter_state import get_model_registry
 from subtitle_generator.remix_state import validate_remix_precompute_state
-from subtitle_generator.schema_contracts import validate_schema
+from subtitle_generator.schema_contracts import (
+    TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+    validate_schema,
+    validate_tier_slot_distribution,
+)
 
 
 @dataclass(frozen=True)
@@ -205,6 +209,35 @@ def _validate_serving_contracts() -> list[ValidationIssue]:
     return issues
 
 
+def _validate_configured_runtime(conn: sqlite3.Connection) -> list[ValidationIssue]:
+    if not _table_exists(conn, "config"):
+        return []
+    row = conn.execute(
+        "SELECT value FROM config WHERE key = 'generation_runtime_mode'"
+    ).fetchone()
+    if row is None or row[0] == "legacy":
+        return []
+    if row[0] != "artifact":
+        return [ValidationIssue(
+            stage="serving",
+            check="runtime_mode",
+            message=(
+                "serving: generation_runtime_mode must be 'artifact' or 'legacy'"
+            ),
+        )]
+    return [
+        ValidationIssue(
+            stage="serving",
+            check="tier_slot_distribution",
+            message=issue.message,
+        )
+        for issue in validate_tier_slot_distribution(
+            conn,
+            table=TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+        )
+    ]
+
+
 def validate_pipeline(
     conn: sqlite3.Connection,
     expected_embedding_version: str = "2",
@@ -224,6 +257,7 @@ def validate_pipeline(
     )
     issues.extend(_validate_popularity_coverage(conn))
     issues.extend(_validate_serving_contracts())
+    issues.extend(_validate_configured_runtime(conn))
     return PipelineValidationReport(issues=tuple(issues))
 
 

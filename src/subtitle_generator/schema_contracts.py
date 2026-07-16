@@ -225,12 +225,7 @@ def validate_tier_slot_distribution(
     table: str = TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
     tolerance: float = TIER_SLOT_FILLER_DISTRIBUTION_TOLERANCE,
 ) -> list[SchemaIssue]:
-    """Validate the future tier-conditioned filler distribution artifact.
-
-    The table is optional for the current runtime path, so this is intentionally
-    separate from ``validate_schema``. Use it once the distribution builder starts
-    emitting ``tier_slot_filler_distribution_v1``.
-    """
+    """Validate the tier-conditioned filler distribution runtime artifact."""
 
     contract = TableContract(
         stage="tier_slot_distribution",
