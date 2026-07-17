@@ -1,3 +1,5 @@
+> Created/edited by GitHub Copilot with human review/feedback by Avi Levin.
+
 # subtitle-generator
 
 Generate strange pop-nonfiction subtitles in the pattern:
@@ -10,15 +12,20 @@ The project mines real book titles and subtitles from Library of Congress and Op
 
 ## Current runtime model
 
-Generation now separates two concerns:
+Generation now separates these responsibilities:
 
 | Concern | Runtime behavior |
 |---|---|
-| **Categorization** | Learned book-model probabilities classify each existing slot filler as pop, mainstream, or niche. |
-| **Generation** | The generator still samples from the same validated filler universe; requested tone tiers weight fillers by the learned probability for that tier. |
+| **Build evidence** | Source labels, learned book-model probabilities, confidence, and priors contribute evidence to the tier-slot artifact. |
+| **Generation** | The default runtime samples directly from normalized `P(filler | tier, slot_type)` over the validated filler universe. |
+| **Rollback** | The former `sqrt(freq) * score_T` path remains available explicitly as `legacy`. |
 | **Guardrail** | A narrow literal-artifact filter removes broken strings and malformed final objects without rejecting funny conceptual collisions. |
 
-The deployment inputs include tracked CSVs such as `api\data\slot_filler_model_scores.csv`. The ignored mini DB at `api\data\subtitles.mini.db` is built from those CSVs locally and in CI, so deployed Azure Functions do not need the full local SQLite database.
+The deployment inputs include the tracked
+`api\data\tier_slot_filler_distribution_v1.csv` artifact and
+`generation_runtime_mode=artifact` config. The ignored mini DB at
+`api\data\subtitles.mini.db` is built from tracked CSVs locally and in CI, so
+deployed Azure Functions do not need the full local SQLite database.
 
 ## Examples
 
@@ -61,6 +68,7 @@ uv run subtitle-gen generate
 uv run subtitle-gen generate --tone pop
 uv run subtitle-gen generate --tone mainstream --sources
 uv run subtitle-gen generate --tone niche --jacket
+uv run subtitle-gen generate --runtime legacy --tone pop  # rollback comparison
 uv run subtitle-gen jacket "sturgeon, caviar, and the geography of desire"
 uv run subtitle-gen serve --no-open
 ```
@@ -85,9 +93,11 @@ uv run subtitle-gen validate-pipeline
 
 The pipeline stages are contract-checked. `validate-pipeline` is read-only and verifies schema, config, remix precompute state, popularity coverage, model IDs, and serving readiness.
 
-## Book-model tiering workflow
+## Book-model evidence workflow
 
-The learned runtime categorizer is produced offline, then installed as slot-filler probabilities.
+The offline book model produces filler-level tier evidence. Those scores feed the
+anchored tier-slot artifact and remain installed for legacy rollback and
+compatibility classification.
 
 ```powershell
 uv sync --extra ml --extra tune
@@ -115,7 +125,7 @@ pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Inventory
 pwsh -File scripts\run-book-model-pipeline.ps1 -Steps Features,Torch,CalibrateRuntimeTierModel,Distill,Shadow,CategorizationGate -PlanOnly
 ```
 
-The runtime table is `slot_filler_model_scores`:
+The evidence/rollback table is `slot_filler_model_scores`:
 
 | Column | Meaning |
 |---|---|
@@ -126,7 +136,9 @@ The runtime table is `slot_filler_model_scores`:
 | `model_tier` | Highest-scoring learned tier. |
 | `source_prediction_count` | Number of source-book predictions that contributed to the rollup. |
 
-Mini DB builds reject partial model-score coverage when `slot_filler_model_scores.csv` is present. This keeps deployment from silently mixing learned-tier and legacy sampling scales.
+Mini DB builds reject partial model-score coverage when
+`slot_filler_model_scores.csv` is present. This keeps artifact rebuilds and
+legacy rollback from silently using partially scored fillers.
 
 ## Export and deployment artifacts
 
@@ -155,12 +167,16 @@ Ignored build outputs:
 
 | Path | Purpose |
 |---|---|
-| `api\data\subtitles.mini.db` | Built SQLite artifact used by local serving and Azure Functions; CI rebuilds it from CSVs. |
+| `api\data\subtitles.mini.db` | Built SQLite artifact used by local serving and Azure Functions; CI rebuilds it from CSVs with worker-readable permissions. |
 | `generated-artifacts\` | Local reports, model features, predictions, rollups, and gate outputs. |
 
 The configured default runtime is `artifact`. Use `--runtime legacy`,
 `SUBTITLE_GEN_RUNTIME_MODE=legacy`, or
 `subtitle-gen set-runtime-default --mode legacy` to roll back.
+
+Azure Flex mounts the released package read-only. The Function worker copies the
+packaged mini DB once into temporary storage and opens that immutable copy
+read-only; local serving continues to use its writable DB for local ratings.
 
 ## Local verification
 

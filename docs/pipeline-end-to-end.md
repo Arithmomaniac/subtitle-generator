@@ -46,7 +46,7 @@ generator weights existing strict fillers for a requested tier.
 
 ## 0. Runtime contract
 
-The deployed generator has four responsibilities:
+The deployed generator has five responsibilities:
 
 | Responsibility | Runtime state | Effect |
 |---|---|---|
@@ -492,7 +492,8 @@ the rich teacher using only durable/export-safe features.
 | `export-current` | title/subtitle text plus basic source shape | 261 | 1,895 | 4,537 | 95.8% |
 | `export-slot` | `export-current` plus slot aggregate scalars such as source-link count, distinct strict filler count, max filler popularity, and average filler popularity | 392 | 2,071 | 4,230 | 87.4% |
 
-`export-slot` is the selected runtime source. It agrees less tightly with the
+`export-slot` is the selected source for tier-slot evidence and legacy rollback.
+It agrees less tightly with the
 teacher than `export-current`, but its slot aggregate features move the export
 toward a broader pop/mainstream pool. That is desirable for generation because
 the deployed scores are sampling weights over strict fillers, not final claims
@@ -744,7 +745,7 @@ Ignored local/CI-built artifacts:
 
 | Path | Purpose |
 |---|---|
-| `api\data\subtitles.mini.db` | Built SQLite artifact for local serving and Azure Functions; CI rebuilds it from tracked CSVs. |
+| `api\data\subtitles.mini.db` | Built SQLite artifact for local serving and Azure Functions; CI rebuilds it from tracked CSVs with mode `0644`. |
 | `generated-artifacts\` | Local reports, features, predictions, rollups, and gate outputs. |
 
 If `slot_filler_model_scores.csv` exists, `build-db` requires one score row for
@@ -752,6 +753,12 @@ every exported slot filler. Partial coverage is rejected so deployment cannot
 mix learned-tier rollback sampling with unscored filler choices. When
 `generation_runtime_mode=artifact`, `build-db` also requires and validates the
 tier-slot distribution CSV.
+
+Azure Flex mounts the deployment package read-only. At worker startup,
+`handlers.py` copies the packaged mini DB once to the worker temporary directory,
+keys that copy by source signature, and opens it with SQLite
+`mode=ro&immutable=1`. This avoids package-mount journal/permission failures.
+Local serving keeps normal writable SQLite behavior for local rating storage.
 
 ## 16. Repeat the book-model path with the runner
 
