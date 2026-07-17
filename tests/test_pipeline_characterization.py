@@ -1283,6 +1283,25 @@ def test_handler_resolves_relative_db_path_from_package_root(
     assert resolved == relative_db.resolve()
 
 
+def test_handler_opens_azure_packaged_db_read_only(tmp_path, monkeypatch):
+    from subtitle_generator import handlers
+
+    db_path = tmp_path / "subtitles.mini.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("SUBTITLE_GEN_MODE", "azure")
+
+    packaged = handlers.get_db(str(db_path))
+    try:
+        assert packaged.execute("SELECT COUNT(*) FROM config").fetchone()[0] == 0
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            packaged.execute("INSERT INTO config VALUES ('x', 'y')")
+    finally:
+        packaged.close()
+
+
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):
     from subtitle_generator import handlers
 
