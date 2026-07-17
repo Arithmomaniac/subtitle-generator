@@ -1253,6 +1253,36 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
     assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim", "runtime"}
 
 
+def test_handler_resolves_relative_db_path_from_package_root(
+    tmp_path,
+    monkeypatch,
+):
+    from subtitle_generator import handlers
+
+    package_root = tmp_path / "app"
+    fake_handlers = package_root / "subtitle_generator" / "handlers.py"
+    fake_handlers.parent.mkdir(parents=True)
+    fake_handlers.touch()
+    monkeypatch.setattr(handlers, "__file__", str(fake_handlers))
+    relative_db = package_root / "data" / "relative-runtime.db"
+    relative_db.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(relative_db).close()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("DB_PATH", "data/relative-runtime.db")
+
+    conn = handlers.get_db()
+    try:
+        resolved = Path(
+            conn.execute("PRAGMA database_list").fetchone()[2]
+        ).resolve()
+    finally:
+        conn.close()
+
+    assert resolved == relative_db.resolve()
+
+
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):
     from subtitle_generator import handlers
 
