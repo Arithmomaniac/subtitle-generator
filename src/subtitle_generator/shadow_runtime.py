@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
@@ -18,14 +19,30 @@ from subtitle_generator.schema_contracts import (
     validate_tier_slot_distribution,
 )
 from subtitle_generator.runtime_eligibility import filler_key as _filler_key
-from subtitle_generator.tier_slot_calibration import apply_temperature
-from subtitle_generator.tier_slot_distribution import (
-    DISTRIBUTION_COLUMNS,
-    _format_csv_value,
-    _validate_rows,
-)
 
 GroupKey = tuple[str, str]  # (slot_type, tier)
+DISTRIBUTION_COLUMNS = (
+    "slot_type",
+    "tier",
+    "filler",
+    "display_filler",
+    "probability",
+    "log_probability",
+    "soft_count",
+    "prior_count",
+    "evidence_count",
+    "source_count",
+    "anchored_source_count",
+    "inferred_source_count",
+    "anchored_soft_count",
+    "inferred_soft_count",
+    "teacher_confidence_mean",
+    "frequency",
+    "popularity_score",
+    "semantic_smoothing_mass",
+    "calibration_temperature",
+    "artifact_version",
+)
 _REQUIRED_NUMERIC_COLUMNS = (
     "probability",
     "log_probability",
@@ -276,7 +293,7 @@ def load_shadow_distribution_source(
             )
         rows = tuple(_read_distribution_csv(source.path))
         _validate_finite_numeric_rows(rows, source.describe())
-        _validate_rows(conn, list(rows))
+        _validate_csv_rows(conn, rows)
     if source.kind == ShadowArtifactSourceKind.DB_TABLE:
         _validate_finite_numeric_rows(rows, source.describe())
     if not rows:
@@ -419,7 +436,10 @@ def sample_shadow_candidates(
         for key in unique_candidates
     }
     scaled = (
-        apply_temperature(weights, runtime.selection.sampling_policy.sampling_temperature)
+        _apply_temperature(
+            weights,
+            runtime.selection.sampling_policy.sampling_temperature,
+        )
         if runtime.selection.sampling_policy.sampling_temperature != 1.0
         else weights
     )
@@ -653,9 +673,15 @@ def _insert_distribution_rows(
                 float(row["soft_count"]),
                 float(row["prior_count"]),
                 float(row["evidence_count"]),
-                int(row["source_count"]),
-                int(row["anchored_source_count"]),
-                int(row["inferred_source_count"]),
+                _parse_integer_field(row["source_count"], "source_count"),
+                _parse_integer_field(
+                    row["anchored_source_count"],
+                    "anchored_source_count",
+                ),
+                _parse_integer_field(
+                    row["inferred_source_count"],
+                    "inferred_source_count",
+                ),
                 float(row["anchored_soft_count"]),
                 float(row["inferred_soft_count"]),
                 (
@@ -663,7 +689,7 @@ def _insert_distribution_rows(
                     if row.get("teacher_confidence_mean") not in {None, ""}
                     else None
                 ),
-                int(row["frequency"]),
+                _parse_integer_field(row["frequency"], "frequency"),
                 (
                     float(row["popularity_score"])
                     if row.get("popularity_score") not in {None, ""}
@@ -676,6 +702,19 @@ def _insert_distribution_rows(
             for row in rows
         ],
     )
+
+
+def _parse_integer_field(value: object, column: str) -> int:
+    text = value.decode() if isinstance(value, bytes) else str(value)
+    try:
+        numeric_value = Decimal(text)
+    except (InvalidOperation, UnicodeDecodeError) as exc:
+        raise RuntimeError(f"Runtime artifact field {column!r} must be numeric") from exc
+    if not numeric_value.is_finite() or numeric_value != numeric_value.to_integral_value():
+        raise RuntimeError(
+            f"Runtime artifact field {column!r} must be a finite integer"
+        )
+    return int(numeric_value)
 
 
 def _read_distribution_table(
@@ -710,3 +749,77 @@ def _rows_digest(rows: tuple[dict[str, object], ...]) -> str:
             hasher.update(b"\n")
         hasher.update(b"--\n")
     return hasher.hexdigest()[:16]
+
+
+def _apply_temperature(
+    probabilities: dict[str, float],
+    temperature: float,
+) -> dict[str, float]:
+    if temperature <= 0:
+        raise RuntimeError("temperature must be positive")
+    if temperature == 1.0:
+        return dict(probabilities)
+    exponent = 1.0 / temperature
+    powered = {
+        filler: (probability**exponent if probability > 0 else 0.0)
+        for filler, probability in probabilities.items()
+    }
+    total = sum(powered.values())
+    if total <= 0:
+        return dict(probabilities)
+    return {
+        filler: value / total
+        for filler, value in powered.items()
+    }
+
+
+def _format_csv_value(value: object) -> object:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if math.isinf(value):
+            return "-inf" if value < 0 else "inf"
+        return f"{value:.12g}"
+    return value
+
+
+def _validate_csv_rows(
+    conn: sqlite3.Connection,
+    rows: tuple[dict[str, object], ...],
+) -> None:
+    validation = sqlite3.connect(":memory:")
+    try:
+        validation.execute(
+            """
+            CREATE TABLE slot_fillers (
+                id INTEGER PRIMARY KEY,
+                slot_type TEXT NOT NULL,
+                filler TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'strict'
+            )
+            """
+        )
+        validation.executemany(
+            "INSERT INTO slot_fillers VALUES (?, ?, ?, 'strict')",
+            conn.execute(
+                """
+                SELECT id, slot_type, filler
+                FROM slot_fillers
+                WHERE mode = 'strict'
+                """
+            ).fetchall(),
+        )
+        _create_distribution_table(
+            validation,
+            TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+        )
+        _insert_distribution_rows(
+            validation,
+            TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+            rows,
+        )
+        issues = validate_tier_slot_distribution(validation)
+        if issues:
+            raise RuntimeError("\n".join(issue.message for issue in issues))
+    finally:
+        validation.close()

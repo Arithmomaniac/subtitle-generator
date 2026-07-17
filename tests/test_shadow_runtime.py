@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from subtitle_generator.shadow_runtime import (
     RuntimeSelectionMode,
     build_generation_runtime,
     clear_distribution_cache,
+    _parse_integer_field,
     install_tier_slot_distribution,
     prepare_generation_runtime,
     sample_shadow_candidates,
@@ -49,6 +51,25 @@ _SLOT_FILLERS = {
         ("Late Antiquity", "niche"),
     ],
 }
+
+
+def test_runtime_import_does_not_require_offline_ml_dependencies():
+    script = """
+import sys
+sys.modules["spacy"] = None
+sys.modules["subtitle_generator.tier_slot_calibration"] = None
+sys.modules["subtitle_generator.tier_slot_distribution"] = None
+from subtitle_generator import handlers
+assert handlers.handle_health()[0] == 200
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parent.parent,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _make_shadow_runtime_db(path: Path | None = None) -> sqlite3.Connection:
@@ -529,6 +550,30 @@ def test_csv_artifact_allows_blank_optional_numeric_values(tmp_path):
     )
 
     assert prepared.shadow_distribution is not None
+
+
+def test_csv_artifact_allows_integer_valued_decimal_count_fields(tmp_path):
+    conn = _make_shadow_runtime_db()
+    rows = _distribution_rows()
+    for field in (
+        "source_count",
+        "anchored_source_count",
+        "inferred_source_count",
+        "frequency",
+    ):
+        rows[0][field] = f"{rows[0][field]}.0"
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        rows,
+    )
+
+    prepared = prepare_generation_runtime(
+        conn,
+        build_generation_runtime(mode="artifact", shadow_artifact=artifact),
+    )
+
+    assert prepared.shadow_distribution is not None
+    assert _parse_integer_field("9007199254740993", "frequency") == 9007199254740993
 
 
 def test_file_database_reuses_cached_validated_distribution(tmp_path):
