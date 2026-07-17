@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import math
 import random
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +26,30 @@ from subtitle_generator.tier_slot_distribution import (
 )
 
 GroupKey = tuple[str, str]  # (slot_type, tier)
+_REQUIRED_NUMERIC_COLUMNS = (
+    "probability",
+    "log_probability",
+    "soft_count",
+    "prior_count",
+    "evidence_count",
+    "source_count",
+    "anchored_source_count",
+    "inferred_source_count",
+    "anchored_soft_count",
+    "inferred_soft_count",
+    "frequency",
+    "semantic_smoothing_mass",
+    "calibration_temperature",
+)
+_OPTIONAL_NUMERIC_COLUMNS = (
+    "teacher_confidence_mean",
+    "popularity_score",
+)
+_DISTRIBUTION_CACHE_LIMIT = 4
+_distribution_cache: OrderedDict[tuple[object, ...], LoadedShadowDistribution] = (
+    OrderedDict()
+)
+_distribution_cache_lock = threading.Lock()
 
 
 class RuntimeSelectionMode(StrEnum):
@@ -185,7 +212,28 @@ def prepare_generation_runtime(
         return PreparedGenerationRuntime(selection=selection)
     if selection.artifact_source is None:
         raise RuntimeError("Shadow runtime requires an explicit artifact source")
-    source = load_shadow_distribution_source(conn, selection.artifact_source)
+    loaded_distribution = _load_prepared_distribution(
+        conn,
+        selection.artifact_source,
+    )
+    return PreparedGenerationRuntime(
+        selection=selection,
+        shadow_distribution=loaded_distribution,
+    )
+
+
+def _load_prepared_distribution(
+    conn: sqlite3.Connection,
+    artifact_source: ShadowArtifactSource,
+) -> LoadedShadowDistribution:
+    cache_key = _distribution_cache_key(conn, artifact_source)
+    if cache_key is not None:
+        with _distribution_cache_lock:
+            cached = _distribution_cache.get(cache_key)
+            if cached is not None:
+                _distribution_cache.move_to_end(cache_key)
+                return cached
+    source = load_shadow_distribution_source(conn, artifact_source)
     groups: dict[GroupKey, dict[str, _LoadedDistributionRow]] = {}
     for row in source.rows:
         slot_type = str(row["slot_type"])
@@ -198,10 +246,14 @@ def prepare_generation_runtime(
             probability=float(row["probability"]),
             calibration_temperature=float(row["calibration_temperature"]),
         )
-    return PreparedGenerationRuntime(
-        selection=selection,
-        shadow_distribution=LoadedShadowDistribution(source=source, groups=groups),
-    )
+    loaded = LoadedShadowDistribution(source=source, groups=groups)
+    if cache_key is not None:
+        with _distribution_cache_lock:
+            _distribution_cache[cache_key] = loaded
+            _distribution_cache.move_to_end(cache_key)
+            while len(_distribution_cache) > _DISTRIBUTION_CACHE_LIMIT:
+                _distribution_cache.popitem(last=False)
+    return loaded
 
 
 def load_shadow_distribution_source(
@@ -223,7 +275,10 @@ def load_shadow_distribution_source(
                 f"Shadow runtime artifact does not exist: {source.path}"
             )
         rows = tuple(_read_distribution_csv(source.path))
+        _validate_finite_numeric_rows(rows, source.describe())
         _validate_rows(conn, list(rows))
+    if source.kind == ShadowArtifactSourceKind.DB_TABLE:
+        _validate_finite_numeric_rows(rows, source.describe())
     if not rows:
         raise RuntimeError(
             f"Shadow runtime artifact {source.describe()} contains no rows"
@@ -292,6 +347,7 @@ def install_tier_slot_distribution(
         conn.execute("ROLLBACK TO SAVEPOINT install_tier_slot_distribution")
         conn.execute("RELEASE SAVEPOINT install_tier_slot_distribution")
         raise
+    clear_distribution_cache()
     return len(loaded.rows)
 
 
@@ -434,6 +490,105 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
         (table,),
     ).fetchone() is not None
+
+
+def clear_distribution_cache() -> None:
+    with _distribution_cache_lock:
+        _distribution_cache.clear()
+
+
+def _distribution_cache_key(
+    conn: sqlite3.Connection,
+    source: ShadowArtifactSource,
+) -> tuple[object, ...] | None:
+    if source.kind == ShadowArtifactSourceKind.CSV_PATH:
+        if source.path is None:
+            return None
+        signature = _path_signature(source.path, allow_missing=True)
+        if signature is None:
+            return None
+        return ("csv", str(source.path), signature)
+    database_path = _main_database_path(conn)
+    if database_path is None:
+        return None
+    return (
+        "db",
+        str(database_path),
+        source.table,
+        _path_signature(database_path),
+        _path_signature(Path(f"{database_path}-wal"), allow_missing=True),
+    )
+
+
+def _main_database_path(conn: sqlite3.Connection) -> Path | None:
+    row = next(
+        (
+            database_row
+            for database_row in conn.execute("PRAGMA database_list").fetchall()
+            if database_row[1] == "main"
+        ),
+        None,
+    )
+    if row is None or not row[2]:
+        return None
+    return Path(str(row[2])).resolve()
+
+
+def _path_signature(
+    path: Path,
+    *,
+    allow_missing: bool = False,
+) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        raise
+    return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+
+
+def _validate_finite_numeric_rows(
+    rows: tuple[dict[str, object], ...],
+    source_description: str,
+) -> None:
+    for row_number, row in enumerate(rows, start=1):
+        for column in _REQUIRED_NUMERIC_COLUMNS:
+            _require_finite_number(
+                row.get(column),
+                source_description,
+                row_number,
+                column,
+            )
+        for column in _OPTIONAL_NUMERIC_COLUMNS:
+            value = row.get(column)
+            if value not in {None, ""}:
+                _require_finite_number(
+                    value,
+                    source_description,
+                    row_number,
+                    column,
+                )
+
+
+def _require_finite_number(
+    value: object,
+    source_description: str,
+    row_number: int,
+    column: str,
+) -> None:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Runtime artifact {source_description} row {row_number} field "
+            f"{column!r} must be numeric"
+        ) from exc
+    if not math.isfinite(numeric_value):
+        raise RuntimeError(
+            f"Runtime artifact {source_description} row {row_number} field "
+            f"{column!r} must be finite"
+        )
 
 
 def _write_configured_runtime_mode(

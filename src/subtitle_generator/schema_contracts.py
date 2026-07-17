@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections import defaultdict
 from dataclasses import dataclass
@@ -180,6 +181,15 @@ def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def _is_finite_numeric(value: object) -> bool:
+    if not isinstance(value, (int, float, str, bytes)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
 def validate_schema(
     conn: sqlite3.Connection,
     contracts: tuple[TableContract, ...] = SCHEMA_CONTRACTS,
@@ -284,6 +294,47 @@ def validate_tier_slot_distribution(
                 "tier_slot_distribution: distribution rows must have nonnegative "
                 "counts/probabilities, positive calibration_temperature, and a "
                 "nonempty display_filler and artifact_version"
+            ),
+        ))
+
+    numeric_columns = (
+        "probability",
+        "log_probability",
+        "soft_count",
+        "prior_count",
+        "evidence_count",
+        "source_count",
+        "anchored_source_count",
+        "inferred_source_count",
+        "anchored_soft_count",
+        "inferred_soft_count",
+        "frequency",
+        "semantic_smoothing_mass",
+        "calibration_temperature",
+    )
+    nonfinite_count = 0
+    for row in conn.execute(
+        f"SELECT {', '.join(numeric_columns)}, "
+        f"teacher_confidence_mean, popularity_score FROM {table}"
+    ).fetchall():
+        required_values = row[:len(numeric_columns)]
+        optional_values = row[len(numeric_columns):]
+        if any(
+            value is None or not _is_finite_numeric(value)
+            for value in required_values
+        ) or any(
+            value not in {None, ""} and not _is_finite_numeric(value)
+            for value in optional_values
+        ):
+            nonfinite_count += 1
+    if nonfinite_count:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: numeric fields must contain finite values "
+                f"({nonfinite_count} invalid rows)"
             ),
         ))
 

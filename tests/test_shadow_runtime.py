@@ -18,6 +18,7 @@ from subtitle_generator.shadow_runtime import (
     PreparedGenerationRuntime,
     RuntimeSelectionMode,
     build_generation_runtime,
+    clear_distribution_cache,
     install_tier_slot_distribution,
     prepare_generation_runtime,
     sample_shadow_candidates,
@@ -494,6 +495,61 @@ def test_explicit_artifact_runtime_fails_when_table_is_missing():
             conn,
             build_generation_runtime(mode="artifact"),
         )
+
+
+def test_csv_artifact_rejects_nonfinite_numeric_values(tmp_path):
+    conn = _make_shadow_runtime_db()
+    rows = _distribution_rows()
+    rows[0]["probability"] = float("nan")
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        rows,
+    )
+
+    with pytest.raises(RuntimeError, match="probability.*finite"):
+        prepare_generation_runtime(
+            conn,
+            build_generation_runtime(mode="artifact", shadow_artifact=artifact),
+        )
+
+
+def test_csv_artifact_allows_blank_optional_numeric_values(tmp_path):
+    conn = _make_shadow_runtime_db()
+    rows = _distribution_rows()
+    rows[0]["teacher_confidence_mean"] = None
+    rows[0]["popularity_score"] = None
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        rows,
+    )
+
+    prepared = prepare_generation_runtime(
+        conn,
+        build_generation_runtime(mode="artifact", shadow_artifact=artifact),
+    )
+
+    assert prepared.shadow_distribution is not None
+
+
+def test_file_database_reuses_cached_validated_distribution(tmp_path):
+    clear_distribution_cache()
+    db_path = tmp_path / "runtime.db"
+    first_conn = _make_shadow_runtime_db(db_path)
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        _distribution_rows(),
+    )
+    install_tier_slot_distribution(first_conn, artifact, activate=True)
+    first = prepare_generation_runtime(first_conn, None)
+    first_conn.close()
+
+    second_conn = sqlite3.connect(db_path)
+    try:
+        second = prepare_generation_runtime(second_conn, None)
+    finally:
+        second_conn.close()
+
+    assert second.shadow_distribution is first.shadow_distribution
 
 
 def test_artifact_mode_requires_valid_installed_distribution(tmp_path):
