@@ -1286,16 +1286,30 @@ def test_handler_resolves_relative_db_path_from_package_root(
 def test_handler_opens_azure_packaged_db_read_only(tmp_path, monkeypatch):
     from subtitle_generator import handlers
 
-    db_path = tmp_path / "subtitles.mini.db"
+    package_root = tmp_path / "package"
+    db_path = package_root / "data" / "subtitles.mini.db"
+    db_path.parent.mkdir(parents=True)
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
     conn.commit()
     conn.close()
     monkeypatch.setenv("SUBTITLE_GEN_MODE", "azure")
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setattr(
+        handlers.tempfile,
+        "gettempdir",
+        lambda: str(runtime_root),
+    )
+    handlers._azure_db_cache.clear()
 
     packaged = handlers.get_db(str(db_path))
     try:
         assert packaged.execute("SELECT COUNT(*) FROM config").fetchone()[0] == 0
+        opened_path = Path(
+            packaged.execute("PRAGMA database_list").fetchone()[2]
+        ).resolve()
+        assert opened_path.parent == runtime_root / "subtitle-generator"
+        assert opened_path.read_bytes() == db_path.read_bytes()
         with pytest.raises(sqlite3.OperationalError, match="readonly"):
             packaged.execute("INSERT INTO config VALUES ('x', 'y')")
     finally:

@@ -6,7 +6,10 @@ its own response type.
 """
 
 import os
+import shutil
 import sqlite3
+import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +34,8 @@ from subtitle_generator.shadow_runtime import build_generation_runtime
 
 TONE_CHOICES = {"pop": TONE_HIGH, "mainstream": TONE_MEDIUM, "niche": TONE_LOW}
 VALID_TONES = set(TONE_CHOICES.keys())
+_azure_db_cache: dict[tuple[str, int, int], Path] = {}
+_azure_db_cache_lock = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -60,11 +65,51 @@ def get_db(db_path: str | None = None) -> sqlite3.Connection:
     if not path.is_absolute():
         path = Path(__file__).resolve().parent.parent / path
     if os.environ.get("SUBTITLE_GEN_MODE") == "azure":
+        path = _materialize_azure_db(path)
         return sqlite3.connect(
             f"{path.resolve().as_uri()}?mode=ro&immutable=1",
             uri=True,
         )
     return sqlite3.connect(path)
+
+
+def _materialize_azure_db(
+    packaged_path: Path,
+    *,
+    temp_root: Path | None = None,
+) -> Path:
+    source = packaged_path.resolve()
+    try:
+        stat = source.stat()
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Packaged database does not exist: {source}") from exc
+    cache_key = (str(source), stat.st_mtime_ns, stat.st_size)
+    with _azure_db_cache_lock:
+        cached = _azure_db_cache.get(cache_key)
+        if cached is not None and cached.is_file():
+            return cached
+        root = (
+            temp_root
+            if temp_root is not None
+            else Path(tempfile.gettempdir()) / "subtitle-generator"
+        )
+        root.mkdir(parents=True, exist_ok=True)
+        destination = root / (
+            f"{source.stem}-{stat.st_mtime_ns:x}-{stat.st_size:x}{source.suffix}"
+        )
+        if not destination.is_file():
+            staging = destination.with_suffix(
+                f"{destination.suffix}.{os.getpid()}.tmp"
+            )
+            try:
+                shutil.copyfile(source, staging)
+                os.replace(staging, destination)
+            finally:
+                if staging.exists():
+                    staging.unlink()
+        _azure_db_cache.clear()
+        _azure_db_cache[cache_key] = destination
+        return destination
 
 
 def parse_tone(tone_str: str | None) -> set[str] | None:
