@@ -56,7 +56,15 @@ def get_db(db_path: str | None = None) -> sqlite3.Connection:
             "DB_PATH",
             str(Path(__file__).resolve().parent.parent.parent / "data" / "db" / "subtitles.db"),
         )
-    return sqlite3.connect(db_path)
+    path = Path(db_path)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent.parent / path
+    if os.environ.get("SUBTITLE_GEN_MODE") == "azure":
+        return sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro&immutable=1",
+            uri=True,
+        )
+    return sqlite3.connect(path)
 
 
 def parse_tone(tone_str: str | None) -> set[str] | None:

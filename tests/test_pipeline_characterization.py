@@ -1253,6 +1253,55 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
     assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim", "runtime"}
 
 
+def test_handler_resolves_relative_db_path_from_package_root(
+    tmp_path,
+    monkeypatch,
+):
+    from subtitle_generator import handlers
+
+    package_root = tmp_path / "app"
+    fake_handlers = package_root / "subtitle_generator" / "handlers.py"
+    fake_handlers.parent.mkdir(parents=True)
+    fake_handlers.touch()
+    monkeypatch.setattr(handlers, "__file__", str(fake_handlers))
+    relative_db = package_root / "data" / "relative-runtime.db"
+    relative_db.parent.mkdir(parents=True, exist_ok=True)
+    sqlite3.connect(relative_db).close()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("DB_PATH", "data/relative-runtime.db")
+
+    conn = handlers.get_db()
+    try:
+        resolved = Path(
+            conn.execute("PRAGMA database_list").fetchone()[2]
+        ).resolve()
+    finally:
+        conn.close()
+
+    assert resolved == relative_db.resolve()
+
+
+def test_handler_opens_azure_packaged_db_read_only(tmp_path, monkeypatch):
+    from subtitle_generator import handlers
+
+    db_path = tmp_path / "subtitles.mini.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("SUBTITLE_GEN_MODE", "azure")
+
+    packaged = handlers.get_db(str(db_path))
+    try:
+        assert packaged.execute("SELECT COUNT(*) FROM config").fetchone()[0] == 0
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            packaged.execute("INSERT INTO config VALUES ('x', 'y')")
+    finally:
+        packaged.close()
+
+
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):
     from subtitle_generator import handlers
 
