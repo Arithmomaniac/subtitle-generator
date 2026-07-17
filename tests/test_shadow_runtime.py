@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -49,6 +50,25 @@ _SLOT_FILLERS = {
         ("Late Antiquity", "niche"),
     ],
 }
+
+
+def test_runtime_import_does_not_require_offline_ml_dependencies():
+    script = """
+import sys
+sys.modules["spacy"] = None
+sys.modules["subtitle_generator.tier_slot_calibration"] = None
+sys.modules["subtitle_generator.tier_slot_distribution"] = None
+from subtitle_generator import handlers
+assert handlers.handle_health()[0] == 200
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parent.parent,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _make_shadow_runtime_db(path: Path | None = None) -> sqlite3.Connection:
