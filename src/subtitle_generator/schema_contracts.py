@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
+from collections import defaultdict
 from dataclasses import dataclass
+
+from subtitle_generator.runtime_eligibility import (
+    filler_key,
+    is_runtime_eligible_strict_filler,
+    load_runtime_eligible_strict_filler_keys,
+)
+
+
+TIER_SLOT_FILLER_DISTRIBUTION_TABLE = "tier_slot_filler_distribution_v1"
+TIER_SLOT_FILLER_DISTRIBUTION_TIERS = ("pop", "mainstream", "niche")
+TIER_SLOT_FILLER_DISTRIBUTION_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True)
@@ -118,6 +131,35 @@ MINI_DB_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
     ),
 )
 
+TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS: tuple[TableContract, ...] = (
+    TableContract(
+        stage="tier_slot_distribution",
+        table=TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+        columns=frozenset({
+            "slot_type",
+            "tier",
+            "filler",
+            "display_filler",
+            "probability",
+            "log_probability",
+            "soft_count",
+            "prior_count",
+            "evidence_count",
+            "source_count",
+            "anchored_source_count",
+            "inferred_source_count",
+            "anchored_soft_count",
+            "inferred_soft_count",
+            "teacher_confidence_mean",
+            "frequency",
+            "popularity_score",
+            "semantic_smoothing_mass",
+            "calibration_temperature",
+            "artifact_version",
+        }),
+    ),
+)
+
 REQUIRED_TABLES_BY_STAGE: dict[str, tuple[str, ...]] = {
     stage: tuple(contract.table for contract in SCHEMA_CONTRACTS if contract.stage == stage)
     for stage in sorted({contract.stage for contract in SCHEMA_CONTRACTS})
@@ -137,6 +179,15 @@ def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     """Return column names for ``table``, or an empty set if it is missing."""
 
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _is_finite_numeric(value: object) -> bool:
+    if not isinstance(value, (int, float, str, bytes)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
 
 
 def validate_schema(
@@ -175,6 +226,232 @@ def validate_schema(
                     f"required column {column!r}"
                 ),
             ))
+    return issues
+
+
+def validate_tier_slot_distribution(
+    conn: sqlite3.Connection,
+    *,
+    table: str = TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+    tolerance: float = TIER_SLOT_FILLER_DISTRIBUTION_TOLERANCE,
+) -> list[SchemaIssue]:
+    """Validate the tier-conditioned filler distribution runtime artifact."""
+
+    contract = TableContract(
+        stage="tier_slot_distribution",
+        table=table,
+        columns=TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS[0].columns,
+    )
+    slot_filler_contract = TableContract(
+        stage="tier_slot_distribution_inputs",
+        table="slot_fillers",
+        columns=frozenset({"slot_type", "filler", "mode"}),
+    )
+    issues = validate_schema(conn, (contract, slot_filler_contract))
+    if issues:
+        return issues
+
+    valid_tiers = set(TIER_SLOT_FILLER_DISTRIBUTION_TIERS)
+    for (tier,) in conn.execute(f"SELECT DISTINCT tier FROM {table}"):
+        if tier not in valid_tiers:
+            issues.append(SchemaIssue(
+                stage="tier_slot_distribution",
+                table=table,
+                column="tier",
+                message=(
+                    "tier_slot_distribution: table "
+                    f"{table!r} has unknown tier {tier!r}"
+                ),
+            ))
+
+    invalid_numeric = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table}
+        WHERE probability < 0
+           OR soft_count < 0
+           OR prior_count < 0
+           OR evidence_count < 0
+           OR source_count < 0
+           OR anchored_source_count < 0
+           OR inferred_source_count < 0
+           OR anchored_soft_count < 0
+           OR inferred_soft_count < 0
+           OR semantic_smoothing_mass < 0
+           OR calibration_temperature <= 0
+           OR display_filler IS NULL
+           OR display_filler = ''
+           OR artifact_version IS NULL
+           OR artifact_version = ''
+        """
+    ).fetchone()[0]
+    if invalid_numeric:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: distribution rows must have nonnegative "
+                "counts/probabilities, positive calibration_temperature, and a "
+                "nonempty display_filler and artifact_version"
+            ),
+        ))
+
+    numeric_columns = (
+        "probability",
+        "log_probability",
+        "soft_count",
+        "prior_count",
+        "evidence_count",
+        "source_count",
+        "anchored_source_count",
+        "inferred_source_count",
+        "anchored_soft_count",
+        "inferred_soft_count",
+        "frequency",
+        "semantic_smoothing_mass",
+        "calibration_temperature",
+    )
+    nonfinite_count = 0
+    for row in conn.execute(
+        f"SELECT {', '.join(numeric_columns)}, "
+        f"teacher_confidence_mean, popularity_score FROM {table}"
+    ).fetchall():
+        required_values = row[:len(numeric_columns)]
+        optional_values = row[len(numeric_columns):]
+        if any(
+            value is None or not _is_finite_numeric(value)
+            for value in required_values
+        ) or any(
+            value not in {None, ""} and not _is_finite_numeric(value)
+            for value in optional_values
+        ):
+            nonfinite_count += 1
+    if nonfinite_count:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: numeric fields must contain finite values "
+                f"({nonfinite_count} invalid rows)"
+            ),
+        ))
+
+    bad_count_identity = conn.execute(
+        f"""
+        SELECT COUNT(*)
+        FROM {table}
+        WHERE source_count != anchored_source_count + inferred_source_count
+           OR ABS(soft_count - (anchored_soft_count + inferred_soft_count)) > ?
+        """,
+        (tolerance,),
+    ).fetchone()[0]
+    if bad_count_identity:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column=None,
+            message=(
+                "tier_slot_distribution: source_count must equal anchored plus "
+                "inferred source counts, and soft_count must equal anchored plus "
+                "inferred soft counts"
+            ),
+        ))
+
+    eligible_literals = {
+        (str(slot_type), str(filler))
+        for slot_type, filler in conn.execute(
+            """
+            SELECT slot_type, filler
+            FROM slot_fillers
+            WHERE mode = 'strict'
+            """
+        ).fetchall()
+        if is_runtime_eligible_strict_filler(str(slot_type), str(filler))
+    }
+    eligible_keys_by_slot = load_runtime_eligible_strict_filler_keys(conn)
+    artifact_keys_by_group: dict[tuple[str, str], set[str]] = defaultdict(set)
+    ineligible_rows: list[tuple[str, str, str]] = []
+    for slot_type_raw, tier_raw, display_filler_raw in conn.execute(
+        f"SELECT slot_type, tier, display_filler FROM {table}"
+    ).fetchall():
+        slot_type = str(slot_type_raw)
+        tier = str(tier_raw)
+        display_filler = str(display_filler_raw)
+        if (slot_type, display_filler) not in eligible_literals:
+            ineligible_rows.append((slot_type, tier, display_filler))
+        artifact_keys_by_group[(slot_type, tier)].add(
+            filler_key(slot_type, display_filler)
+        )
+    if ineligible_rows:
+        examples = ", ".join(
+            f"({tier}, {slot_type}, {display_filler})"
+            for slot_type, tier, display_filler in ineligible_rows[:3]
+        )
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="filler",
+            message=(
+                "tier_slot_distribution: distribution rows must reference "
+                "existing runtime-eligible strict slot_fillers rows"
+            ),
+        ))
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="display_filler",
+            message=(
+                "tier_slot_distribution: runtime support mismatch includes "
+                f"ineligible fillers, e.g. {examples}"
+            ),
+        ))
+
+    support_mismatches: list[tuple[str, str, int, int]] = []
+    for slot_type, eligible_keys in eligible_keys_by_slot.items():
+        for tier in valid_tiers:
+            artifact_keys = artifact_keys_by_group.get((slot_type, tier), set())
+            missing = len(eligible_keys - artifact_keys)
+            extra = len(artifact_keys - eligible_keys)
+            if missing or extra:
+                support_mismatches.append((tier, slot_type, missing, extra))
+    if support_mismatches:
+        examples = ", ".join(
+            f"({tier}, {slot_type}: missing={missing}, extra={extra})"
+            for tier, slot_type, missing, extra in support_mismatches[:5]
+        )
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="filler",
+            message=(
+                "tier_slot_distribution: distribution support must match the "
+                "runtime-eligible strict filler set for every (tier, slot_type) "
+                f"group; mismatches: {examples}"
+            ),
+        ))
+
+    bad_mass_rows = conn.execute(
+        f"""
+        SELECT slot_type, tier, SUM(probability) AS mass
+        FROM {table}
+        GROUP BY slot_type, tier
+        HAVING ABS(mass - 1.0) > ?
+        """,
+        (tolerance,),
+    ).fetchall()
+    for slot_type, tier, mass in bad_mass_rows:
+        issues.append(SchemaIssue(
+            stage="tier_slot_distribution",
+            table=table,
+            column="probability",
+            message=(
+                "tier_slot_distribution: probabilities for "
+                f"({tier!r}, {slot_type!r}) sum to {mass:.12g}, not 1.0"
+            ),
+        ))
+
     return issues
 
 

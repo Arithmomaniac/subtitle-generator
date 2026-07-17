@@ -13,6 +13,9 @@ import click
 from subtitle_generator import __version__
 from subtitle_generator.analyze import analyze_subtitles, build_pattern_index
 from subtitle_generator.download import TOTAL_PARTS, download_part, parse_parts_arg
+from subtitle_generator.diversity_first_reevaluation import (
+    run_diversity_first_reevaluation,
+)
 from subtitle_generator.extract import DATA_DIR, DB_PATH, extract_from_file, get_db
 from subtitle_generator.extract_openlibrary import (
     download_ol_dump,
@@ -32,6 +35,19 @@ from subtitle_generator.jacket import (
     generate_jacket,
 )
 from subtitle_generator.pipeline_validation import format_validation_report, validate_pipeline
+from subtitle_generator.parameter_state import DEFAULT_RATER_MODEL
+from subtitle_generator.shadow_runtime import (
+    build_generation_runtime,
+    install_tier_slot_distribution,
+    prepare_generation_runtime,
+    set_configured_runtime_mode,
+    shadow_runtime_provenance,
+)
+from subtitle_generator.shadow_runtime_compare import (
+    DEFAULT_COMPARISON_SEEDS,
+    build_shadow_runtime_comparison,
+)
+from subtitle_generator.step08_validation import run_step08_validation
 from subtitle_generator.slots import build_slots, ensure_slot_tables
 from subtitle_generator.tiering import compute_tier_evidence
 
@@ -127,6 +143,22 @@ def _prompt_review(conn, subtitle_text: str) -> int | None:
         click.echo(f"     ✓ saved (system: {system_tone}, score: {score:.2f})")
 
     return thumbs
+
+
+def _build_runtime_selection_for_cli(
+    *,
+    runtime_mode: str,
+    shadow_artifact: Path | None,
+    shadow_sampling_temperature: float,
+):
+    try:
+        return build_generation_runtime(
+            mode=runtime_mode,
+            shadow_artifact=shadow_artifact,
+            shadow_sampling_temperature=shadow_sampling_temperature,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 def _parse_tone(tone_str: str | None) -> set[str] | None:
@@ -366,7 +398,36 @@ def precompute_vectors_cmd():
 @click.option("--remix-prob", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Probability of remixing a multi-word of-object (0.0-1.0). Default: calibrated or 0.8.")
 @click.option("--min-sim", default=None, type=click.FloatRange(min=0.0, max=1.0), help="Minimum cosine similarity for remix coherence filter. Default: calibrated or 0.1.")
 @click.option("--review", is_flag=True, help="Interactively rate each subtitle (thumbs, tone override, comment).")
-def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool):
+@click.option(
+    "--runtime",
+    "runtime_mode",
+    type=click.Choice(["configured", "artifact", "legacy", "shadow"]),
+    default="configured",
+    show_default=True,
+    help=(
+        "Runtime selection. 'configured' reads generation_runtime_mode; "
+        "'legacy' is the rollback path."
+    ),
+)
+@click.option(
+    "--artifact",
+    "--shadow-artifact",
+    "shadow_artifact",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help=(
+        "Optional tier_slot_filler_distribution_v1 CSV for artifact/shadow mode. "
+        "Defaults to the DB table."
+    ),
+)
+@click.option(
+    "--shadow-sampling-temperature",
+    type=click.FloatRange(min=0.000001),
+    default=1.0,
+    show_default=True,
+    help="Explicit runtime sampling temperature for artifact/shadow mode.",
+)
+def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, model: str | None, show_concept: bool, tone: str | None, remix: bool, remix_prob: float | None, min_sim: float | None, review: bool, runtime_mode: str, shadow_artifact: Path | None, shadow_sampling_temperature: float):
     """Generate random subtitles in the "X, Y, and [the/a/an] Z of W" pattern.
 
     Draws slot fillers from the extracted pool, optionally remixing multi-word
@@ -382,11 +443,17 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
       subtitle-gen generate --review                # rate each subtitle
     """
     tone_set = _parse_tone(tone)
+    runtime = _build_runtime_selection_for_cli(
+        runtime_mode=runtime_mode,
+        shadow_artifact=shadow_artifact,
+        shadow_sampling_temperature=shadow_sampling_temperature,
+    )
 
     if count is None:
         count = 1 if jacket else 10
 
     conn = get_db()
+    runtime = prepare_generation_runtime(conn, runtime)
     stats = slot_stats(conn)
     if not stats:
         raise click.ClickException("No slots found. Run 'subtitle-gen build-slots' first.")
@@ -402,6 +469,16 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
     click.echo(f"Slot machine loaded: {stats}")
     if tone_set:
         click.echo(f"Tier filter: {', '.join(sorted(tone_set))}")
+    runtime_details = shadow_runtime_provenance(runtime)
+    click.echo(f"Runtime: {runtime_details['mode']}")
+    if runtime_details["mode"] != "legacy":
+        click.echo(
+            "  artifact="
+            f"{runtime_details['artifact_source']}, "
+            f"sampling_temperature={runtime_details['sampling_temperature']:.3f}"
+        )
+    elif runtime_details.get("fallback_reason"):
+        click.echo(f"  fallback={runtime_details['fallback_reason']}")
     if effective_remix_prob > 0:
         click.echo(f"Remix: prob={effective_remix_prob:.1f}, min_sim={min_sim:.2f}")
     click.echo()
@@ -419,8 +496,11 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
                 seed=s,
                 remix_prob=effective_remix_prob,
                 min_sim=min_sim,
+                runtime=runtime,
             )
         except TierFilterError as exc:
+            raise click.ClickException(str(exc)) from exc
+        except RuntimeError as exc:
             raise click.ClickException(str(exc)) from exc
 
         if jacket:
@@ -460,6 +540,244 @@ def generate(count: int | None, seed: int | None, jacket: bool, sources: bool, m
         click.echo(f"\nReviewed {reviewed_count}/{count} subtitles ({thumbs_up} 👍, {thumbs_down} 👎). Ratings saved.")
 
     conn.close()
+
+
+@cli.command("compare-shadow-runtime")
+@click.option(
+    "--shadow-artifact",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional tier_slot_filler_distribution_v1 CSV to compare against the legacy runtime. Defaults to the DB table when omitted.",
+)
+@click.option(
+    "--shadow-sampling-temperature",
+    type=click.FloatRange(min=0.000001),
+    default=1.0,
+    show_default=True,
+    help="Explicit runtime sampling temperature for the shadow runtime.",
+)
+@click.option(
+    "--seed",
+    "seeds",
+    type=int,
+    multiple=True,
+    default=DEFAULT_COMPARISON_SEEDS,
+    show_default=True,
+    help="Fixed seed(s) to replay across pop/mainstream/niche/default scenarios.",
+)
+@click.option(
+    "--remix-prob",
+    default=None,
+    type=click.FloatRange(min=0.0, max=1.0),
+    help="Probability of remixing a multi-word of-object. Default: calibrated or 0.8.",
+)
+@click.option(
+    "--min-sim",
+    default=None,
+    type=click.FloatRange(min=0.0, max=1.0),
+    help="Minimum cosine similarity for remix coherence. Default: calibrated or 0.1.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("test-results/shadow-runtime"),
+    show_default=True,
+    help="Directory where the markdown report and replay JSON are written.",
+)
+def compare_shadow_runtime_cmd(
+    shadow_artifact: Path | None,
+    shadow_sampling_temperature: float,
+    seeds: tuple[int, ...],
+    remix_prob: float | None,
+    min_sim: float | None,
+    output_dir: Path,
+):
+    """Write deterministic legacy-vs-shadow comparison samples and provenance."""
+
+    runtime = _build_runtime_selection_for_cli(
+        runtime_mode="shadow",
+        shadow_artifact=shadow_artifact,
+        shadow_sampling_temperature=shadow_sampling_temperature,
+    )
+    conn = get_db()
+    try:
+        if remix_prob is None:
+            row = conn.execute(
+                "SELECT value FROM config WHERE key = 'remix_calibrated_remix_prob'"
+            ).fetchone()
+            remix_prob = float(row[0]) if row else 0.8
+        if min_sim is None:
+            row = conn.execute(
+                "SELECT value FROM config WHERE key = 'remix_calibrated_min_sim'"
+            ).fetchone()
+            min_sim = float(row[0]) if row else 0.1
+        result = build_shadow_runtime_comparison(
+            conn,
+            output_dir,
+            shadow_runtime=runtime,
+            seeds=tuple(seeds),
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+
+    click.echo(f"Shadow runtime comparison written to {result.report_path}")
+    click.echo(f"Replay packet: {result.details_path}")
+    click.echo(f"Comparisons: {result.comparison_count}")
+
+
+@cli.command("validate-artifact-runtime")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("test-results/step08-validation"),
+    show_default=True,
+)
+@click.option(
+    "--decision-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("feedback/step08-validation"),
+    show_default=True,
+)
+@click.option("--samples-per-scenario", type=click.IntRange(min=1), default=30)
+@click.option("--seed-base", type=int, default=41000, show_default=True)
+@click.option("--rater-model", default=DEFAULT_RATER_MODEL, show_default=True)
+@click.option("--skip-ratings", is_flag=True)
+def validate_artifact_runtime_cmd(
+    db_path: Path,
+    output_dir: Path,
+    decision_dir: Path,
+    samples_per_scenario: int,
+    seed_base: int,
+    rater_model: str,
+    skip_ratings: bool,
+):
+    """Run the bounded Step 8 artifact-runtime behavioral validation."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        result = run_step08_validation(
+            conn,
+            db_path,
+            output_dir,
+            decision_dir,
+            samples_per_scenario=samples_per_scenario,
+            seed_base=seed_base,
+            rater_model=rater_model,
+            rate_with_copilot=not skip_ratings,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Step 8 report: {result.report_path}")
+    click.echo(f"Replay packet: {result.replay_path}")
+    click.echo(f"Decision: {result.recommendation}")
+    click.echo(f"Samples: {result.sample_count}")
+
+
+@cli.command("reevaluate-diversity-first")
+@click.option(
+    "--step08-decision",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Frozen Step 8 decision. Defaults to the repository decision record.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=None,
+    help="Output directory. Defaults to the repository feedback directory.",
+)
+def reevaluate_diversity_first_cmd(
+    step08_decision: Path | None,
+    output_dir: Path | None,
+):
+    """Reevaluate frozen Step 8 evidence under the diversity-first policy."""
+
+    try:
+        result = run_diversity_first_reevaluation(
+            frozen_decision_path=step08_decision,
+            output_dir=output_dir,
+        )
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Diversity-first decision: {result.decision}")
+    click.echo(f"Recommended variant: {result.recommended_variant or 'none'}")
+    click.echo(f"Decision record: {result.decision_path}")
+
+
+@cli.command("install-tier-slot-runtime")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
+@click.option(
+    "--artifact",
+    "artifact_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+)
+@click.option("--activate/--no-activate", default=True, show_default=True)
+def install_tier_slot_runtime_cmd(
+    db_path: Path,
+    artifact_path: Path,
+    activate: bool,
+):
+    """Install a validated tier-slot artifact into a runtime database."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row_count = install_tier_slot_distribution(
+            conn,
+            artifact_path,
+            activate=activate,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Installed {row_count:,} tier-slot distribution rows.")
+    click.echo(f"Configured runtime: {'artifact' if activate else 'unchanged'}")
+
+
+@cli.command("set-runtime-default")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["artifact", "legacy"]),
+    required=True,
+)
+def set_runtime_default_cmd(db_path: Path, mode: str):
+    """Set the configured runtime default; use legacy for rollback."""
+
+    conn = sqlite3.connect(db_path)
+    try:
+        configured_mode = set_configured_runtime_mode(conn, mode)
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Configured runtime: {configured_mode.value}")
 
 
 @cli.command()
@@ -932,7 +1250,13 @@ def export_db_cmd(output: str):
 
 @cli.command("export-data")
 @click.option("--output-dir", "-o", default="api/data", help="Output directory for CSV files.")
-def export_data_cmd(output_dir: str):
+@click.option(
+    "--shadow-distribution",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional tier_slot_filler_distribution_v1 CSV to export alongside the tracked runtime data.",
+)
+def export_data_cmd(output_dir: str, shadow_distribution: Path | None):
     """Export slot data as CSV files for version control.
 
     Writes slot_fillers.csv, config.csv, and sources.csv to the output
@@ -947,7 +1271,11 @@ def export_data_cmd(output_dir: str):
     out = Path(output_dir)
     conn = get_db()
     click.echo(f"Exporting data to {out}/ ...")
-    stats = export_data(conn, out)
+    stats = export_data(
+        conn,
+        out,
+        shadow_distribution_source=shadow_distribution,
+    )
     conn.close()
 
     for filename, count in stats.items():
@@ -1367,6 +1695,726 @@ def build_book_features_cmd(
         f"Wrote {result.label_count:,} label rows to {result.labels_path}"
     )
     click.echo(f"Wrote coverage report to {result.report_path}")
+
+
+@cli.command("build-tier-slot-distribution")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for tier-slot distribution artifacts.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount added to each tier/slot/filler row.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--reliability-exponent",
+    type=click.FloatRange(min=0.0, min_open=True),
+    default=1.0,
+    show_default=True,
+    help="Report-only: exponent on the labeled confidence signal (sidecar analysis).",
+)
+@click.option(
+    "--unlabeled-reliability",
+    type=click.FloatRange(min=0.0, max=1.0),
+    default=0.70,
+    show_default=True,
+    help="Report-only: flat reliability weight for unlabeled sources (sidecar analysis).",
+)
+@click.option(
+    "--artifact-version",
+    default="tier_slot_filler_distribution_v1",
+    show_default=True,
+    help="Version string written to distribution rows.",
+)
+def build_tier_slot_distribution_cmd(
+    db_path: Path,
+    output_dir: Path,
+    alpha: float,
+    inferred_source_weight: float,
+    reliability_exponent: float,
+    unlabeled_reliability: float,
+    artifact_version: str,
+):
+    """Build the first tier-conditioned filler distribution artifact."""
+
+    from subtitle_generator.tier_slot_distribution import build_tier_slot_distribution
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_tier_slot_distribution(
+            conn,
+            output_dir,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+            reliability_exponent=reliability_exponent,
+            unlabeled_reliability=unlabeled_reliability,
+            artifact_version=artifact_version,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.row_count:,} tier-slot distribution rows to "
+        f"{result.distribution_path}"
+    )
+    click.echo(f"Wrote distribution report to {result.report_path}")
+
+
+@cli.command("run-semantic-smoothing-ablation")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for semantic smoothing ablation artifacts.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--vector-source",
+    type=click.Choice(["offline_spacy", "db"]),
+    default="offline_spacy",
+    show_default=True,
+    help="Vector source for semantic smoothing neighbors.",
+)
+def run_semantic_smoothing_ablation_cmd(
+    db_path: Path,
+    output_dir: Path,
+    alpha: float,
+    inferred_source_weight: float,
+    vector_source: str,
+):
+    """Run bounded semantic smoothing ablations for review."""
+
+    from subtitle_generator.tier_slot_distribution import run_semantic_smoothing_ablation
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_semantic_smoothing_ablation(
+            conn,
+            output_dir,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+            vector_source=vector_source,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Ran {result.experiment_count:,} smoothing experiments; "
+        f"metrics: {result.metrics_path}"
+    )
+    click.echo(f"Wrote smoothing report to {result.report_path}")
+
+
+@cli.command("run-semantic-smoothing-autoresearcher")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for semantic smoothing AutoResearcher artifacts.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--vector-source",
+    type=click.Choice(["offline_spacy", "db"]),
+    default="offline_spacy",
+    show_default=True,
+    help="Vector source for semantic smoothing neighbors.",
+)
+def run_semantic_smoothing_autoresearcher_cmd(
+    db_path: Path,
+    output_dir: Path,
+    alpha: float,
+    inferred_source_weight: float,
+    vector_source: str,
+):
+    """Run local AutoResearcher harvesting for semantic smoothing."""
+
+    from subtitle_generator.tier_slot_distribution import run_semantic_smoothing_autoresearcher
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_semantic_smoothing_autoresearcher(
+            conn,
+            output_dir,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+            vector_source=vector_source,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Wrote AutoResearcher report to {result.report_path}")
+    click.echo(f"Wrote next-round proposals to {result.proposals_path}")
+
+
+@cli.command("build-smoothing-review-feed")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("generated-artifacts/tier-slot-distribution"),
+    show_default=True,
+    help="Directory for the smoothing review feed (regenerable input).",
+)
+@click.option(
+    "--variant",
+    "variant_name",
+    default="knn10_m0_5_cap0_10",
+    show_default=True,
+    help="Smoothing experiment variant to surface candidates for.",
+)
+@click.option(
+    "--vector-source",
+    type=click.Choice(["offline_spacy", "db"]),
+    default="offline_spacy",
+    show_default=True,
+    help="Vector source for semantic smoothing neighbors.",
+)
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1),
+    default=60,
+    show_default=True,
+    help="Maximum number of candidate moves to surface.",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+def build_smoothing_review_feed_cmd(
+    db_path: Path,
+    output_dir: Path,
+    variant_name: str,
+    vector_source: str,
+    limit: int,
+    alpha: float,
+    inferred_source_weight: float,
+):
+    """Emit a candidate feed of smoothing moves for human review (analysis-only)."""
+
+    from subtitle_generator.tier_slot_distribution import build_smoothing_review_feed
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_smoothing_review_feed(
+            conn,
+            output_dir,
+            variant_name=variant_name,
+            vector_source=vector_source,
+            limit=limit,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.candidate_count:,} review candidates to {result.feed_path} "
+        f"(run_id {result.run_id}, variant {result.variant})."
+    )
+
+
+@cli.command("summarize-smoothing-ratings")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database holding smoothing_ratings.",
+)
+@click.option(
+    "--run-id",
+    default=None,
+    help="Scope the summary to a single review feed run_id.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional path to write the summary JSON.",
+)
+def summarize_smoothing_ratings_cmd(
+    db_path: Path,
+    run_id: str | None,
+    output_path: Path | None,
+):
+    """Aggregate smoothing ratings into the AutoResearcher / gate summary."""
+
+    import json
+
+    from subtitle_generator.smoothing_feedback import summarize_smoothing_ratings
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        summary = summarize_smoothing_ratings(conn, run_id=run_id)
+    finally:
+        conn.close()
+    payload = json.dumps(summary, indent=2)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(payload + "\n", encoding="utf-8")
+        click.echo(f"Wrote ratings summary to {output_path}")
+    click.echo(payload)
+
+
+@cli.command("ingest-smoothing-ratings")
+@click.option(
+    "--submission",
+    "submission_path",
+    type=click.Path(path_type=Path, exists=True),
+    required=True,
+    help="Review submission JSON written by the review canvas.",
+)
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to write smoothing_ratings into.",
+)
+@click.option(
+    "--decision-path",
+    type=click.Path(path_type=Path),
+    default=Path("feedback/step05-smoothing/decision.json"),
+    show_default=True,
+    help="Committed decision.json gate-evidence path.",
+)
+def ingest_smoothing_ratings_cmd(
+    submission_path: Path,
+    db_path: Path,
+    decision_path: Path,
+):
+    """Persist a review canvas submission: ratings -> DB, decision -> JSON."""
+
+    import json
+
+    from subtitle_generator.smoothing_feedback import ingest_submission
+
+    submission = json.loads(submission_path.read_text(encoding="utf-8"))
+    conn = sqlite3.connect(db_path)
+    try:
+        status = ingest_submission(conn, submission, decision_path=decision_path)
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(f"Invalid submission: {exc}") from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Stored {status['stored_ratings']:,} ratings (run_id {status['run_id']}, "
+        f"decision {status['decision']}); wrote {status['decision_path']}"
+    )
+
+
+_CALIBRATION_OUTPUT_DIR = Path("generated-artifacts/tier-slot-distribution")
+
+
+@cli.command("build-tier-slot-calibration")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR,
+    show_default=True,
+    help="Directory for calibrated side-by-side artifacts (never the served file).",
+)
+@click.option(
+    "--granularity",
+    type=click.Choice(["none", "global", "per_tier", "per_tier_slot"]),
+    default="per_tier",
+    show_default=True,
+    help="Temperature granularity; per_tier is the issue's first lever.",
+)
+@click.option(
+    "--folds",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Held-out cross-validation fold count over labeled sources.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=20260612,
+    show_default=True,
+    help="Deterministic seed for the source fold assignment (replayable).",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+@click.option(
+    "--artifact-version",
+    default="tier_slot_filler_distribution_v1",
+    show_default=True,
+    help="Version string written to calibrated distribution rows.",
+)
+def build_tier_slot_calibration_cmd(
+    db_path: Path,
+    output_dir: Path,
+    granularity: str,
+    folds: int,
+    seed: int,
+    alpha: float,
+    inferred_source_weight: float,
+    artifact_version: str,
+):
+    """Fit calibration temperatures and emit the calibrated side-by-side artifact."""
+
+    from subtitle_generator.tier_slot_calibration import (
+        CalibrationConfig,
+        build_tier_slot_calibration,
+    )
+
+    config = CalibrationConfig(
+        name=f"{granularity}_temperature",
+        granularity=granularity,
+        folds=folds,
+        seed=seed,
+        alpha=alpha,
+        inferred_source_weight=inferred_source_weight,
+        artifact_version=artifact_version,
+    )
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = build_tier_slot_calibration(conn, output_dir, config=config)
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Wrote {result.row_count:,} calibrated rows to {result.distribution_path}"
+    )
+    click.echo(f"Temperatures: {result.temperatures}")
+    click.echo(f"Wrote calibration metadata to {result.metadata_path}")
+    click.echo(f"Wrote calibration report to {result.report_path}")
+
+
+@cli.command("run-calibration-ablation")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR,
+    show_default=True,
+    help="Directory for calibration ablation artifacts.",
+)
+@click.option(
+    "--folds",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Held-out cross-validation fold count over labeled sources.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=20260612,
+    show_default=True,
+    help="Deterministic seed for the source fold assignment (replayable).",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+def run_calibration_ablation_cmd(
+    db_path: Path,
+    output_dir: Path,
+    folds: int,
+    seed: int,
+    alpha: float,
+    inferred_source_weight: float,
+):
+    """Sweep calibration granularities (none/global/per-tier/per-tier-slot)."""
+
+    from subtitle_generator.tier_slot_calibration import run_calibration_ablation
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_calibration_ablation(
+            conn,
+            output_dir,
+            folds=folds,
+            seed=seed,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(
+        f"Ran {result.experiment_count:,} calibration experiments; "
+        f"metrics: {result.metrics_path}"
+    )
+    click.echo(f"Wrote calibration ablation report to {result.report_path}")
+
+
+@cli.command("run-calibration-autoresearcher")
+@click.option(
+    "--db",
+    "db_path",
+    type=click.Path(path_type=Path),
+    default=DB_PATH,
+    show_default=True,
+    help="Full local SQLite database to read.",
+)
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR,
+    show_default=True,
+    help="Directory for calibration AutoResearcher artifacts.",
+)
+@click.option(
+    "--folds",
+    type=click.IntRange(min=2),
+    default=5,
+    show_default=True,
+    help="Held-out cross-validation fold count over labeled sources.",
+)
+@click.option(
+    "--seed",
+    type=int,
+    default=20260612,
+    show_default=True,
+    help="Deterministic seed for the source fold assignment (replayable).",
+)
+@click.option(
+    "--alpha",
+    type=click.FloatRange(min=0.0),
+    default=0.5,
+    show_default=True,
+    help="Dirichlet pseudocount used for the baseline distribution.",
+)
+@click.option(
+    "--inferred-source-weight",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Weight for inferred residual and unlabeled-source evidence.",
+)
+def run_calibration_autoresearcher_cmd(
+    db_path: Path,
+    output_dir: Path,
+    folds: int,
+    seed: int,
+    alpha: float,
+    inferred_source_weight: float,
+):
+    """Run the bounded calibration sweep, then propose the next config + packet."""
+
+    from subtitle_generator.tier_slot_calibration import run_calibration_autoresearcher
+
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+    except sqlite3.OperationalError as exc:
+        raise click.ClickException(f"Unable to open database read-only: {db_path}") from exc
+    try:
+        result = run_calibration_autoresearcher(
+            conn,
+            output_dir,
+            folds=folds,
+            seed=seed,
+            alpha=alpha,
+            inferred_source_weight=inferred_source_weight,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    finally:
+        conn.close()
+    click.echo(f"Wrote AutoResearcher report to {result.report_path}")
+    click.echo(f"Wrote next-round proposals to {result.proposals_path}")
+
+
+@cli.command("ingest-calibration-decision")
+@click.option(
+    "--submission",
+    "submission_path",
+    type=click.Path(path_type=Path, exists=True),
+    required=True,
+    help="Calibration sign-off submission JSON (accept/reject/iterate).",
+)
+@click.option(
+    "--decision-path",
+    type=click.Path(path_type=Path),
+    default=Path("feedback/step06-calibration/decision.json"),
+    show_default=True,
+    help="Committed decision.json gate-evidence path.",
+)
+@click.option(
+    "--metadata-path",
+    type=click.Path(path_type=Path),
+    default=_CALIBRATION_OUTPUT_DIR / "tier_slot_calibration_metadata.json",
+    show_default=True,
+    help="Calibration metadata the decision is tied to (temperatures + metrics).",
+)
+def ingest_calibration_decision_cmd(
+    submission_path: Path,
+    decision_path: Path,
+    metadata_path: Path,
+):
+    """Persist a calibration review sign-off to the committed decision.json."""
+
+    import json
+
+    from subtitle_generator.calibration_feedback import ingest_decision
+
+    submission = json.loads(submission_path.read_text(encoding="utf-8"))
+    try:
+        status = ingest_decision(
+            submission,
+            decision_path=decision_path,
+            metadata_path=metadata_path,
+        )
+    except (ValueError, KeyError) as exc:
+        raise click.ClickException(f"Invalid submission: {exc}") from exc
+    click.echo(
+        f"Recorded {status['decision']} decision ({status['granularity']}); "
+        f"wrote {status['decision_path']}"
+    )
 
 
 @cli.command("build-book-metadata")

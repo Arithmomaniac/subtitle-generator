@@ -2118,7 +2118,7 @@ wheels = [
 
 [[package]]
 name = "subtitle-generator"
-version = "0.11.7"
+version = "0.12.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

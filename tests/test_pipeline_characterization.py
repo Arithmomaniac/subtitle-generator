@@ -413,6 +413,180 @@ def test_schema_contract_validator_reports_stage_context(tmp_path):
         raise AssertionError("partial schema should not validate")
 
 
+def test_tier_slot_distribution_contract_validates_required_invariants():
+    from subtitle_generator.schema_contracts import (
+        TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS,
+        TIER_SLOT_FILLER_DISTRIBUTION_TABLE,
+        validate_schema,
+        validate_tier_slot_distribution,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE tier_slot_filler_distribution_v1 (
+            slot_type TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
+            probability REAL NOT NULL,
+            log_probability REAL NOT NULL,
+            soft_count REAL NOT NULL,
+            prior_count REAL NOT NULL,
+            evidence_count REAL NOT NULL,
+            source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
+            teacher_confidence_mean REAL,
+            frequency INTEGER NOT NULL,
+            popularity_score REAL,
+            semantic_smoothing_mass REAL NOT NULL,
+            calibration_temperature REAL NOT NULL,
+            artifact_version TEXT NOT NULL
+        );
+        INSERT INTO slot_fillers (id, slot_type, filler, freq)
+        VALUES
+            (1, 'list_item', 'Race', 10),
+            (2, 'list_item', 'Power', 8),
+            (3, 'action_noun', 'Rise', 6),
+            (4, 'action_noun', 'Fall', 4);
+        """
+    )
+    rows = []
+    for slot_type, filler_a, filler_b in [
+        ("list_item", "Race", "Power"),
+        ("action_noun", "Rise", "Fall"),
+    ]:
+        for tier in ["pop", "mainstream", "niche"]:
+            rows.extend([
+                (
+                    slot_type, tier, filler_a.casefold(), filler_a, 0.75,
+                    -0.287682072, 3.0, 0.2, 3.2, 3, 2, 1, 2.5,
+                    0.5, 0.9, 10, 0.5, 0.1, 1.0, "v1",
+                ),
+                (
+                    slot_type, tier, filler_b.casefold(), filler_b, 0.25,
+                    -1.386294361, 1.0, 0.2, 1.2, 1, 0, 1, 0.0,
+                    1.0, 0.8, 4, None, 0.1, 1.0, "v1",
+                ),
+            ])
+    conn.executemany(
+        f"INSERT INTO {TIER_SLOT_FILLER_DISTRIBUTION_TABLE} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        rows,
+    )
+
+    assert validate_schema(conn, TIER_SLOT_DISTRIBUTION_SCHEMA_CONTRACTS) == []
+    assert validate_tier_slot_distribution(conn) == []
+
+
+def test_tier_slot_distribution_contract_reports_bad_mass_and_unknown_fillers():
+    from subtitle_generator.schema_contracts import validate_tier_slot_distribution
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE tier_slot_filler_distribution_v1 (
+            slot_type TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
+            probability REAL NOT NULL,
+            log_probability REAL NOT NULL,
+            soft_count REAL NOT NULL,
+            prior_count REAL NOT NULL,
+            evidence_count REAL NOT NULL,
+            source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
+            teacher_confidence_mean REAL,
+            frequency INTEGER NOT NULL,
+            popularity_score REAL,
+            semantic_smoothing_mass REAL NOT NULL,
+            calibration_temperature REAL NOT NULL,
+            artifact_version TEXT NOT NULL
+        );
+        INSERT INTO slot_fillers (id, slot_type, filler, freq)
+        VALUES (1, 'list_item', 'Race', 10), (2, 'list_item', 'Power', 8);
+        INSERT INTO tier_slot_filler_distribution_v1 VALUES
+            ('list_item', 'pop', 'race', 'Race', 0.60, -0.51, 3.0, 0.0, 3.0, 3, 2, 1, 2.5, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'pop', 'unknown', 'Unknown', 0.30, -1.20, 1.0, 0.0, 1.0, 1, 0, 1, 0.0, 1.0, 0.8, 4, NULL, 0.0, 1.0, 'v1');
+        """
+    )
+
+    issues = validate_tier_slot_distribution(conn)
+
+    assert any(issue.column == "filler" for issue in issues)
+    assert any(issue.column == "probability" for issue in issues)
+    assert any("distribution support must match" in issue.message for issue in issues)
+
+
+def test_tier_slot_distribution_contract_reports_count_identity_mismatch():
+    from subtitle_generator.schema_contracts import validate_tier_slot_distribution
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE slot_fillers (
+            id INTEGER PRIMARY KEY,
+            slot_type TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            mode TEXT NOT NULL DEFAULT 'strict',
+            freq INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE tier_slot_filler_distribution_v1 (
+            slot_type TEXT NOT NULL,
+            tier TEXT NOT NULL,
+            filler TEXT NOT NULL,
+            display_filler TEXT NOT NULL,
+            probability REAL NOT NULL,
+            log_probability REAL NOT NULL,
+            soft_count REAL NOT NULL,
+            prior_count REAL NOT NULL,
+            evidence_count REAL NOT NULL,
+            source_count INTEGER NOT NULL,
+            anchored_source_count INTEGER NOT NULL,
+            inferred_source_count INTEGER NOT NULL,
+            anchored_soft_count REAL NOT NULL,
+            inferred_soft_count REAL NOT NULL,
+            teacher_confidence_mean REAL,
+            frequency INTEGER NOT NULL,
+            popularity_score REAL,
+            semantic_smoothing_mass REAL NOT NULL,
+            calibration_temperature REAL NOT NULL,
+            artifact_version TEXT NOT NULL
+        );
+        INSERT INTO slot_fillers (id, slot_type, filler, freq)
+        VALUES (1, 'list_item', 'Race', 10);
+        INSERT INTO tier_slot_filler_distribution_v1 VALUES
+            ('list_item', 'pop', 'race', 'Race', 1.0, 0.0, 3.0, 0.0, 3.0, 3, 1, 1, 1.0, 1.0, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'mainstream', 'race', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1'),
+            ('list_item', 'niche', 'race', 'Race', 1.0, 0.0, 0.5, 0.0, 0.5, 1, 0, 1, 0.0, 0.5, 0.9, 10, 0.5, 0.0, 1.0, 'v1');
+        """
+    )
+
+    issues = validate_tier_slot_distribution(conn)
+
+    assert any("source_count must equal anchored" in issue.message for issue in issues)
+
+
 def test_current_model_ids_and_tunable_defaults_are_characterized():
     from subtitle_generator.config import ALL_TUNABLE_PARAMS
     from subtitle_generator.jacket import DEFAULT_MODEL
@@ -1075,7 +1249,8 @@ def test_handle_generate_uses_configured_remix_defaults(tmp_path, monkeypatch):
     assert observed["allowed_tiers"] is None
     assert observed["remix_prob"] == 0.33
     assert observed["min_sim"] == 0.44
-    assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim"}
+    assert observed["runtime"].mode.value == "configured"
+    assert set(observed) == {"allowed_tiers", "remix_prob", "min_sim", "runtime"}
 
 
 def test_handle_jacket_dry_run_contract(tmp_path, monkeypatch):
@@ -1534,6 +1709,15 @@ def test_pipeline_validation_passes_for_minimal_ready_db(tmp_path):
 
     assert report.ok
     assert report.issues == ()
+
+    conn.execute(
+        "INSERT INTO config VALUES ('generation_runtime_mode', 'artifact')"
+    )
+    configured_report = validate_pipeline(conn)
+    assert any(
+        issue.check == "tier_slot_distribution"
+        for issue in configured_report.issues
+    )
 
 
 def test_pipeline_validation_reports_readiness_failures_without_generation():

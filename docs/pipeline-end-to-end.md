@@ -19,6 +19,7 @@ raw catalog records
   -> rich Torch teacher
   -> exportable Torch student
   -> filler-level pop/mainstream/niche scores
+  -> tier-conditioned filler distributions
   -> tracked CSVs
   -> mini DB
   -> CLI, local web, Azure Functions
@@ -40,7 +41,7 @@ generator weights existing strict fillers for a requested tier.
 | Remix | Recombining parts of a multi-word `of_object` to make a new final object while staying close to real source phrasing. |
 | Runtime config | Rows in the DB `config` table that tune generation behavior and are exported to `api\data\config.csv`. |
 | Teacher model | The rich offline Torch model trained with the broadest feature set. |
-| Student model | The exportable Torch model trained to imitate the teacher using durable/export-safe features. After rollup, the selected student's probabilities are the runtime weights in `slot_filler_model_scores`; there is no separate hidden runtime model. |
+| Student model | The exportable Torch model trained to imitate the teacher using durable/export-safe features. Its rollup is evidence for the tier-slot distribution and remains available to the legacy rollback path. |
 | Rollup | Aggregation from book-level predictions back onto filler-level scores. |
 
 ## 0. Runtime contract
@@ -50,31 +51,34 @@ The deployed generator has four responsibilities:
 | Responsibility | Runtime state | Effect |
 |---|---|---|
 | Filler universe | `slot_fillers` | Defines which source-derived fillers are allowed at all. |
-| Tier categorization | `slot_filler_model_scores` | Gives each filler `score_pop`, `score_mainstream`, and `score_niche`. |
-| Generation | `generate.py` | Samples strict fillers using frequency and the requested tier score. |
+| Tier-conditioned generation | `tier_slot_filler_distribution_v1` | Gives normalized `P(filler | tier, slot_type)` over the runtime-eligible strict universe. |
+| Legacy rollback | `slot_filler_model_scores` | Retains the old `score_pop`, `score_mainstream`, and `score_niche` path. |
+| Generation | `generate.py` | Chooses a tier, then samples each slot directly from its normalized distribution. |
 | Literal guardrail | `generate.py` | Blocks broken artifacts without blocking funny absurdity. |
 
-When model scores are present, requested tier `T` uses:
+The configured default is `generation_runtime_mode=artifact`. For requested tier
+`T` and slot type `S`, generation draws from:
 
 ```text
-weight = sqrt(freq) * max(score_T, 0.001)
+P(filler | T, S)
 ```
 
-In math notation, for filler `f` and requested tier `T`:
+The stored anchored probabilities already include evidence/prior shaping. Runtime
+does not multiply by frequency or reapply calibration. An explicit sampling
+temperature is the only optional policy transform, and its default is `1.0`.
 
-$$
-w(f, T) = \sqrt{\mathrm{freq}(f)} \cdot \max(s_T(f), 0.001)
-$$
+The old score path remains available with `--runtime legacy`, request body
+`{"runtime_mode":"legacy"}`, environment variable
+`SUBTITLE_GEN_RUNTIME_MODE=legacy`, or:
 
-If a local row has no usable model score, generation falls back to
-`sqrt(freq)`.
+```powershell
+uv run subtitle-gen set-runtime-default --mode legacy
+```
 
-Deployment is expected to include complete `slot_filler_model_scores.csv`
-coverage. If a local DB has no score table, generation can still sample by
-frequency, but requested-tier behavior depends on learned scores. Weight-wise,
-the deployed generator consumes the selected student rollup directly:
-`score_pop`, `score_mainstream`, and `score_niche` become the per-filler tier
-weights used by runtime sampling and tier evidence.
+Older databases without `generation_runtime_mode` stay on legacy. A database
+configured for artifact mode but missing the artifact temporarily falls back to
+legacy; an installed but invalid artifact fails validation rather than silently
+changing probability mass.
 
 The guardrail is intentionally narrow. It rejects literal artifacts such as bare
 adjective-shaped final objects (`Christian`), typo/acronym artifacts (`Imf`),
@@ -494,19 +498,21 @@ toward a broader pop/mainstream pool. That is desirable for generation because
 the deployed scores are sampling weights over strict fillers, not final claims
 about a book's market category.
 
-The student is "runtime-equivalent" weight-wise after rollup. The Torch file
-itself is not loaded by the deployed CLI/API, but its output probabilities are
-rolled onto fillers and installed as `slot_filler_model_scores`. Runtime then
-uses those installed probabilities directly:
+The Torch file itself is not loaded by the deployed CLI/API. Its output
+probabilities are rolled onto fillers and installed as
+`slot_filler_model_scores`, then combined with labeled-source confidence and
+priors to build the anchored runtime distribution:
 
 ```text
 student book probabilities
   -> average probabilities over source books linked to each strict filler
   -> slot_filler_model_scores.score_pop/mainstream/niche
-  -> generation weight sqrt(freq) * max(score_for_requested_tier, 0.001)
+  -> empirical-Bayes tier-slot evidence
+  -> tier_slot_filler_distribution_v1
 ```
 
-So a student refresh is a runtime-weight refresh, not a separate advisory report.
+The score table remains the legacy rollback input. A student refresh affects the
+default runtime only after rebuilding and reinstalling the tier-slot artifact.
 
 ## 11. Roll book predictions up to fillers
 
@@ -716,6 +722,9 @@ table is left intact.
 ## 15. Export tracked deployment CSVs and build the mini DB
 
 ```powershell
+uv run subtitle-gen build-tier-slot-distribution
+uv run subtitle-gen install-tier-slot-runtime `
+  --artifact generated-artifacts\tier-slot-distribution\tier_slot_filler_distribution_v1.csv
 uv run subtitle-gen export-data -o api\data
 uv run subtitle-gen build-db -d api\data -o api\data\subtitles.mini.db
 ```
@@ -725,7 +734,8 @@ Tracked deployment inputs:
 | File | Purpose |
 |---|---|
 | `api\data\slot_fillers.csv` | Strict filler inventory and runtime scalar state. |
-| `api\data\slot_filler_model_scores.csv` | Learned runtime tier probabilities. |
+| `api\data\tier_slot_filler_distribution_v1.csv` | Default anchored `P(filler | tier, slot_type)` runtime artifact. |
+| `api\data\slot_filler_model_scores.csv` | Learned tier probabilities retained as build evidence and rollback state. |
 | `api\data\sources.csv` | Source-book attribution. |
 | `api\data\config.csv` | Runtime configuration. |
 | `api\data\source_tier_labels.csv` | Offline source-label evidence for training/evaluation continuity. |
@@ -739,7 +749,9 @@ Ignored local/CI-built artifacts:
 
 If `slot_filler_model_scores.csv` exists, `build-db` requires one score row for
 every exported slot filler. Partial coverage is rejected so deployment cannot
-mix learned-tier sampling with unscored filler choices.
+mix learned-tier rollback sampling with unscored filler choices. When
+`generation_runtime_mode=artifact`, `build-db` also requires and validates the
+tier-slot distribution CSV.
 
 ## 16. Repeat the book-model path with the runner
 
@@ -761,7 +773,7 @@ pwsh -File scripts\run-book-model-pipeline.ps1 `
   -Steps Distill,Shadow,CategorizationGate
 
 pwsh -File scripts\run-book-model-pipeline.ps1 `
-  -Steps InstallScores,ExportData,BuildDb,Validate
+  -Steps InstallScores,TierSlotDistribution,InstallTierSlotRuntime,ExportData,BuildDb,Validate
 ```
 
 The runner defaults to the safe inventory step and executes requested steps in
@@ -783,16 +795,16 @@ Generation loads strict candidates for:
 | `action_noun` | One sampled action noun. |
 | `of_object` | One sampled final object, optionally remixed. |
 
-When complete model scores are present, generation uses the requested tier score
-as the sampling signal:
+The default runtime chooses the requested/default tier and samples directly from
+the installed normalized distribution for each slot:
 
 ```text
-weight = sqrt(freq) * max(score_for_requested_tier, 0.001)
+P(filler | requested_tier, slot_type)
 ```
 
-Equivalently:
-$w(f, T) = \sqrt{\mathrm{freq}(f)} \cdot \max(s_T(f), 0.001)$.
-Rows without a usable model score fall back to `sqrt(freq)`.
+This direct path intentionally avoids the legacy classifier-retry loop that
+caused catastrophic pop/mainstream repetition. `slot_filler_model_scores` and
+the `sqrt(freq) * score` formula are used only by explicit legacy rollback.
 
 `compute_tier_evidence()` classifies generated subtitles:
 

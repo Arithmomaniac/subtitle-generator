@@ -6,6 +6,7 @@ from pathlib import Path
 
 from subtitle_generator.extract import get_db
 from subtitle_generator.slots import (
+    _is_valid_action,
     _is_valid_object,
     _load_nlp,
     build_slots,
@@ -108,6 +109,15 @@ def test_object_validation_rejects_seo_style_function_word_starts():
     assert not _is_valid_object("For Skin Infection", nlp)
     assert not _is_valid_object("AIDS / Katie Hogan", nlp)
     assert _is_valid_object("Modern Life", nlp)
+
+
+def test_action_validation_rejects_proper_noun_institutions():
+    nlp = _load_nlp()
+
+    assert not _is_valid_action("U.S. House", nlp)
+    assert not _is_valid_action("Royal House", nlp)
+    assert _is_valid_action("Rise", nlp)
+    assert _is_valid_action("Making", nlp)
 
 
 def test_build_slots_tolerates_loc_only_database_without_openlibrary(tmp_path: Path):

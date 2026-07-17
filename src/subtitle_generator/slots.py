@@ -147,13 +147,17 @@ def _is_valid_action(phrase: str, nlp) -> bool:
     # Orthographic checks (can't express via POS)
     if any(_is_all_caps_noise(w) for w in phrase.split()):
         return False
+    doc = nlp(phrase)
+    # Action nouns should be processes/events, not named entities or institutions
+    # that happen to end with a whitelisted process-ish head.
+    if any(t.pos_ == "PROPN" for t in doc):
+        return False
     head = words[-1]
     if head in ACTION_WHITELIST:
         return True
     if any(head.endswith(s) for s in ACTION_SUFFIXES):
         return True
     # Check lemma via spaCy
-    doc = nlp(phrase)
     # Reject non-content tokens (quotes, parens, etc.)
     if any(t.pos_ == "PUNCT" and t.text != "-" for t in doc):
         return False
@@ -880,4 +884,3 @@ def _store_decomposition_config(conn: sqlite3.Connection):
         )
 
     conn.commit()
-

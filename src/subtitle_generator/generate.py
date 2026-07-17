@@ -3,7 +3,6 @@
 import json
 import math
 import random
-import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
@@ -17,14 +16,24 @@ from subtitle_generator.remix_state import (
     RemixRuntimeContext,
     assert_remix_precompute_state,
 )
+from subtitle_generator.runtime_eligibility import (
+    filter_runtime_eligible_rows,
+    is_runtime_eligible_strict_filler,
+)
+from subtitle_generator.shadow_runtime import (
+    GenerationRuntimeSelection,
+    PreparedGenerationRuntime,
+    RuntimeSelectionMode as RuntimeSelectionMode,
+    prepare_generation_runtime,
+    sample_shadow_candidates,
+    uses_tier_slot_distribution,
+)
 
 _inflect_engine = inflect.engine()
 MAX_TIER_FILTER_ATTEMPTS = 1000
 DEFAULT_GENERATION_TIER_ATTEMPTS = 25
 _DEFAULT_GENERATION_TIERS = ("pop", "mainstream", "niche")
 _MODEL_SCORE_INDEX = {"pop": 3, "mainstream": 4, "niche": 5}
-_BAD_ONE_WORD_OBJECTS = {"christian", "imf"}
-_BAD_STANDALONE_FILLERS = {"jr", "sr", "xcalibur"}
 
 
 class TierFilterError(RuntimeError):
@@ -57,6 +66,14 @@ class GeneratedSubtitle:
     remix_similarity: float | None = None
     of_article: str = ""
     action_article: str = "the"
+
+
+@dataclass(frozen=True)
+class TargetTierDraw:
+    """One deterministic first draw for an explicitly chosen target tier."""
+
+    subtitle: GeneratedSubtitle
+    target_tier: str
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,31 @@ def _weighted_sample(
         fillers.pop(idx)
         weights.pop(idx)
     return chosen
+
+
+def _sample_slot_rows(
+    slot_type: str,
+    rows: list[tuple],
+    count: int,
+    rng: random.Random | None,
+    *,
+    model_tier: str | None,
+    runtime: PreparedGenerationRuntime | None,
+) -> list[str]:
+    if runtime is not None and uses_tier_slot_distribution(runtime.mode):
+        if model_tier is None:
+            raise RuntimeError(
+                f"Shadow runtime requires an explicit tier for slot_type {slot_type!r}"
+            )
+        return sample_shadow_candidates(
+            runtime,
+            slot_type=slot_type,
+            tier=model_tier,
+            candidate_rows=rows,
+            count=count,
+            rng=rng,
+        )
+    return _weighted_sample(rows, count, rng, model_tier=model_tier)
 
 
 def _row_model_score(row: tuple, model_tier: str | None) -> float | None:
@@ -535,6 +577,7 @@ def compose_compound(
     ctx: dict,
     word_count: int,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> tuple[str, dict] | None:
     """Compose a Type 1 remixed of-object (modifier + head).
 
@@ -563,9 +606,17 @@ def compose_compound(
         ),
         (chosen_mod_pos, mod_space_count),
     ).fetchall()
+    mod_rows = _filter_shadow_generation_rows("of_modifier", mod_rows, runtime)
     if not mod_rows:
         return None
-    modifier = _weighted_sample(mod_rows, 1, rng, model_tier=model_tier)[0]
+    modifier = _sample_slot_rows(
+        "of_modifier",
+        mod_rows,
+        1,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
+    )[0]
 
     head_rows = conn.execute(
         _slot_sampling_select(
@@ -573,9 +624,17 @@ def compose_compound(
             include_model_scores=_has_model_scores(conn),
         ),
     ).fetchall()
+    head_rows = _filter_shadow_generation_rows("of_head", head_rows, runtime)
     if not head_rows:
         return None
-    head = _weighted_sample(head_rows, 1, rng, model_tier=model_tier)[0]
+    head = _sample_slot_rows(
+        "of_head",
+        head_rows,
+        1,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
+    )[0]
 
     composed = f"{modifier} {head}"
     parts = {"modifier": modifier, "head": head}
@@ -589,6 +648,7 @@ def compose_prepositional(
     prep: str,
     word_count: int,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> tuple[str, dict] | None:
     """Compose a Type 2 remixed of-object (topic + prep + complement).
 
@@ -602,9 +662,17 @@ def compose_prepositional(
         ),
         (prep,),
     ).fetchall()
+    topic_rows = _filter_shadow_generation_rows("of_topic", topic_rows, runtime)
     if not topic_rows:
         return None
-    topic = _weighted_sample(topic_rows, 1, rng, model_tier=model_tier)[0]
+    topic = _sample_slot_rows(
+        "of_topic",
+        topic_rows,
+        1,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
+    )[0]
 
     comp_rows = conn.execute(
         _slot_sampling_select(
@@ -613,9 +681,17 @@ def compose_prepositional(
         ),
         (prep,),
     ).fetchall()
+    comp_rows = _filter_shadow_generation_rows("of_complement", comp_rows, runtime)
     if not comp_rows:
         return None
-    complement = _weighted_sample(comp_rows, 1, rng, model_tier=model_tier)[0]
+    complement = _sample_slot_rows(
+        "of_complement",
+        comp_rows,
+        1,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
+    )[0]
 
     composed = f"{topic} {prep} {complement}"
 
@@ -782,7 +858,17 @@ def _slot_sampling_select(where: str, *, include_model_scores: bool) -> str:
 
 
 def _filter_generation_rows(slot_type: str, rows: list[tuple]) -> list[tuple]:
-    return [row for row in rows if not _is_literal_bad_filler(slot_type, row[0])]
+    return filter_runtime_eligible_rows(slot_type, rows)
+
+
+def _filter_shadow_generation_rows(
+    slot_type: str,
+    rows: list[tuple],
+    runtime: PreparedGenerationRuntime | None,
+) -> list[tuple]:
+    if runtime is not None and uses_tier_slot_distribution(runtime.mode):
+        return _filter_generation_rows(slot_type, rows)
+    return rows
 
 
 def _has_model_scores(conn: sqlite3.Connection) -> bool:
@@ -793,19 +879,7 @@ def _has_model_scores(conn: sqlite3.Connection) -> bool:
 
 
 def _is_literal_bad_filler(slot_type: str, filler: str) -> bool:
-    lower = (filler or "").strip().lower()
-    if not lower:
-        return True
-    if lower in _BAD_STANDALONE_FILLERS:
-        return True
-    if re.search(r",\s*(?:jr|sr)\.?$", lower):
-        return True
-    if slot_type == "of_object" and lower in _BAD_ONE_WORD_OBJECTS:
-        return True
-    # Artifact like H.G.W.ells: run-together initials followed by a lowercase tail.
-    if re.search(r"(?:[a-z]\.){2,}[a-z]", lower):
-        return True
-    return False
+    return not is_runtime_eligible_strict_filler(slot_type, filler)
 
 
 def _has_enough_candidates(
@@ -829,17 +903,31 @@ def _pick_list_items(
     list_rows: list[tuple],
     rng: random.Random | None,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> list[str]:
-    return _weighted_sample(list_rows, 2, rng, model_tier=model_tier)
+    return _sample_slot_rows(
+        "list_item",
+        list_rows,
+        2,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
+    )
 
 
 def _pick_action_noun(
     action_rows: list[tuple],
     rng: random.Random | None,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> str:
-    return _weighted_sample(
-        action_rows, 1, rng, model_tier=model_tier,
+    return _sample_slot_rows(
+        "action_noun",
+        action_rows,
+        1,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
     )[0]
 
 
@@ -850,11 +938,17 @@ def _pick_of_object_and_remix(
     remix_prob: float,
     min_sim: float,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> tuple[str, bool, dict, float | None]:
     remix_similarity = None
 
-    of_object = _weighted_sample(
-        obj_rows, 1, rng, model_tier=model_tier,
+    of_object = _sample_slot_rows(
+        "of_object",
+        obj_rows,
+        1,
+        rng,
+        model_tier=model_tier,
+        runtime=runtime,
     )[0]
     remixed = False
     remix_parts = {}
@@ -862,7 +956,14 @@ def _pick_of_object_and_remix(
     if remix_prob > 0 and len(of_object.split()) >= 2:
         should_remix = (rng or random).random() < remix_prob
         if should_remix:
-            result = _try_remix(conn, rng, of_object, min_sim, model_tier=model_tier)
+            result = _try_remix(
+                conn,
+                rng,
+                of_object,
+                min_sim,
+                model_tier=model_tier,
+                runtime=runtime,
+            )
             if result:
                 of_object, remix_parts, remix_similarity = result
                 remixed = True
@@ -877,13 +978,14 @@ def _select_subtitle_parts(
     remix_prob: float,
     min_sim: float,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> SelectedSubtitleParts:
-    items = _pick_list_items(candidates.list_rows, rng, model_tier)
+    items = _pick_list_items(candidates.list_rows, rng, model_tier, runtime)
     action_noun = _pick_action_noun(
-        candidates.action_rows, rng, model_tier,
+        candidates.action_rows, rng, model_tier, runtime,
     )
     of_object, remixed, remix_parts, remix_similarity = _pick_of_object_and_remix(
-        conn, candidates.obj_rows, rng, remix_prob, min_sim, model_tier,
+        conn, candidates.obj_rows, rng, remix_prob, min_sim, model_tier, runtime,
     )
     return SelectedSubtitleParts(
         items=items,
@@ -966,6 +1068,7 @@ def _generate_subtitle_from_candidates(
     remix_prob: float,
     min_sim: float,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
 ) -> GeneratedSubtitle:
     rng = _make_rng(seed)
     if not _has_enough_candidates(candidates):
@@ -978,6 +1081,7 @@ def _generate_subtitle_from_candidates(
         remix_prob,
         min_sim,
         model_tier,
+        runtime,
     )
     action_article, of_article = _resolve_articles(
         conn,
@@ -992,6 +1096,7 @@ def _generate_subtitle_from_candidates(
 def generate_subtitle(
     conn: sqlite3.Connection, seed: int | None = None,
     remix_prob: float = 0.0, min_sim: float = 0.0,
+    runtime: GenerationRuntimeSelection | PreparedGenerationRuntime | None = None,
 ) -> GeneratedSubtitle:
     """Generate one random subtitle in the 'X, Y, and the Z of W' pattern.
 
@@ -1002,13 +1107,19 @@ def generate_subtitle(
     if not _has_enough_candidates(candidates):
         return _not_enough_fillers_subtitle()
 
+    prepared_runtime = prepare_generation_runtime(conn, runtime)
+    model_tier = None
+    if uses_tier_slot_distribution(prepared_runtime.mode):
+        model_tier = _choose_default_generation_tier(conn, seed)
+
     return _generate_subtitle_from_candidates(
         conn,
         candidates,
         seed=seed,
         remix_prob=remix_prob,
         min_sim=min_sim,
-        model_tier=None,
+        model_tier=model_tier,
+        runtime=prepared_runtime,
     )
 
 
@@ -1019,12 +1130,14 @@ def generate_subtitles(
     seed_base: int | None = 1000,
     remix_prob: float = 0.0,
     min_sim: float = 0.0,
+    runtime: GenerationRuntimeSelection | PreparedGenerationRuntime | None = None,
 ) -> list[GeneratedSubtitle]:
     """Generate a batch from one source candidate snapshot."""
 
     candidates = _load_generation_candidates(conn)
     if not _has_enough_candidates(candidates):
         return [_not_enough_fillers_subtitle() for _ in range(n)]
+    prepared_runtime = prepare_generation_runtime(conn, runtime)
 
     return [
         _generate_subtitle_from_candidates(
@@ -1033,7 +1146,15 @@ def generate_subtitles(
             seed=seed_base + i if seed_base is not None else None,
             remix_prob=remix_prob,
             min_sim=min_sim,
-            model_tier=None,
+            model_tier=(
+                _choose_default_generation_tier(
+                    conn,
+                    seed_base + i if seed_base is not None else None,
+                )
+                if uses_tier_slot_distribution(prepared_runtime.mode)
+                else None
+            ),
+            runtime=prepared_runtime,
         )
         for i in range(n)
     ]
@@ -1105,6 +1226,52 @@ def _choose_generation_tier(
     )[0]
 
 
+def generate_subtitle_first_draw_for_tier(
+    conn: sqlite3.Connection,
+    *,
+    allowed_tiers: set[str] | None,
+    seed: int | None = None,
+    remix_prob: float = 0.0,
+    min_sim: float = 0.0,
+    runtime: GenerationRuntimeSelection | PreparedGenerationRuntime | None = None,
+) -> TargetTierDraw:
+    """Generate exactly one draw for one chosen target tier, with no classifier retry.
+
+    This is explicit evaluation tooling so legacy and shadow runtimes can be
+    compared under the same "choose a target tier, then take one draw" semantics.
+    It preserves the public/default generation behavior because callers must opt
+    into it directly instead of going through ``generate_subtitle_matching_tiers``.
+    """
+
+    prepared_runtime = prepare_generation_runtime(conn, runtime)
+    if not allowed_tiers:
+        target_tier = _choose_generation_tier(
+            conn,
+            allowed_tiers=set(_DEFAULT_GENERATION_TIERS),
+            seed=seed,
+        )
+    elif len(allowed_tiers) > 1:
+        target_tier = _choose_generation_tier(
+            conn,
+            allowed_tiers=allowed_tiers,
+            seed=seed,
+        )
+    else:
+        target_tier = next(iter(allowed_tiers))
+
+    candidates = _load_generation_candidates(conn)
+    subtitle = _generate_subtitle_from_candidates(
+        conn,
+        candidates,
+        seed=seed,
+        remix_prob=remix_prob,
+        min_sim=min_sim,
+        model_tier=target_tier if _has_model_scores(conn) else None,
+        runtime=prepared_runtime,
+    )
+    return TargetTierDraw(subtitle=subtitle, target_tier=target_tier)
+
+
 def generate_subtitle_matching_tiers(
     conn: sqlite3.Connection,
     *,
@@ -1113,8 +1280,36 @@ def generate_subtitle_matching_tiers(
     remix_prob: float = 0.0,
     min_sim: float = 0.0,
     max_attempts: int = MAX_TIER_FILTER_ATTEMPTS,
+    runtime: GenerationRuntimeSelection | PreparedGenerationRuntime | None = None,
 ) -> GeneratedSubtitle:
     """Generate a subtitle whose evidence tier satisfies the requested filter."""
+
+    prepared_runtime = prepare_generation_runtime(conn, runtime)
+    if uses_tier_slot_distribution(prepared_runtime.mode):
+        if not allowed_tiers:
+            chosen_tier = _choose_generation_tier(
+                conn,
+                allowed_tiers=set(_DEFAULT_GENERATION_TIERS),
+                seed=seed,
+            )
+        elif len(allowed_tiers) > 1:
+            chosen_tier = _choose_generation_tier(
+                conn,
+                allowed_tiers=allowed_tiers,
+                seed=seed,
+            )
+        else:
+            chosen_tier = next(iter(allowed_tiers))
+        candidates = _load_generation_candidates(conn)
+        return _generate_subtitle_from_candidates(
+            conn,
+            candidates,
+            seed=seed,
+            remix_prob=remix_prob,
+            min_sim=min_sim,
+            model_tier=chosen_tier,
+            runtime=prepared_runtime,
+        )
 
     default_tier_sequence: list[str] | None = None
     if not allowed_tiers:
@@ -1162,6 +1357,7 @@ def generate_subtitle_matching_tiers(
                 remix_prob=remix_prob,
                 min_sim=min_sim,
                 model_tier=requested_tier if _has_model_scores(conn) else None,
+                runtime=prepared_runtime,
             )
             tier = compute_tier_evidence(
                 subtitle.text,
@@ -1181,6 +1377,7 @@ def generate_subtitle_matching_tiers(
             seed_base=seed,
             remix_prob=remix_prob,
             min_sim=min_sim,
+            runtime=prepared_runtime,
         )[0]
     requested = ", ".join(sorted(allowed_tiers))
     suffix = f"; last generated tier was {last_tier}" if last_tier else ""
@@ -1200,6 +1397,7 @@ def generate_subtitles_by_tier(
     remix_prob: float = 0.0,
     min_sim: float = 0.0,
     max_attempts: int = MAX_TIER_FILTER_ATTEMPTS,
+    runtime: GenerationRuntimeSelection | PreparedGenerationRuntime | None = None,
 ) -> dict[str, list[GeneratedSubtitle]]:
     """Generate a shared candidate pool until each requested tier has enough samples."""
 
@@ -1215,6 +1413,26 @@ def generate_subtitles_by_tier(
             tier: [_not_enough_fillers_subtitle() for _ in range(samples_per_tier)]
             for tier in requested_tiers
         }
+    prepared_runtime = prepare_generation_runtime(conn, runtime)
+    if uses_tier_slot_distribution(prepared_runtime.mode):
+        for tier in requested_tiers:
+            for index in range(samples_per_tier):
+                buckets[tier].append(
+                    _generate_subtitle_from_candidates(
+                        conn,
+                        candidates,
+                        seed=(
+                            seed + (requested_tiers.index(tier) * samples_per_tier) + index
+                            if seed is not None
+                            else None
+                        ),
+                        remix_prob=remix_prob,
+                        min_sim=min_sim,
+                        model_tier=tier,
+                        runtime=prepared_runtime,
+                    )
+                )
+        return buckets
     observed_tiers: Counter[str] = Counter()
     last_tier: str | None = None
 
@@ -1234,6 +1452,7 @@ def generate_subtitles_by_tier(
             remix_prob=remix_prob,
             min_sim=min_sim,
             model_tier=target_tier if _has_model_scores(conn) else None,
+            runtime=prepared_runtime,
         )
         tier = compute_tier_evidence(
             subtitle.text,
@@ -1275,6 +1494,7 @@ def _try_remix(
     original_of_object: str,
     min_sim: float,
     model_tier: str | None = None,
+    runtime: PreparedGenerationRuntime | None = None,
     max_retries: int = 5,
 ) -> tuple[str, dict, float | None] | None:
     """Attempt to remix an of-object.
@@ -1320,12 +1540,23 @@ def _try_remix(
         if classification[0] == "type1":
             _, word_count = classification
             result = compose_compound(
-                conn, rng, ctx, word_count, model_tier=model_tier,
+                conn,
+                rng,
+                ctx,
+                word_count,
+                model_tier=model_tier,
+                runtime=runtime,
             )
         else:
             _, prep, word_count = classification
             result = compose_prepositional(
-                conn, rng, ctx, prep, word_count, model_tier=model_tier,
+                conn,
+                rng,
+                ctx,
+                prep,
+                word_count,
+                model_tier=model_tier,
+                runtime=runtime,
             )
 
         if result is None:
