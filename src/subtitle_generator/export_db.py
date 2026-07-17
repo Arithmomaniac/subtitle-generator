@@ -313,6 +313,7 @@ def build_mini_db(data_dir: Path, output_path: Path) -> dict:
         conn.execute("VACUUM")
         conn.close()
         conn = None
+        os.chmod(temp_path, 0o644)
         os.replace(temp_path, output_path)
         return stats
     except Exception:

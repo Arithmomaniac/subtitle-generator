@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import random
 import sqlite3
 import subprocess
@@ -1047,7 +1048,10 @@ def test_build_mini_db_preserves_existing_output_on_invalid_shadow_import(tmp_pa
     assert list(tmp_path.glob("mini-*.tmp.db")) == []
 
 
-def test_build_mini_db_replaces_existing_output_atomically_on_success(tmp_path):
+def test_build_mini_db_replaces_existing_output_atomically_on_success(
+    tmp_path,
+    monkeypatch,
+):
     conn = _make_shadow_runtime_db(tmp_path / "runtime.db")
     data_dir = tmp_path / "data"
     export_data(conn, data_dir)
@@ -1058,6 +1062,17 @@ def test_build_mini_db_replaces_existing_output_atomically_on_success(tmp_path):
     )
     mini_db_path = tmp_path / "mini.db"
     mini_db_path.write_bytes(b"stale-mini-db")
+    chmod_calls = []
+    real_chmod = os.chmod
+
+    def recording_chmod(path, mode):
+        chmod_calls.append((Path(path), mode))
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(
+        "subtitle_generator.export_db.os.chmod",
+        recording_chmod,
+    )
 
     build_stats = build_mini_db(data_dir, mini_db_path)
     rebuilt = sqlite3.connect(mini_db_path)
@@ -1071,6 +1086,7 @@ def test_build_mini_db_replaces_existing_output_atomically_on_success(tmp_path):
     assert mini_db_path.read_bytes() != b"stale-mini-db"
     assert build_stats[TIER_SLOT_FILLER_DISTRIBUTION_TABLE] == len(shadow_rows)
     assert shadow_count == len(shadow_rows)
+    assert chmod_calls and chmod_calls[-1][1] == 0o644
 
 
 def test_build_mini_db_rejects_artifact_default_without_distribution(tmp_path):
