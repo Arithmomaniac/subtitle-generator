@@ -551,6 +551,29 @@ def test_csv_artifact_allows_blank_optional_numeric_values(tmp_path):
     assert prepared.shadow_distribution is not None
 
 
+def test_csv_artifact_allows_integer_valued_decimal_count_fields(tmp_path):
+    conn = _make_shadow_runtime_db()
+    rows = _distribution_rows()
+    for field in (
+        "source_count",
+        "anchored_source_count",
+        "inferred_source_count",
+        "frequency",
+    ):
+        rows[0][field] = f"{rows[0][field]}.0"
+    artifact = _write_shadow_artifact(
+        tmp_path / "tier_slot_filler_distribution_v1.csv",
+        rows,
+    )
+
+    prepared = prepare_generation_runtime(
+        conn,
+        build_generation_runtime(mode="artifact", shadow_artifact=artifact),
+    )
+
+    assert prepared.shadow_distribution is not None
+
+
 def test_file_database_reuses_cached_validated_distribution(tmp_path):
     clear_distribution_cache()
     db_path = tmp_path / "runtime.db"

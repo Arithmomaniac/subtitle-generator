@@ -672,9 +672,15 @@ def _insert_distribution_rows(
                 float(row["soft_count"]),
                 float(row["prior_count"]),
                 float(row["evidence_count"]),
-                int(row["source_count"]),
-                int(row["anchored_source_count"]),
-                int(row["inferred_source_count"]),
+                _parse_integer_field(row["source_count"], "source_count"),
+                _parse_integer_field(
+                    row["anchored_source_count"],
+                    "anchored_source_count",
+                ),
+                _parse_integer_field(
+                    row["inferred_source_count"],
+                    "inferred_source_count",
+                ),
                 float(row["anchored_soft_count"]),
                 float(row["inferred_soft_count"]),
                 (
@@ -682,7 +688,7 @@ def _insert_distribution_rows(
                     if row.get("teacher_confidence_mean") not in {None, ""}
                     else None
                 ),
-                int(row["frequency"]),
+                _parse_integer_field(row["frequency"], "frequency"),
                 (
                     float(row["popularity_score"])
                     if row.get("popularity_score") not in {None, ""}
@@ -695,6 +701,18 @@ def _insert_distribution_rows(
             for row in rows
         ],
     )
+
+
+def _parse_integer_field(value: object, column: str) -> int:
+    try:
+        numeric_value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"Runtime artifact field {column!r} must be numeric") from exc
+    if not math.isfinite(numeric_value) or not numeric_value.is_integer():
+        raise RuntimeError(
+            f"Runtime artifact field {column!r} must be a finite integer"
+        )
+    return int(numeric_value)
 
 
 def _read_distribution_table(
