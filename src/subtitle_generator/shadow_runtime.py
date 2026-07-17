@@ -10,6 +10,7 @@ import sqlite3
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
 
@@ -704,11 +705,12 @@ def _insert_distribution_rows(
 
 
 def _parse_integer_field(value: object, column: str) -> int:
+    text = value.decode() if isinstance(value, bytes) else str(value)
     try:
-        numeric_value = float(value)
-    except (TypeError, ValueError) as exc:
+        numeric_value = Decimal(text)
+    except (InvalidOperation, UnicodeDecodeError) as exc:
         raise RuntimeError(f"Runtime artifact field {column!r} must be numeric") from exc
-    if not math.isfinite(numeric_value) or not numeric_value.is_integer():
+    if not numeric_value.is_finite() or numeric_value != numeric_value.to_integral_value():
         raise RuntimeError(
             f"Runtime artifact field {column!r} must be a finite integer"
         )

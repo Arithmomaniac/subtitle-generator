@@ -20,6 +20,7 @@ from subtitle_generator.shadow_runtime import (
     RuntimeSelectionMode,
     build_generation_runtime,
     clear_distribution_cache,
+    _parse_integer_field,
     install_tier_slot_distribution,
     prepare_generation_runtime,
     sample_shadow_candidates,
@@ -572,6 +573,7 @@ def test_csv_artifact_allows_integer_valued_decimal_count_fields(tmp_path):
     )
 
     assert prepared.shadow_distribution is not None
+    assert _parse_integer_field("9007199254740993", "frequency") == 9007199254740993
 
 
 def test_file_database_reuses_cached_validated_distribution(tmp_path):
